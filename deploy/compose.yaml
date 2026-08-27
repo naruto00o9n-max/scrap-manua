@@ -1,0 +1,29 @@
+services:
+  suwayomi:
+    image: ghcr.io/suwayomi/suwayomi-server:stable
+    restart: unless-stopped
+    ports:
+      - "4567:4567"
+    environment:
+      TZ: ${TZ:-UTC}
+    volumes:
+      - suwayomi-data:/home/suwayomi/.local/share/Tachidesk
+
+  manga-drive-bot:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - suwayomi
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      SUWAYOMI_BASE_URL: http://suwayomi:4567
+    env_file:
+      - ../.env
+
+volumes:
+  suwayomi-data:

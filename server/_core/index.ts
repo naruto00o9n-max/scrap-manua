@@ -8,6 +8,9 @@ import { registerStorageProxy } from "./storageProxy";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
+import { startDiscordBot } from "../services/discordBot";
+import { startJobWorker } from "../services/jobWorker";
+import { isMonitorRequestAuthorized, runIntegrationMonitor } from "../services/monitoring";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -36,6 +39,20 @@ async function startServer() {
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
   registerStorageProxy(app);
   registerOAuthRoutes(app);
+  app.get("/api/healthz", (_req, res) => {
+    res.status(200).json({ ok: true, service: "manga-drive-discord-bot" });
+  });
+  app.post("/api/internal/run-monitor", async (req, res) => {
+    if (!isMonitorRequestAuthorized(req.header("x-monitor-token"))) return res.status(404).json({ error: "not_found" });
+    try {
+      const results = await runIntegrationMonitor();
+      const healthy = results.every(result => result.healthy);
+      return res.status(healthy ? 200 : 503).json({ ok: healthy, results });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "تعذر تنفيذ فحص التكاملات.";
+      return res.status(500).json({ error: message, timestamp: new Date().toISOString() });
+    }
+  });
   // tRPC API
   app.use(
     "/api/trpc",
@@ -60,6 +77,8 @@ async function startServer() {
 
   server.listen(port, () => {
     console.log(`Server running on http://localhost:${port}/`);
+    startJobWorker();
+    void startDiscordBot().catch(error => console.error("[Discord] Failed to start", error));
   });
 }
 
