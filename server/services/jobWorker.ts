@@ -18,6 +18,7 @@ import { sendJobUpdate, sendOwnerAlert } from "./discordBot";
 import { GoogleDriveClient, GoogleDriveError } from "./googleDrive";
 import { getUsableSuwayomiToken } from "./settings";
 import { SuwayomiClient } from "./suwayomi";
+import { mergeChapterPages } from "./imageMerging";
 import { recordOwnerAlert } from "./alerts";
 
 let isDraining = false;
@@ -56,13 +57,15 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
 
     const fetched = await suwayomi.fetchChapterPages(chapter.id);
     if (!fetched.pages.length) throw new Error("لم يعد Suwayomi أي صفحات قابلة للرفع لهذا الفصل.");
+    const mergedImages = await mergeChapterPages(fetched.pages);
+    if (!mergedImages.length) throw new Error("تعذر دمج صفحات الفصل في صور قابلة للرفع.");
     await setJobChapterDetails(job.id, {
       sourceChapterId: String(chapter.id),
       mangaTitle: fetched.chapter.manga.title,
       chapterTitle: fetched.chapter.name,
-      totalPages: fetched.pages.length,
+      totalPages: mergedImages.length,
     });
-    await addJobAttempt(job.id, "downloading", `استلم Suwayomi ${fetched.pages.length} صفحة من المصدر المصرح به.`);
+    await addJobAttempt(job.id, "downloading", `استلم Suwayomi ${fetched.pages.length} صفحة ودمجها في ${mergedImages.length} صور طويلة غير خسارية.`);
 
     const drive = new GoogleDriveClient();
     const sharingMode = await getSetting("google_drive_sharing_mode") ?? "link_reader";
@@ -76,9 +79,9 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
     await markJobUploading(job.id, folder.id, folder.url);
     await addJobAttempt(job.id, "uploading", "أُنشئ مجلد Google Drive وبدأ رفع الصور المرتبة.");
 
-    for (let offset = 0; offset < fetched.pages.length; offset += 1) {
-      const pageUrl = fetched.pages[offset];
-      if (!pageUrl) continue;
+    for (let offset = 0; offset < mergedImages.length; offset += 1) {
+      const mergedImage = mergedImages[offset];
+      if (!mergedImage) continue;
       const latest = await getChapterJob(job.id);
       if (latest?.cancelRequested) {
         await addJobAttempt(job.id, "cancelled", "أُلغي الطلب قبل اكتمال رفع جميع الصفحات.");
@@ -86,14 +89,14 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
         return;
       }
       const pageNumber = offset + 1;
-      await drive.uploadPage(pageUrl, folder.id, pageNumber);
+      await drive.uploadMergedPage(mergedImage.data, folder.id, pageNumber);
       await updateJobUploadProgress(job.id, pageNumber);
     }
 
     await markJobCompleted(job.id);
-    await addJobAttempt(job.id, "completed", `اكتمل رفع ${fetched.pages.length} صفحة إلى Google Drive.`);
+    await addJobAttempt(job.id, "completed", `اكتمل رفع ${mergedImages.length} صورة طويلة مدمجة إلى Google Drive.`);
     await saveIntegrationHealth("job-worker", "healthy", "آخر مهمة اكتملت بنجاح.");
-    await sendJobUpdate(job.requestedInChannelId, job.requestedByDiscordId, { jobId: job.id, status: "completed", title: "اكتمل حفظ الفصل", description: "اكتمل رفع الصفحات بالترتيب إلى Google Drive.", pageCount: fetched.pages.length, driveUrl: folder.url });
+    await sendJobUpdate(job.requestedInChannelId, job.requestedByDiscordId, { jobId: job.id, status: "completed", title: "اكتمل حفظ الفصل", description: "اكتمل دمج الصفحات ورفع الصور الطويلة بالترتيب إلى Google Drive.", pageCount: mergedImages.length, driveUrl: folder.url });
   } catch (error) {
     const message = describeError(error);
     await markJobFailed(job.id, "PROCESSING_FAILED", message);

@@ -119,6 +119,22 @@ export class GoogleDriveClient {
     return { id: chapterFolder.id, url: `https://drive.google.com/drive/folders/${chapterFolder.id}` };
   }
 
+  async uploadMergedPage(data: Buffer, folderId: string, imageIndex: number): Promise<void> {
+    if (!data.length || data.length > MAX_PAGE_SIZE_BYTES) throw new GoogleDriveError("حجم الصورة المدمجة غير صالح.");
+    const filename = buildPageFilename(imageIndex, "image/png");
+    const existing = await this.drive.files.list({
+      q: `'${escapeDriveQuery(folderId)}' in parents and name = '${escapeDriveQuery(filename)}' and trashed = false`,
+      fields: "files(id)",
+      pageSize: 1,
+    });
+    if (existing.data.files?.[0]?.id) return;
+    await this.drive.files.create({
+      requestBody: { name: filename, parents: [folderId] },
+      media: { mimeType: "image/png", body: Readable.from(data) },
+      fields: "id",
+    });
+  }
+
   async uploadPage(pageUrl: string, folderId: string, pageIndex: number): Promise<void> {
     const url = assertSafePageUrl(pageUrl);
     const response = await fetch(url, { redirect: "error", signal: AbortSignal.timeout(45_000) });
