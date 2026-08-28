@@ -12,6 +12,11 @@ describe("Suwayomi source lookup helpers", () => {
     expect(sourceSearchQueryFromChapterUrl(chapter)).toBe("surviving the game as a barbarian");
   });
 
+  it("derives Naver's indexed manga URL from a detail URL", () => {
+    expect(mangaUrlFromChapterUrl("https://comic.naver.com/webtoon/detail?titleId=799837&no=156&week=fri"))
+      .toBe("https://comic.naver.com/webtoon/list?titleId=799837");
+  });
+
   it("declines unsupported URL structures", () => {
     expect(mangaUrlFromChapterUrl("https://asurascans.com/comics/title")).toBeNull();
   });

@@ -30,14 +30,22 @@ export type SuwayomiManga = {
 
 function normalizedUrl(value: string): string {
   const parsed = new URL(value);
-  parsed.search = "";
   parsed.hash = "";
   parsed.hostname = parsed.hostname.replace(/^www\./, "");
+  if (parsed.hostname === "comic.naver.com") {
+    parsed.searchParams.delete("week");
+  } else {
+    parsed.search = "";
+  }
   return parsed.toString().replace(/\/$/, "");
 }
 
 export function mangaUrlFromChapterUrl(chapterUrl: string): string | null {
   const parsed = new URL(chapterUrl);
+  if (parsed.hostname.replace(/^www\./, "") === "comic.naver.com" && parsed.pathname === "/webtoon/detail") {
+    const titleId = parsed.searchParams.get("titleId");
+    return titleId ? `${parsed.origin}/webtoon/list?titleId=${encodeURIComponent(titleId)}` : null;
+  }
   const match = parsed.pathname.match(/^(.*)\/chapter\/[^/]+\/?$/i);
   if (!match?.[1]) return null;
   return `${parsed.origin}${match[1]}`;
@@ -57,6 +65,10 @@ export function sourceSearchQueryFromChapterUrl(chapterUrl: string): string | nu
 
 function normalizedTitle(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function absoluteUrl(value: string, baseUrl: string): string {
+  return new URL(value, baseUrl).toString();
 }
 
 export function resolveSuwayomiPageUrl(rawPageUrl: string, suwayomiBaseUrl: string): string {
@@ -131,6 +143,16 @@ export class SuwayomiClient {
     return byUrl.chapters.nodes[0] ?? null;
   }
 
+  private async findMangaByUrl(mangaUrl: string): Promise<SuwayomiManga | null> {
+    const parsed = new URL(mangaUrl);
+    const relativeUrl = `${parsed.pathname}${parsed.search}`;
+    const result = await this.request<{ mangas: { nodes: SuwayomiManga[] } }>(
+      "query FindMangaByUrl($url: String!) { mangas(condition: { url: $url }, first: 1) { nodes { id title url realUrl sourceId } } }",
+      { url: relativeUrl },
+    );
+    return result.mangas.nodes[0] ?? null;
+  }
+
   private async searchSourceManga(sourceId: string, query: string): Promise<SuwayomiManga[]> {
     const result = await this.request<{ fetchSourceManga: { mangas: SuwayomiManga[] } }>(
       "mutation FetchSourceManga($input: FetchSourceMangaInput!) { fetchSourceManga(input: $input) { mangas { id title url realUrl sourceId } } }",
@@ -153,20 +175,25 @@ export class SuwayomiClient {
 
     const mangaUrl = mangaUrlFromChapterUrl(chapterUrl);
     const searchQuery = sourceSearchQueryFromChapterUrl(chapterUrl);
-    if (!mangaUrl || !searchQuery) return null;
+    if (!mangaUrl) return null;
 
-    const mangaCandidates = await this.searchSourceManga(sourceId, searchQuery);
+    const directManga = await this.findMangaByUrl(mangaUrl);
+    const mangaCandidates = directManga ? [directManga] : searchQuery ? await this.searchSourceManga(sourceId, searchQuery) : [];
     const targetMangaUrl = normalizedUrl(mangaUrl);
-    const manga = mangaCandidates.find(candidate => {
-      const candidateUrl = candidate.realUrl || candidate.url;
+    const mangaByUrl = mangaCandidates.find(candidate => {
+      const candidateUrl = absoluteUrl(candidate.realUrl || candidate.url, mangaUrl);
       try { return normalizedUrl(candidateUrl) === targetMangaUrl; } catch { return false; }
-    }) ?? mangaCandidates.find(candidate => normalizedTitle(candidate.title) === normalizedTitle(searchQuery));
+    });
+    const mangaByTitle = searchQuery
+      ? mangaCandidates.find(candidate => normalizedTitle(candidate.title) === normalizedTitle(searchQuery))
+      : undefined;
+    const manga = directManga ?? mangaByUrl ?? mangaByTitle;
     if (!manga) return null;
 
     const chapters = await this.fetchMangaAndChapters(manga.id);
     const targetChapterUrl = normalizedUrl(chapterUrl);
     return chapters.find(chapter => {
-      const candidateUrl = chapter.realUrl || chapter.url;
+      const candidateUrl = absoluteUrl(chapter.realUrl || chapter.url, chapterUrl);
       try { return normalizedUrl(candidateUrl) === targetChapterUrl; } catch { return false; }
     }) ?? null;
   }

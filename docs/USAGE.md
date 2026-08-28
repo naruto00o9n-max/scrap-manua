@@ -50,3 +50,9 @@
 [2] [Suwayomi Server GraphQL Schema](https://github.com/Suwayomi/Suwayomi-VUI/blob/main/schema.graphql)
 
 [3] [Google Drive API Permissions](https://developers.google.com/workspace/drive/api/guides/manage-sharing)
+
+## ملاحظة خاصة بروابط Naver
+
+رابط Naver من نوع `webtoon/detail?titleId=...&no=...` لا يحتوي مسار `/chapter/` المعتاد، لذلك كان الإصدار السابق يرفضه قبل الوصول إلى Suwayomi. أصبح المسار الآن يستخرج `titleId`، يبحث عن رابط قائمة العمل داخل فهرس Suwayomi، ثم يطابق الحلقة عبر `realUrl` الذي تعيده إضافة Naver الرسمية. لا يستخدم البوت scraper أو وصولًا مباشرًا لتجاوز حماية Naver.
+
+تم اختبار الرابط `https://comic.naver.com/webtoon/detail?titleId=799837&no=156&week=fri` حيًا عبر خادم Suwayomi على Railway. حُلّت الحلقة إلى العمل `사신` والحلقة `155화` بالمعرّف `798`، ثم استُلمت 77 صفحة ورُفعت كاملة إلى Google Drive، وأصبحت المهمة `completed` برابط مجلد: `https://drive.google.com/drive/folders/1JdXw6lbvQ1rFfyOsk3uFuUKwaFNZwjaz`.
