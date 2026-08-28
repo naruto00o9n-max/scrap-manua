@@ -24,6 +24,14 @@ describe("chapter image merging", () => {
     vi.unstubAllGlobals();
   });
 
+  it("keeps pages over 1000px standalone unless a valid 1400-1800px group is possible", async () => {
+    const buffers = [await image(900, 1200, "#555555"), await image(900, 600, "#666666")];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string) => new Response(buffers.shift(), { status: 200, headers: { "content-type": "image/png" } })));
+    const output = await mergeChapterPages(["https://pages.test/long", "https://pages.test/short"]);
+    expect(output.map(item => item.height)).toEqual([1200, 600]);
+    vi.unstubAllGlobals();
+  });
+
   it("keeps a single page intact when it is taller than the target range", async () => {
     const buffer = await image(900, 2400, "#444444");
     vi.stubGlobal("fetch", vi.fn(async () => new Response(buffer, { status: 200, headers: { "content-type": "image/png" } })));

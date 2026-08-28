@@ -17,15 +17,38 @@ async function downloadPage(url: string, index: number): Promise<Buffer> {
   if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.hostname === "localhost") {
     throw new Error(`رابط الصفحة ${index} غير آمن.`);
   }
-  const response = await fetch(parsed, { redirect: "error", signal: AbortSignal.timeout(45_000) });
-  if (!response.ok) throw new Error(`تعذر تنزيل الصفحة ${index} (${response.status}).`);
-  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
-  if (!contentType.startsWith("image/")) throw new Error(`الصفحة ${index} ليست صورة.`);
-  const contentLength = Number(response.headers.get("content-length") ?? "0");
-  if (Number.isFinite(contentLength) && contentLength > MAX_PAGE_SIZE_BYTES) throw new Error(`الصفحة ${index} تتجاوز الحد الآمن للحجم.`);
-  const data = Buffer.from(await response.arrayBuffer());
-  if (data.length > MAX_PAGE_SIZE_BYTES) throw new Error(`الصفحة ${index} تتجاوز الحد الآمن للحجم.`);
-  return data;
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const response = await fetch(parsed, { redirect: "error", signal: AbortSignal.timeout(30_000) });
+      if (!response.ok) throw new Error(`تعذر تنزيل الصفحة ${index} (${response.status}).`);
+      const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+      if (!contentType.startsWith("image/")) throw new Error(`الصفحة ${index} ليست صورة.`);
+      const contentLength = Number(response.headers.get("content-length") ?? "0");
+      if (Number.isFinite(contentLength) && contentLength > MAX_PAGE_SIZE_BYTES) throw new Error(`الصفحة ${index} تتجاوز الحد الآمن للحجم.`);
+      const data = Buffer.from(await response.arrayBuffer());
+      if (data.length > MAX_PAGE_SIZE_BYTES) throw new Error(`الصفحة ${index} تتجاوز الحد الآمن للحجم.`);
+      return data;
+    } catch (error) {
+      lastError = error;
+      if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 250));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(`تعذر تنزيل الصفحة ${index}.`);
+}
+
+async function downloadPages(urls: string[]): Promise<Buffer[]> {
+  const results: Buffer[] = new Array(urls.length);
+  let next = 0;
+  async function worker() {
+    while (true) {
+      const index = next++;
+      if (index >= urls.length) return;
+      results[index] = await downloadPage(urls[index]!, index + 1);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(6, urls.length) }, () => worker()));
+  return results;
 }
 
 async function renderCanvas(pages: Buffer[], width: number): Promise<MergedChapterImage> {
@@ -47,12 +70,14 @@ async function renderCanvas(pages: Buffer[], width: number): Promise<MergedChapt
 /**
  * يجمع الصفحات المتتابعة في صور طويلة. لا يقسم الصفحة الواحدة ولا يصغّرها؛
  * إذا تجاوزت صفحة واحدة الحد الأعلى تُحفظ كاملة في صورة مستقلة. وقد تكون الصورة
- * الأخيرة أقصر من الحد الأدنى عندما يكون دمجها مع المجموعة السابقة سيتجاوز 1800px؛
+ * الأخيرة أقصر من الحد الأدنى عندما يكون دمجها مع المجموعة السابقة سيتجاوز 1800px.
+ * الصفحة الأطول من 1000px تبقى مستقلة افتراضيًا، وتُضم فقط إلى مجموعة مجاورة
+ * إذا كان الناتج المنظم بين 1400 و1800px.
  * عدم القص هو الأولوية المطلقة.
  */
 export async function mergeChapterPages(pageUrls: string[]): Promise<MergedChapterImage[]> {
   if (!pageUrls.length) return [];
-  const pages = await Promise.all(pageUrls.map((url, index) => downloadPage(url, index + 1)));
+  const pages = await downloadPages(pageUrls);
   const dimensions = await Promise.all(pages.map(page => sharp(page).metadata()));
   const width = Math.max(...dimensions.map(item => item.width ?? 0));
   if (!width) throw new Error("تعذر تحديد أكبر عرض لصفحات الفصل.");
@@ -67,6 +92,19 @@ export async function mergeChapterPages(pageUrls: string[]): Promise<MergedChapt
     if (height > MAX_OUTPUT_HEIGHT) {
       if (current.length) groups.push(current);
       groups.push([page]);
+      current = [];
+      currentHeight = 0;
+      continue;
+    }
+    if (height > 1000) {
+      const combinedHeight = currentHeight + height;
+      if (current.length && combinedHeight >= MIN_OUTPUT_HEIGHT && combinedHeight <= MAX_OUTPUT_HEIGHT) {
+        current.push(page);
+        groups.push(current);
+      } else {
+        if (current.length) groups.push(current);
+        groups.push([page]);
+      }
       current = [];
       currentHeight = 0;
       continue;

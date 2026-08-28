@@ -51,6 +51,19 @@ export function mangaUrlFromChapterUrl(chapterUrl: string): string | null {
   return `${parsed.origin}${match[1]}`;
 }
 
+export async function naverTitleFromChapterUrl(chapterUrl: string): Promise<string | null> {
+  const parsed = new URL(chapterUrl);
+  if (parsed.hostname.replace(/^www\./, "") !== "comic.naver.com" || parsed.pathname !== "/webtoon/detail") return null;
+  const response = await fetch(parsed, { redirect: "error", signal: AbortSignal.timeout(10_000) });
+  if (!response.ok) return null;
+  const html = await response.text();
+  const titleTag = html.match(/<title[^>]*>\s*([^<]+?)\s*<\/title>/i)?.[1];
+  const ogTitle = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)/i)?.[1]
+    ?? html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i)?.[1];
+  const title = ogTitle || titleTag?.split(/\s*\|\s*|\s*::\s*/)[0];
+  return title?.replace(/&amp;/g, "&").replace(/&#39;/g, "'").trim() || null;
+}
+
 export function sourceSearchQueryFromChapterUrl(chapterUrl: string): string | null {
   const mangaUrl = mangaUrlFromChapterUrl(chapterUrl);
   if (!mangaUrl) return null;
@@ -174,7 +187,11 @@ export class SuwayomiClient {
     if (indexedChapter) return indexedChapter;
 
     const mangaUrl = mangaUrlFromChapterUrl(chapterUrl);
-    const searchQuery = sourceSearchQueryFromChapterUrl(chapterUrl);
+    const parsedChapterUrl = new URL(chapterUrl);
+    const baseSearchQuery = sourceSearchQueryFromChapterUrl(chapterUrl);
+    const searchQuery = baseSearchQuery === "list" && parsedChapterUrl.hostname.replace(/^www\\./, "") === "comic.naver.com"
+      ? await naverTitleFromChapterUrl(chapterUrl)
+      : baseSearchQuery;
     if (!mangaUrl) return null;
 
     const directManga = await this.findMangaByUrl(mangaUrl);

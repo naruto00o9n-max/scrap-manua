@@ -10,6 +10,7 @@ import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
 import { startDiscordBot } from "../services/discordBot";
 import { startJobWorker } from "../services/jobWorker";
+import { ENV } from "./env";
 import { isMonitorRequestAuthorized, runIntegrationMonitor } from "../services/monitoring";
 
 function isPortAvailable(port: number): Promise<boolean> {
@@ -77,8 +78,9 @@ async function startServer() {
 
   server.listen(port, () => {
     console.log(`Server running on http://localhost:${port}/`);
-    startJobWorker();
-    void startDiscordBot().catch(error => console.error("[Discord] Failed to start", error));
+    if (ENV.jobWorkerEnabled) startJobWorker();
+    if (ENV.discordGatewayEnabled) void startDiscordBot().catch(error => console.error("[Discord] Failed to start", error));
+    else console.info("[Discord] Gateway disabled in this web process; use the dedicated Railway worker with DISCORD_GATEWAY_ENABLED=true.");
   });
 }
 
