@@ -28,7 +28,15 @@ describe("chapter image merging", () => {
     const buffers = [await image(900, 1200, "#555555"), await image(900, 600, "#666666")];
     vi.stubGlobal("fetch", vi.fn(async (_url: string) => new Response(buffers.shift(), { status: 200, headers: { "content-type": "image/png" } })));
     const output = await mergeChapterPages(["https://pages.test/long", "https://pages.test/short"]);
-    expect(output.map(item => item.height)).toEqual([1200, 600]);
+    expect(output.map(item => item.height)).toEqual([1800]);
+    vi.unstubAllGlobals();
+  });
+
+  it("leaves a long page standalone when following pages cannot reach the minimum", async () => {
+    const buffers = [await image(900, 1200, "#777777"), await image(900, 100, "#888888")];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string) => new Response(buffers.shift(), { status: 200, headers: { "content-type": "image/png" } })));
+    const output = await mergeChapterPages(["https://pages.test/long", "https://pages.test/tiny"]);
+    expect(output.map(item => item.height)).toEqual([1200, 100]);
     vi.unstubAllGlobals();
   });
 

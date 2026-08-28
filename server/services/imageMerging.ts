@@ -85,43 +85,45 @@ export async function mergeChapterPages(pageUrls: string[]): Promise<MergedChapt
   const groups: Buffer[][] = [];
   let current: Buffer[] = [];
   let currentHeight = 0;
+  const flushCurrent = () => {
+    if (current.length) groups.push(current);
+    current = [];
+    currentHeight = 0;
+  };
   for (let index = 0; index < pages.length; index += 1) {
     const page = pages[index]!;
     const height = dimensions[index]?.height ?? 0;
     if (!height) throw new Error(`تعذر قراءة ارتفاع الصفحة ${index + 1}.`);
     if (height > MAX_OUTPUT_HEIGHT) {
-      if (current.length) groups.push(current);
+      flushCurrent();
       groups.push([page]);
-      current = [];
-      currentHeight = 0;
       continue;
     }
     if (height > 1000) {
-      const combinedHeight = currentHeight + height;
-      if (current.length && combinedHeight >= MIN_OUTPUT_HEIGHT && combinedHeight <= MAX_OUTPUT_HEIGHT) {
-        current.push(page);
-        groups.push(current);
+      flushCurrent();
+      const candidate: Buffer[] = [page];
+      let candidateHeight = height;
+      let next = index + 1;
+      while (candidateHeight < MIN_OUTPUT_HEIGHT && next < pages.length) {
+        const nextHeight = dimensions[next]?.height ?? 0;
+        if (!nextHeight || nextHeight > 1000 || candidateHeight + nextHeight > MAX_OUTPUT_HEIGHT) break;
+        candidate.push(pages[next]!);
+        candidateHeight += nextHeight;
+        next += 1;
+      }
+      if (candidateHeight >= MIN_OUTPUT_HEIGHT && candidateHeight <= MAX_OUTPUT_HEIGHT) {
+        groups.push(candidate);
+        index = next - 1;
       } else {
-        if (current.length) groups.push(current);
         groups.push([page]);
       }
-      current = [];
-      currentHeight = 0;
       continue;
     }
-    if (current.length && currentHeight + height > MAX_OUTPUT_HEIGHT) {
-      groups.push(current);
-      current = [];
-      currentHeight = 0;
-    }
+    if (current.length && currentHeight + height > MAX_OUTPUT_HEIGHT) flushCurrent();
     current.push(page);
     currentHeight += height;
-    if (currentHeight >= MIN_OUTPUT_HEIGHT) {
-      groups.push(current);
-      current = [];
-      currentHeight = 0;
-    }
+    if (currentHeight >= MIN_OUTPUT_HEIGHT) flushCurrent();
   }
-  if (current.length) groups.push(current);
+  flushCurrent();
   return Promise.all(groups.map(group => renderCanvas(group, width)));
 }
