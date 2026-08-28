@@ -107,7 +107,7 @@ export class SuwayomiClient {
     this.endpoint = new URL("/api/graphql", parsed).toString();
   }
 
-  private async request<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
+  private async request<T>(query: string, variables?: Record<string, unknown>, timeoutMs = 10_000): Promise<T> {
     const response = await fetch(this.endpoint, {
       method: "POST",
       headers: {
@@ -115,7 +115,7 @@ export class SuwayomiClient {
         ...(this.token ? { authorization: `Bearer ${this.token}` } : {}),
       },
       body: JSON.stringify({ query, variables }),
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
 
     if (!response.ok) {
@@ -219,6 +219,7 @@ export class SuwayomiClient {
     const result = await this.request<{ fetchChapterPages: { chapter: SuwayomiChapter; pages: string[] } }>(
       "mutation FetchChapterPages($input: FetchChapterPagesInput!) { fetchChapterPages(input: $input) { chapter { id name url realUrl manga { id title sourceId } } pages } }",
       { input: { chapterId } },
+      120_000,
     );
     return {
       ...result.fetchChapterPages,
