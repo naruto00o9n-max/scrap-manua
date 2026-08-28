@@ -113,7 +113,7 @@ export class SuwayomiClient {
     const result = await this.request<{ sources: { nodes: SuwayomiSource[] } }>(
       "{ sources(first: 100) { nodes { id name displayName homeUrl lang extension { name pkgName isInstalled } } } }",
     );
-    return result.sources.nodes;
+    return result.sources.nodes.filter(source => source.extension?.isInstalled === true);
   }
 
   async findChapterByUrl(chapterUrl: string): Promise<SuwayomiChapter | null> {

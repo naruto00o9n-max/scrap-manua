@@ -246,6 +246,11 @@ export async function getChapterJob(id: string): Promise<ChapterJob | undefined>
   return rows[0];
 }
 
+export async function setDiscordProgressMessage(id: string, messageId: string): Promise<void> {
+  const db = await requireDb();
+  await db.update(chapterJobs).set({ discordProgressMessageId: messageId, updatedAt: new Date() }).where(eq(chapterJobs.id, id));
+}
+
 export async function cancelChapterJob(id: string): Promise<ChapterJob> {
   const db = await requireDb();
   const before = await getChapterJob(id);

@@ -83,6 +83,7 @@ export const chapterJobs = mysqlTable(
     requestedByDiscordId: varchar("requestedByDiscordId", { length: 32 }).notNull(),
     requestedByName: varchar("requestedByName", { length: 160 }).notNull(),
     requestedInChannelId: varchar("requestedInChannelId", { length: 32 }),
+    discordProgressMessageId: varchar("discordProgressMessageId", { length: 32 }),
     sourceChapterId: varchar("sourceChapterId", { length: 160 }),
     mangaTitle: varchar("mangaTitle", { length: 512 }),
     chapterTitle: varchar("chapterTitle", { length: 512 }),
