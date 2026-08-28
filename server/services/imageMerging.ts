@@ -1,8 +1,8 @@
 import sharp from "sharp";
 
 const MAX_PAGE_SIZE_BYTES = 40 * 1024 * 1024;
-const MIN_OUTPUT_HEIGHT = 1400;
-const MAX_OUTPUT_HEIGHT = 1800;
+const MIN_OUTPUT_HEIGHT = 11000;
+const MAX_OUTPUT_HEIGHT = 14000;
 const OUTPUT_MIME = "image/png";
 
 export type MergedChapterImage = {
@@ -70,9 +70,9 @@ async function renderCanvas(pages: Buffer[], width: number): Promise<MergedChapt
 /**
  * يجمع الصفحات المتتابعة في صور طويلة. لا يقسم الصفحة الواحدة ولا يصغّرها؛
  * إذا تجاوزت صفحة واحدة الحد الأعلى تُحفظ كاملة في صورة مستقلة. وقد تكون الصورة
- * الأخيرة أقصر من الحد الأدنى عندما يكون دمجها مع المجموعة السابقة سيتجاوز 1800px.
+ * الأخيرة أقصر من الحد الأدنى عندما يكون دمجها مع المجموعة السابقة سيتجاوز 14000px.
  * الصفحة الأطول من 1000px تبقى مستقلة افتراضيًا، وتُضم فقط إلى مجموعة مجاورة
- * إذا كان الناتج المنظم بين 1400 و1800px.
+ * إذا كان الناتج المنظم بين 11000 و14000px.
  * عدم القص هو الأولوية المطلقة.
  */
 export async function mergeChapterPages(pageUrls: string[]): Promise<MergedChapterImage[]> {
@@ -106,7 +106,7 @@ export async function mergeChapterPages(pageUrls: string[]): Promise<MergedChapt
       let next = index + 1;
       while (candidateHeight < MIN_OUTPUT_HEIGHT && next < pages.length) {
         const nextHeight = dimensions[next]?.height ?? 0;
-        if (!nextHeight || nextHeight > 1000 || candidateHeight + nextHeight > MAX_OUTPUT_HEIGHT) break;
+        if (!nextHeight || candidateHeight + nextHeight > MAX_OUTPUT_HEIGHT) break;
         candidate.push(pages[next]!);
         candidateHeight += nextHeight;
         next += 1;
