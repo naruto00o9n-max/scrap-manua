@@ -56,16 +56,23 @@ export const appRouter = router({
   }),
   settings: router({
     get: adminProcedure.query(async () => ({
-      rootDriveFolderId: await getSetting("google_drive_root_folder_id"),
+      googleDriveSharingMode: await getSetting("google_drive_sharing_mode") ?? "link_reader",
+      googleDriveSharingDomain: await getSetting("google_drive_sharing_domain") ?? "",
       configuration: getIntegrationConfiguration(),
     })),
-    setRootDriveFolder: adminProcedure
-      .input(z.object({ folderId: z.string().trim().min(5).max(160) }))
+    setDriveSharing: adminProcedure
+      .input(z.object({
+        mode: z.enum(["private", "link_reader", "domain_reader"]),
+        domain: z.string().trim().max(255).optional(),
+      }).superRefine((input, ctx) => {
+        if (input.mode === "domain_reader" && !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i.test(input.domain ?? "")) {
+          ctx.addIssue({ code: "custom", message: "أدخل نطاق Workspace صالحًا، مثل example.com." });
+        }
+      }))
       .mutation(async ({ input }) => {
-        const drive = new GoogleDriveClient();
-        const folder = await drive.verifyRootFolder(input.folderId);
-        await setSetting("google_drive_root_folder_id", folder.id);
-        return folder;
+        await setSetting("google_drive_sharing_mode", input.mode);
+        await setSetting("google_drive_sharing_domain", input.mode === "domain_reader" ? input.domain ?? "" : "");
+        return { mode: input.mode, domain: input.mode === "domain_reader" ? input.domain ?? "" : "" };
       }),
   }),
   discordRoles: router({

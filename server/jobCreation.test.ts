@@ -41,6 +41,12 @@ describe("create or reuse chapter job", () => {
       findByUrlHash: async (urlHash: string) => [...rows.values()].find(row => row.urlHash === urlHash),
       insert: async (request: QueueChapterJobInput) => { insertCalls += 1; rows.set(request.id, jobFrom(request)); },
       findById: async (id: string) => rows.get(id),
+      requeueFailed: async (id: string) => {
+        const job = rows.get(id)!;
+        const updated = { ...job, status: "pending" as const, failureCode: null, failureMessage: null, updatedAt: new Date() };
+        rows.set(id, updated);
+        return updated;
+      },
     };
 
     const first = await resolveChapterJobCreation(store, input);
@@ -49,5 +55,26 @@ describe("create or reuse chapter job", () => {
     expect(first.created).toBe(true);
     expect(duplicate).toMatchObject({ created: false, job: { id: "job-1" } });
     expect(insertCalls).toBe(1);
+  });
+
+  it("reuses and requeues a failed task instead of creating a duplicate row", async () => {
+    const failed = { ...jobFrom(input), status: "failed" as const, failureCode: "SOURCE_ERROR", failureMessage: "قديم" };
+    const rows = new Map([[failed.id, failed]]);
+    let retryCalls = 0;
+    const store = {
+      findByUrlHash: async (urlHash: string) => [...rows.values()].find(row => row.urlHash === urlHash),
+      insert: async () => { throw new Error("لا ينبغي إنشاء سجل جديد"); },
+      findById: async (id: string) => rows.get(id),
+      requeueFailed: async (id: string) => {
+        retryCalls += 1;
+        const job = { ...rows.get(id)!, status: "pending" as const, failureCode: null, failureMessage: null };
+        rows.set(id, job);
+        return job;
+      },
+    };
+
+    const result = await resolveChapterJobCreation(store, { ...input, id: "would-be-duplicate" });
+    expect(result).toMatchObject({ created: true, job: { id: "job-1", status: "pending" } });
+    expect(retryCalls).toBe(1);
   });
 });

@@ -20,6 +20,49 @@ export type SuwayomiChapter = {
   manga: { id: number; title: string; sourceId: string };
 };
 
+export type SuwayomiManga = {
+  id: number;
+  title: string;
+  url: string;
+  realUrl: string | null;
+  sourceId: string;
+};
+
+function normalizedUrl(value: string): string {
+  const parsed = new URL(value);
+  parsed.search = "";
+  parsed.hash = "";
+  parsed.hostname = parsed.hostname.replace(/^www\./, "");
+  return parsed.toString().replace(/\/$/, "");
+}
+
+export function mangaUrlFromChapterUrl(chapterUrl: string): string | null {
+  const parsed = new URL(chapterUrl);
+  const match = parsed.pathname.match(/^(.*)\/chapter\/[^/]+\/?$/i);
+  if (!match?.[1]) return null;
+  return `${parsed.origin}${match[1]}`;
+}
+
+export function sourceSearchQueryFromChapterUrl(chapterUrl: string): string | null {
+  const mangaUrl = mangaUrlFromChapterUrl(chapterUrl);
+  if (!mangaUrl) return null;
+  const slug = new URL(mangaUrl).pathname.split("/").filter(Boolean).at(-1);
+  if (!slug) return null;
+  return slug
+    .replace(/-[a-f0-9]{6,}$/i, "")
+    .replace(/-/g, " ")
+    .replace(/\s+/g, " ")
+    .trim() || null;
+}
+
+function normalizedTitle(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+export function resolveSuwayomiPageUrl(rawPageUrl: string, suwayomiBaseUrl: string): string {
+  return new URL(rawPageUrl, suwayomiBaseUrl).toString();
+}
+
 export class SuwayomiError extends Error {
   constructor(message: string) {
     super(message);
@@ -88,11 +131,54 @@ export class SuwayomiClient {
     return byUrl.chapters.nodes[0] ?? null;
   }
 
+  private async searchSourceManga(sourceId: string, query: string): Promise<SuwayomiManga[]> {
+    const result = await this.request<{ fetchSourceManga: { mangas: SuwayomiManga[] } }>(
+      "mutation FetchSourceManga($input: FetchSourceMangaInput!) { fetchSourceManga(input: $input) { mangas { id title url realUrl sourceId } } }",
+      { input: { source: sourceId, type: "SEARCH", query, page: 1, filters: [] } },
+    );
+    return result.fetchSourceManga.mangas;
+  }
+
+  private async fetchMangaAndChapters(mangaId: number): Promise<SuwayomiChapter[]> {
+    const result = await this.request<{ fetchMangaAndChapters: { chapters: SuwayomiChapter[] } }>(
+      "mutation FetchMangaAndChapters($input: FetchMangaAndChaptersInput!) { fetchMangaAndChapters(input: $input) { chapters { id name url realUrl manga { id title sourceId } } } }",
+      { input: { id: mangaId, fetchManga: true, fetchChapters: true } },
+    );
+    return result.fetchMangaAndChapters.chapters;
+  }
+
+  async findOrFetchChapterFromSource(sourceId: string, chapterUrl: string): Promise<SuwayomiChapter | null> {
+    const indexedChapter = await this.findChapterByUrl(chapterUrl);
+    if (indexedChapter) return indexedChapter;
+
+    const mangaUrl = mangaUrlFromChapterUrl(chapterUrl);
+    const searchQuery = sourceSearchQueryFromChapterUrl(chapterUrl);
+    if (!mangaUrl || !searchQuery) return null;
+
+    const mangaCandidates = await this.searchSourceManga(sourceId, searchQuery);
+    const targetMangaUrl = normalizedUrl(mangaUrl);
+    const manga = mangaCandidates.find(candidate => {
+      const candidateUrl = candidate.realUrl || candidate.url;
+      try { return normalizedUrl(candidateUrl) === targetMangaUrl; } catch { return false; }
+    }) ?? mangaCandidates.find(candidate => normalizedTitle(candidate.title) === normalizedTitle(searchQuery));
+    if (!manga) return null;
+
+    const chapters = await this.fetchMangaAndChapters(manga.id);
+    const targetChapterUrl = normalizedUrl(chapterUrl);
+    return chapters.find(chapter => {
+      const candidateUrl = chapter.realUrl || chapter.url;
+      try { return normalizedUrl(candidateUrl) === targetChapterUrl; } catch { return false; }
+    }) ?? null;
+  }
+
   async fetchChapterPages(chapterId: number): Promise<{ chapter: SuwayomiChapter; pages: string[] }> {
     const result = await this.request<{ fetchChapterPages: { chapter: SuwayomiChapter; pages: string[] } }>(
       "mutation FetchChapterPages($input: FetchChapterPagesInput!) { fetchChapterPages(input: $input) { chapter { id name url realUrl manga { id title sourceId } } pages } }",
       { input: { chapterId } },
     );
-    return result.fetchChapterPages;
+    return {
+      ...result.fetchChapterPages,
+      pages: result.fetchChapterPages.pages.map(page => resolveSuwayomiPageUrl(page, this.endpoint)),
+    };
   }
 }

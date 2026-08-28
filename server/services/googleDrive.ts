@@ -5,6 +5,12 @@ import { ENV } from "../_core/env";
 
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const MAX_PAGE_SIZE_BYTES = 40 * 1024 * 1024;
+const PLATFORM_FOLDER_NAME = "Manga Drive Discord Bot";
+
+export type DriveSharingPolicy =
+  | { mode: "private" }
+  | { mode: "link_reader" }
+  | { mode: "domain_reader"; domain: string };
 
 export class GoogleDriveError extends Error {
   constructor(message: string) {
@@ -70,13 +76,6 @@ export class GoogleDriveClient {
     await this.drive.files.list({ pageSize: 1, fields: "files(id)" });
   }
 
-  async verifyRootFolder(folderId: string): Promise<{ id: string; name: string }> {
-    const response = await this.drive.files.get({ fileId: folderId, fields: "id,name,mimeType,trashed" });
-    if (!response.data.id || response.data.mimeType !== FOLDER_MIME_TYPE || response.data.trashed) {
-      throw new GoogleDriveError("معرف Google Drive لا يشير إلى مجلد متاح.");
-    }
-    return { id: response.data.id, name: response.data.name ?? "مجلد بلا اسم" };
-  }
 
   async ensureFolder(parentId: string, requestedName: string): Promise<{ id: string; name: string }> {
     const name = safeFolderName(requestedName, "فصل بلا عنوان");
@@ -97,10 +96,26 @@ export class GoogleDriveClient {
     return { id: created.data.id, name: created.data.name ?? name };
   }
 
-  async createChapterFolder(rootFolderId: string, mangaTitle: string, chapterTitle: string) {
-    await this.verifyRootFolder(rootFolderId);
-    const mangaFolder = await this.ensureFolder(rootFolderId, mangaTitle);
+  private async applyFolderSharing(folderId: string, policy: DriveSharingPolicy): Promise<void> {
+    if (policy.mode === "private") return;
+    try {
+      await this.drive.permissions.create({
+        fileId: folderId,
+        requestBody: policy.mode === "domain_reader"
+          ? { type: "domain", role: "reader", domain: policy.domain }
+          : { type: "anyone", role: "reader" },
+        fields: "id",
+      });
+    } catch (error) {
+      throw new GoogleDriveError(`تعذر ضبط مشاركة رابط المجلد للقراءة. تحقق من سياسة Google Drive: ${error instanceof Error ? error.message : "خطأ غير معروف"}`);
+    }
+  }
+
+  async createChapterFolder(mangaTitle: string, chapterTitle: string, sharing: DriveSharingPolicy = { mode: "link_reader" }) {
+    const platformFolder = await this.ensureFolder("root", PLATFORM_FOLDER_NAME);
+    const mangaFolder = await this.ensureFolder(platformFolder.id, mangaTitle);
     const chapterFolder = await this.ensureFolder(mangaFolder.id, chapterTitle);
+    await this.applyFolderSharing(chapterFolder.id, sharing);
     return { id: chapterFolder.id, url: `https://drive.google.com/drive/folders/${chapterFolder.id}` };
   }
 
@@ -116,6 +131,12 @@ export class GoogleDriveClient {
 
     const stream = Readable.fromWeb(response.body as never).pipe(countBytes(MAX_PAGE_SIZE_BYTES));
     const filename = buildPageFilename(pageIndex, contentType);
+    const existing = await this.drive.files.list({
+      q: `'${escapeDriveQuery(folderId)}' in parents and name = '${escapeDriveQuery(filename)}' and trashed = false`,
+      fields: "files(id)",
+      pageSize: 1,
+    });
+    if (existing.data.files?.[0]?.id) return;
     await this.drive.files.create({
       requestBody: { name: filename, parents: [folderId] },
       media: { mimeType: contentType, body: stream },

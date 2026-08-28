@@ -180,6 +180,7 @@ type ChapterJobStore = {
   findByUrlHash: (urlHash: string) => Promise<ChapterJob | undefined>;
   insert: (input: QueueChapterJobInput) => Promise<void>;
   findById: (id: string) => Promise<ChapterJob | undefined>;
+  requeueFailed: (id: string) => Promise<ChapterJob>;
 };
 
 export async function resolveChapterJobCreation(
@@ -187,7 +188,10 @@ export async function resolveChapterJobCreation(
   input: QueueChapterJobInput,
 ): Promise<{ job: ChapterJob; created: boolean }> {
   const existing = await store.findByUrlHash(input.urlHash);
-  if (existing && isChapterRequestDuplicate(existing.urlHash, input.urlHash)) return { job: existing, created: false };
+  if (existing && isChapterRequestDuplicate(existing.urlHash, input.urlHash)) {
+    if (existing.status === "failed") return { job: await store.requeueFailed(existing.id), created: true };
+    return { job: existing, created: false };
+  }
 
   try {
     await store.insert(input);
@@ -212,6 +216,25 @@ export async function createOrGetChapterJob(input: QueueChapterJobInput): Promis
       findByUrlHash: async urlHash => (await db.select().from(chapterJobs).where(eq(chapterJobs.urlHash, urlHash)).limit(1))[0],
       insert: async values => { await db.insert(chapterJobs).values({ ...values }); },
       findById: async id => (await db.select().from(chapterJobs).where(eq(chapterJobs.id, id)).limit(1))[0],
+      requeueFailed: async id => {
+        await db
+          .update(chapterJobs)
+          .set({
+            status: "pending",
+            cancelRequested: false,
+            totalPages: 0,
+            uploadedPages: 0,
+            failureCode: null,
+            failureMessage: null,
+            startedAt: null,
+            completedAt: null,
+            updatedAt: new Date(),
+          })
+          .where(and(eq(chapterJobs.id, id), eq(chapterJobs.status, "failed")));
+        const job = (await db.select().from(chapterJobs).where(eq(chapterJobs.id, id)).limit(1))[0];
+        if (!job) throw new Error("تعذر إعادة محاولة مهمة الفصل.");
+        return job;
+      },
     },
     input,
   );
