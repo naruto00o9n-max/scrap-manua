@@ -9,6 +9,8 @@ import Jobs from "./pages/Jobs";
 import NotFound from "./pages/NotFound";
 import Settings from "./pages/Settings";
 import Sources from "./pages/Sources";
+import Users from "./pages/Users";
+import Login from "./pages/Login";
 
 function ProtectedPage({ Component }: { Component: React.ComponentType }) {
   return (
@@ -21,10 +23,12 @@ function ProtectedPage({ Component }: { Component: React.ComponentType }) {
 function Router() {
   return (
     <Switch>
+      <Route path="/login" component={Login} />
       <Route path="/" component={() => <ProtectedPage Component={Home} />} />
       <Route path="/jobs" component={() => <ProtectedPage Component={Jobs} />} />
       <Route path="/sources" component={() => <ProtectedPage Component={Sources} />} />
       <Route path="/settings" component={() => <ProtectedPage Component={Settings} />} />
+      <Route path="/users" component={() => <ProtectedPage Component={Users} />} />
       <Route path="/404" component={NotFound} />
       <Route component={NotFound} />
     </Switch>

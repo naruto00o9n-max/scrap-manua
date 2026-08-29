@@ -1,9 +1,6 @@
 export const ENV = {
-  appId: process.env.VITE_APP_ID ?? "",
   cookieSecret: process.env.JWT_SECRET ?? "",
   mongodbUri: process.env.MONGODB_URI ?? "",
-  oAuthServerUrl: process.env.OAUTH_SERVER_URL ?? "",
-  ownerOpenId: process.env.OWNER_OPEN_ID ?? "",
   isProduction: process.env.NODE_ENV === "production",
   discordGatewayEnabled: process.env.DISCORD_GATEWAY_ENABLED === "true" || process.env.NODE_ENV !== "production",
   jobWorkerEnabled: process.env.JOB_WORKER_ENABLED === "true" || process.env.NODE_ENV !== "production",
@@ -20,4 +17,6 @@ export const ENV = {
   suwayomiBaseUrl: process.env.SUWAYOMI_BASE_URL ?? "",
   suwayomiApiToken: process.env.SUWAYOMI_API_TOKEN ?? "",
   integrationMonitorToken: process.env.INTEGRATION_MONITOR_TOKEN ?? "",
+  adminEmail: process.env.ADMIN_EMAIL ?? "admin@manga-drive.local",
+  adminPassword: process.env.ADMIN_PASSWORD ?? "ChangeMeNow!2026",
 };

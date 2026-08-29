@@ -6,6 +6,7 @@ import {
   type User,
 } from "../shared/dbTypes";
 import { ENV } from "./_core/env";
+import { hashPassword } from "./_core/auth";
 import { isChapterRequestDuplicate } from "./services/jobDedupe";
 
 type MongoDocument<T> = T & { _id?: unknown };
@@ -105,6 +106,7 @@ async function ensureIndexes(db: Db): Promise<void> {
   const c = collections(db);
   await Promise.all([
     c.users.createIndex({ openId: 1 }, { unique: true }),
+    c.users.createIndex({ email: 1 }, { unique: true, sparse: true }),
     c.contentSources.createIndex({ hostname: 1 }, { unique: true }),
     c.discordRoles.createIndex({ discordRoleId: 1 }, { unique: true }),
     c.chapterJobs.createIndex({ urlHash: 1 }, { unique: true }),
@@ -136,15 +138,17 @@ export async function upsertUser(user: InsertUser): Promise<void> {
   const timestamp = now();
   const update: Partial<User> = {
     lastSignedIn: user.lastSignedIn ?? timestamp,
-    role: user.role ?? (user.openId === ENV.ownerOpenId ? "admin" : "user"),
+    role: user.role ?? "user",
     updatedAt: timestamp,
+    ...(user.passwordHash !== undefined ? { passwordHash: user.passwordHash } : {}),
+    ...(user.isBlocked !== undefined ? { isBlocked: user.isBlocked } : {}),
   };
   for (const field of ["name", "email", "loginMethod"] as const) {
     if (user[field] !== undefined) update[field] = user[field] ?? null;
   }
   await collections(db).users.updateOne(
     { openId: user.openId },
-    { $setOnInsert: { id: await nextSequence("users"), openId: user.openId, createdAt: timestamp }, $set: update },
+    { $setOnInsert: { id: await nextSequence("users"), openId: user.openId, createdAt: timestamp, passwordHash: user.passwordHash ?? null, isBlocked: user.isBlocked ?? false }, $set: update },
     { upsert: true },
   );
 }
@@ -154,6 +158,51 @@ export async function getUserByOpenId(openId: string): Promise<User | undefined>
   if (!db) return undefined;
   const row = await collections(db).users.findOne({ openId });
   return row ? stripMongoId(row) as User : undefined;
+}
+
+
+export async function ensureDefaultAdminUser(): Promise<void> {
+  const db = await requireDb();
+  const c = collections(db).users;
+  const existingAdmin = await c.findOne({ role: "admin", passwordHash: { $ne: null } });
+  if (existingAdmin) return;
+  const timestamp = now();
+  const email = ENV.adminEmail.toLowerCase();
+  await c.updateOne(
+    { email },
+    {
+      $setOnInsert: {
+        id: await nextSequence("users"),
+        openId: `local:${email}`,
+        email,
+        name: "Admin",
+        loginMethod: "email",
+        role: "admin",
+        createdAt: timestamp,
+        passwordHash: await hashPassword(ENV.adminPassword),
+        isBlocked: false,
+      },
+      $set: { updatedAt: timestamp, lastSignedIn: timestamp },
+    },
+    { upsert: true },
+  );
+}
+
+export async function getUserByEmail(email: string): Promise<User | undefined> {
+  const db = await getDb();
+  if (!db) return undefined;
+  const row = await collections(db).users.findOne({ email: email.toLowerCase() });
+  return row ? stripMongoId(row) as User : undefined;
+}
+
+export async function listUsers(): Promise<User[]> {
+  const db = await requireDb();
+  return (await collections(db).users.find().sort({ lastSignedIn: -1 }).limit(500).toArray()).map(row => stripMongoId(row) as User);
+}
+
+export async function setUserBlocked(id: number, isBlocked: boolean): Promise<void> {
+  const db = await requireDb();
+  await collections(db).users.updateOne({ id }, { $set: { isBlocked, updatedAt: now() } });
 }
 
 export type SaveSourceInput = {

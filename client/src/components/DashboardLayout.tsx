@@ -18,10 +18,9 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
-import { startLogin } from "@/const";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { useIsMobile } from "@/hooks/useMobile";
-import { BookOpenText, Crown, Database, LayoutDashboard, ListChecks, LogOut, PanelRightClose, Settings2 } from "lucide-react";
+import { BookOpenText, Crown, Database, LayoutDashboard, ListChecks, LogOut, PanelRightClose, Settings2, Users } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from "./DashboardLayoutSkeleton";
@@ -32,6 +31,7 @@ const menuItems = [
   { icon: ListChecks, label: "طابور الفصول", path: "/jobs" },
   { icon: BookOpenText, label: "المصادر المصرح بها", path: "/sources" },
   { icon: Settings2, label: "الإعدادات والتكامل", path: "/settings" },
+  { icon: Users, label: "الأعضاء والصلاحيات", path: "/users" },
 ];
 
 const SIDEBAR_WIDTH_KEY = "manga-drive-sidebar-width";
@@ -44,7 +44,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     const saved = localStorage.getItem(SIDEBAR_WIDTH_KEY);
     return saved ? Number.parseInt(saved, 10) : DEFAULT_WIDTH;
   });
-  const { loading, user } = useAuth();
+  const { loading, user } = useAuth({ redirectOnUnauthenticated: true, redirectPath: "/login" });
+  const [, setLocation] = useLocation();
 
   useEffect(() => {
     localStorage.setItem(SIDEBAR_WIDTH_KEY, sidebarWidth.toString());
@@ -60,7 +61,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           <p className="eyebrow">بوابة الإدارة الخاصة</p>
           <h1 className="mt-3 font-display text-4xl font-bold text-foreground">أهلًا بك في دار الفصول</h1>
           <p className="mt-4 leading-7 text-muted-foreground">تتطلب هذه اللوحة تسجيل الدخول لحماية إعدادات Discord وGoogle Drive ومصادر Suwayomi.</p>
-          <Button onClick={() => startLogin()} size="lg" className="gold-button mt-7 w-full">تسجيل الدخول الآمن</Button>
+          <Button onClick={() => setLocation("/login")} size="lg" className="gold-button mt-7 w-full">تسجيل الدخول</Button>
         </div>
       </div>
     );

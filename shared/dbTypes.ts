@@ -8,6 +8,8 @@ export type User = {
   createdAt: Date;
   updatedAt: Date;
   lastSignedIn: Date;
+  passwordHash: string | null;
+  isBlocked: boolean;
 };
 
 export type InsertUser = {
@@ -17,6 +19,8 @@ export type InsertUser = {
   loginMethod?: string | null;
   role?: "admin" | "user";
   lastSignedIn?: Date;
+  passwordHash?: string | null;
+  isBlocked?: boolean;
 };
 
 export type ContentSource = {
