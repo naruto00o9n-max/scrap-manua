@@ -6,7 +6,6 @@ RUN npm install -g corepack@latest && corepack pnpm install --frozen-lockfile
 COPY client ./client
 COPY server ./server
 COPY shared ./shared
-COPY drizzle ./drizzle
 RUN corepack pnpm run build
 ENV NODE_ENV=production
 CMD ["node", "dist/index.js"]

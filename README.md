@@ -50,7 +50,7 @@ pnpm dev
 
 التعليمات التفصيلية موجودة في [`docs/RAILWAY_DEPLOYMENT.md`](docs/RAILWAY_DEPLOYMENT.md). ملف `railway.toml` يحدد البناء عبر `pnpm build` والتشغيل عبر `pnpm start` وفحص الصحة عبر `/api/healthz`.
 
-قبل الاعتماد اليومي، يجب أن تكون قاعدة MySQL متصلة، ومتغيرات Discord وGoogle Drive وSuwayomi محفوظة في Railway Variables، وأن تكون هناك **نسخة واحدة فقط** من الخدمة مفعّلًا فيها Gateway والعامل. لا تضع أي قيمة سرية في Git أو ملف داخل الأرشيف.
+قبل الاعتماد اليومي، يجب أن تكون قاعدة MongoDB متصلة، ومتغيرات Discord وGoogle Drive وSuwayomi محفوظة في Railway Variables، وأن تكون هناك **نسخة واحدة فقط** من الخدمة مفعّلًا فيها Gateway والعامل. لا تضع أي قيمة سرية في Git أو ملف داخل الأرشيف.
 
 ## الاختبارات
 

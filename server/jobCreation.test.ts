@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { resolveChapterJobCreation, type QueueChapterJobInput } from "./db";
-import type { ChapterJob } from "../drizzle/schema";
+import type { ChapterJob } from "../shared/dbTypes";
 
 const input: QueueChapterJobInput = {
   id: "job-1",

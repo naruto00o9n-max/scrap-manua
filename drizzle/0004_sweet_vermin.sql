@@ -1,1 +1,0 @@
-ALTER TABLE `chapterJobs` ADD `discordProgressMessageId` varchar(32);

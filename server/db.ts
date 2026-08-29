@@ -1,66 +1,159 @@
-import { and, desc, eq, gte, inArray, isNotNull, like, lte, or, sql } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/mysql2";
+import { MongoClient, type Collection, type Db, type Filter } from "mongodb";
 import {
-  appSettings,
-  chapterJobs,
-  contentSources,
-  discordRoles,
-  integrationAlerts,
-  integrationHealth,
-  jobAttempts,
   type ChapterJob,
   type ContentSource,
   type InsertUser,
   type User,
-  users,
-} from "../drizzle/schema";
+} from "../shared/dbTypes";
 import { ENV } from "./_core/env";
 import { isChapterRequestDuplicate } from "./services/jobDedupe";
 
-let _db: ReturnType<typeof drizzle> | null = null;
+type MongoDocument<T> = T & { _id?: unknown };
+type DiscordRole = { id: number; discordRoleId: string; label: string; isActive: boolean; createdAt: Date };
+type AppSetting = { key: string; value: string; updatedAt: Date };
+type JobAttempt = { id: number; jobId: string; phase: string; message: string; createdAt: Date };
+type IntegrationHealth = {
+  id: number;
+  service: string;
+  status: "healthy" | "degraded" | "offline" | "unknown";
+  message: string | null;
+  consecutiveFailures: number;
+  lastCheckedAt: Date;
+  updatedAt: Date;
+};
+type IntegrationAlert = {
+  id: number;
+  service: string;
+  severity: "warning" | "critical";
+  fingerprint: string;
+  message: string;
+  recipientDiscordUserId: string | null;
+  deliveryStatus: "pending" | "sent" | "failed";
+  createdAt: Date;
+  deliveredAt: Date | null;
+};
+type Counter = { _id: string; seq: number };
 
-export async function getDb() {
-  if (!_db && process.env.DATABASE_URL) {
-    try {
-      _db = drizzle(process.env.DATABASE_URL);
-    } catch (error) {
-      console.warn("[Database] Failed to connect:", error);
-      _db = null;
-    }
-  }
-  return _db;
+type Collections = {
+  users: Collection<MongoDocument<User>>;
+  contentSources: Collection<MongoDocument<ContentSource>>;
+  appSettings: Collection<MongoDocument<AppSetting>>;
+  discordRoles: Collection<MongoDocument<DiscordRole>>;
+  chapterJobs: Collection<MongoDocument<ChapterJob>>;
+  jobAttempts: Collection<MongoDocument<JobAttempt>>;
+  integrationHealth: Collection<MongoDocument<IntegrationHealth>>;
+  integrationAlerts: Collection<MongoDocument<IntegrationAlert>>;
+  counters: Collection<Counter>;
+};
+
+let clientPromise: Promise<MongoClient> | null = null;
+let indexesReady = false;
+
+function stripMongoId<T extends { _id?: unknown }>(doc: T): Omit<T, "_id"> {
+  const { _id, ...rest } = doc;
+  return rest;
 }
 
-async function requireDb() {
-  const db = await getDb();
-  if (!db) throw new Error("قاعدة بيانات المنصة غير متاحة حاليًا.");
+function now() {
+  return new Date();
+}
+
+async function getMongoClient(): Promise<MongoClient | null> {
+  if (!ENV.mongodbUri) return null;
+  clientPromise ??= new MongoClient(ENV.mongodbUri).connect();
+  try {
+    return await clientPromise;
+  } catch (error) {
+    clientPromise = null;
+    console.warn("[Database] Failed to connect to MongoDB:", error);
+    return null;
+  }
+}
+
+export async function getDb(): Promise<Db | null> {
+  const client = await getMongoClient();
+  if (!client) return null;
+  const db = client.db();
+  if (!indexesReady) {
+    await ensureIndexes(db);
+    indexesReady = true;
+  }
   return db;
+}
+
+async function requireDb(): Promise<Db> {
+  const db = await getDb();
+  if (!db) throw new Error("قاعدة بيانات MongoDB غير متاحة حاليًا. اضبط MONGODB_URI في الأسرار.");
+  return db;
+}
+
+function collections(db: Db): Collections {
+  return {
+    users: db.collection("users"),
+    contentSources: db.collection("contentSources"),
+    appSettings: db.collection("appSettings"),
+    discordRoles: db.collection("discordRoles"),
+    chapterJobs: db.collection("chapterJobs"),
+    jobAttempts: db.collection("jobAttempts"),
+    integrationHealth: db.collection("integrationHealth"),
+    integrationAlerts: db.collection("integrationAlerts"),
+    counters: db.collection<Counter>("counters"),
+  };
+}
+
+async function ensureIndexes(db: Db): Promise<void> {
+  const c = collections(db);
+  await Promise.all([
+    c.users.createIndex({ openId: 1 }, { unique: true }),
+    c.contentSources.createIndex({ hostname: 1 }, { unique: true }),
+    c.discordRoles.createIndex({ discordRoleId: 1 }, { unique: true }),
+    c.chapterJobs.createIndex({ urlHash: 1 }, { unique: true }),
+    c.chapterJobs.createIndex({ status: 1, createdAt: 1 }),
+    c.chapterJobs.createIndex({ requestedByDiscordId: 1 }),
+    c.chapterJobs.createIndex({ sourceId: 1 }),
+    c.jobAttempts.createIndex({ jobId: 1, createdAt: -1 }),
+    c.integrationHealth.createIndex({ service: 1 }, { unique: true }),
+    c.integrationAlerts.createIndex({ service: 1, createdAt: -1 }),
+    c.integrationAlerts.createIndex({ service: 1, fingerprint: 1, createdAt: -1 }),
+  ]);
+}
+
+async function nextSequence(name: string): Promise<number> {
+  const db = await requireDb();
+  const result = await collections(db).counters.findOneAndUpdate(
+    { _id: name },
+    { $inc: { seq: 1 } },
+    { upsert: true, returnDocument: "after" },
+  );
+  if (!result) throw new Error(`تعذر إنشاء معرف متسلسل لـ ${name}.`);
+  return result.seq;
 }
 
 export async function upsertUser(user: InsertUser): Promise<void> {
   if (!user.openId) throw new Error("User openId is required for upsert");
   const db = await getDb();
   if (!db) return;
-
-  const values: InsertUser = { openId: user.openId, lastSignedIn: user.lastSignedIn ?? new Date() };
-  const updateSet: Record<string, unknown> = { lastSignedIn: values.lastSignedIn };
+  const timestamp = now();
+  const update: Partial<User> = {
+    lastSignedIn: user.lastSignedIn ?? timestamp,
+    role: user.role ?? (user.openId === ENV.ownerOpenId ? "admin" : "user"),
+    updatedAt: timestamp,
+  };
   for (const field of ["name", "email", "loginMethod"] as const) {
-    if (user[field] !== undefined) {
-      values[field] = user[field] ?? null;
-      updateSet[field] = user[field] ?? null;
-    }
+    if (user[field] !== undefined) update[field] = user[field] ?? null;
   }
-  values.role = user.role ?? (user.openId === ENV.ownerOpenId ? "admin" : "user");
-  updateSet.role = values.role;
-
-  await db.insert(users).values(values).onDuplicateKeyUpdate({ set: updateSet });
+  await collections(db).users.updateOne(
+    { openId: user.openId },
+    { $setOnInsert: { id: await nextSequence("users"), openId: user.openId, createdAt: timestamp }, $set: update },
+    { upsert: true },
+  );
 }
 
 export async function getUserByOpenId(openId: string): Promise<User | undefined> {
   const db = await getDb();
   if (!db) return undefined;
-  const result = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
-  return result[0];
+  const row = await collections(db).users.findOne({ openId });
+  return row ? stripMongoId(row) as User : undefined;
 }
 
 export type SaveSourceInput = {
@@ -77,25 +170,10 @@ export type SaveSourceInput = {
   notes?: string | null;
 };
 
-export async function listSources(): Promise<ContentSource[]> {
-  const db = await requireDb();
-  return db.select().from(contentSources).orderBy(desc(contentSources.updatedAt));
-}
-
-export async function getActiveSources(): Promise<ContentSource[]> {
-  const db = await requireDb();
-  return db.select().from(contentSources).where(eq(contentSources.status, "active"));
-}
-
-export async function getSourceById(id: number): Promise<ContentSource | undefined> {
-  const db = await requireDb();
-  const rows = await db.select().from(contentSources).where(eq(contentSources.id, id)).limit(1);
-  return rows[0];
-}
-
-export async function saveSource(input: SaveSourceInput): Promise<ContentSource> {
-  const db = await requireDb();
-  const values = {
+function normalizeSource(input: SaveSourceInput, existing?: ContentSource): ContentSource {
+  const timestamp = now();
+  return {
+    id: existing?.id ?? input.id ?? 0,
     name: input.name,
     hostname: input.hostname,
     baseUrl: input.baseUrl,
@@ -105,65 +183,72 @@ export async function saveSource(input: SaveSourceInput): Promise<ContentSource>
     status: input.status,
     documentedIntegrationUrl: input.documentedIntegrationUrl ?? null,
     allowDirectChapterLookup: input.allowDirectChapterLookup,
+    rejectLoginRequired: existing?.rejectLoginRequired ?? true,
+    rejectCaptchaRequired: existing?.rejectCaptchaRequired ?? true,
     notes: input.notes ?? null,
-  } as const;
+    createdAt: existing?.createdAt ?? timestamp,
+    updatedAt: timestamp,
+  };
+}
 
-  if (input.id) {
-    await db.update(contentSources).set(values).where(eq(contentSources.id, input.id));
-    const updated = await db.select().from(contentSources).where(eq(contentSources.id, input.id)).limit(1);
-    if (!updated[0]) throw new Error("تعذر العثور على المصدر المطلوب.");
-    return updated[0];
-  }
+export async function listSources(): Promise<ContentSource[]> {
+  const db = await requireDb();
+  return (await collections(db).contentSources.find().sort({ updatedAt: -1 }).toArray()).map(row => stripMongoId(row) as ContentSource);
+}
 
-  const result = await db.insert(contentSources).values(values);
-  const inserted = await db
-    .select()
-    .from(contentSources)
-    .where(eq(contentSources.id, Number(result[0].insertId)))
-    .limit(1);
-  if (!inserted[0]) throw new Error("تعذر حفظ المصدر.");
-  return inserted[0];
+export async function getActiveSources(): Promise<ContentSource[]> {
+  const db = await requireDb();
+  return (await collections(db).contentSources.find({ status: "active" }).toArray()).map(row => stripMongoId(row) as ContentSource);
+}
+
+export async function getSourceById(id: number): Promise<ContentSource | undefined> {
+  const db = await requireDb();
+  const row = await collections(db).contentSources.findOne({ id });
+  return row ? stripMongoId(row) as ContentSource : undefined;
+}
+
+export async function saveSource(input: SaveSourceInput): Promise<ContentSource> {
+  const db = await requireDb();
+  const c = collections(db).contentSources;
+  const existing = input.id ? await c.findOne({ id: input.id }) : null;
+  const source = normalizeSource({ ...input, id: input.id ?? await nextSequence("contentSources") }, existing ? stripMongoId(existing) as ContentSource : undefined);
+  await c.updateOne({ id: source.id }, { $set: source }, { upsert: true });
+  return source;
 }
 
 export async function getSetting(key: string): Promise<string | null> {
   const db = await requireDb();
-  const rows = await db.select().from(appSettings).where(eq(appSettings.key, key)).limit(1);
-  return rows[0]?.value ?? null;
+  return (await collections(db).appSettings.findOne({ key }))?.value ?? null;
 }
 
 export async function setSetting(key: string, value: string): Promise<void> {
   const db = await requireDb();
-  await db
-    .insert(appSettings)
-    .values({ key, value })
-    .onDuplicateKeyUpdate({ set: { value, updatedAt: new Date() } });
+  await collections(db).appSettings.updateOne({ key }, { $set: { key, value, updatedAt: now() } }, { upsert: true });
 }
 
 export async function listDiscordRoles() {
   const db = await requireDb();
-  return db.select().from(discordRoles).orderBy(desc(discordRoles.createdAt));
+  return (await collections(db).discordRoles.find().sort({ createdAt: -1 }).toArray()).map(stripMongoId);
 }
 
 export async function listActiveDiscordRoleIds(): Promise<string[]> {
   const db = await requireDb();
-  const rows = await db
-    .select({ discordRoleId: discordRoles.discordRoleId })
-    .from(discordRoles)
-    .where(eq(discordRoles.isActive, true));
-  return rows.map(row => row.discordRoleId);
+  return (await collections(db).discordRoles.find({ isActive: true }).project<{ discordRoleId: string }>({ discordRoleId: 1 }).toArray()).map(row => row.discordRoleId);
 }
 
 export async function saveDiscordRole(discordRoleId: string, label: string) {
   const db = await requireDb();
-  await db
-    .insert(discordRoles)
-    .values({ discordRoleId, label, isActive: true })
-    .onDuplicateKeyUpdate({ set: { label, isActive: true } });
+  const timestamp = now();
+  await collections(db).discordRoles.updateOne(
+    { discordRoleId },
+    { $setOnInsert: { id: await nextSequence("discordRoles"), createdAt: timestamp }, $set: { discordRoleId, label, isActive: true } },
+    { upsert: true },
+  );
 }
 
 export async function removeDiscordRole(id: number): Promise<void> {
   const db = await requireDb();
-  await db.delete(discordRoles).where(eq(discordRoles.id, id));
+  await collections(db).discordRoles.deleteOne({ id });
 }
 
 export type QueueChapterJobInput = {
@@ -206,62 +291,69 @@ export async function resolveChapterJobCreation(
   return { job: created, created: true };
 }
 
-export async function createOrGetChapterJob(input: QueueChapterJobInput): Promise<{
-  job: ChapterJob;
-  created: boolean;
-}> {
+function newChapterJob(input: QueueChapterJobInput): ChapterJob {
+  const timestamp = now();
+  return {
+    id: input.id,
+    sourceId: input.sourceId,
+    urlHash: input.urlHash,
+    canonicalUrl: input.canonicalUrl,
+    requestedByDiscordId: input.requestedByDiscordId,
+    requestedByName: input.requestedByName,
+    requestedInChannelId: input.requestedInChannelId ?? null,
+    discordProgressMessageId: null,
+    sourceChapterId: null,
+    mangaTitle: null,
+    chapterTitle: null,
+    status: "pending",
+    totalPages: 0,
+    uploadedPages: 0,
+    googleDriveFolderId: null,
+    googleDriveUrl: null,
+    failureCode: null,
+    failureMessage: null,
+    cancelRequested: false,
+    createdAt: timestamp,
+    startedAt: null,
+    completedAt: null,
+    updatedAt: timestamp,
+  };
+}
+
+export async function createOrGetChapterJob(input: QueueChapterJobInput): Promise<{ job: ChapterJob; created: boolean }> {
   const db = await requireDb();
-  return resolveChapterJobCreation(
-    {
-      findByUrlHash: async urlHash => (await db.select().from(chapterJobs).where(eq(chapterJobs.urlHash, urlHash)).limit(1))[0],
-      insert: async values => { await db.insert(chapterJobs).values({ ...values }); },
-      findById: async id => (await db.select().from(chapterJobs).where(eq(chapterJobs.id, id)).limit(1))[0],
-      requeueFailed: async id => {
-        await db
-          .update(chapterJobs)
-          .set({
-            status: "pending",
-            cancelRequested: false,
-            totalPages: 0,
-            uploadedPages: 0,
-            failureCode: null,
-            failureMessage: null,
-            startedAt: null,
-            completedAt: null,
-            updatedAt: new Date(),
-          })
-          .where(and(eq(chapterJobs.id, id), eq(chapterJobs.status, "failed")));
-        const job = (await db.select().from(chapterJobs).where(eq(chapterJobs.id, id)).limit(1))[0];
-        if (!job) throw new Error("تعذر إعادة محاولة مهمة الفصل.");
-        return job;
-      },
+  const c = collections(db).chapterJobs;
+  const toJob = (row: MongoDocument<ChapterJob> | null) => row ? stripMongoId(row) as ChapterJob : undefined;
+  return resolveChapterJobCreation({
+    findByUrlHash: async urlHash => toJob(await c.findOne({ urlHash })),
+    insert: async values => { await c.insertOne(newChapterJob(values)); },
+    findById: async id => toJob(await c.findOne({ id })),
+    requeueFailed: async id => {
+      await c.updateOne({ id, status: "failed" }, { $set: { status: "pending", cancelRequested: false, totalPages: 0, uploadedPages: 0, failureCode: null, failureMessage: null, startedAt: null, completedAt: null, updatedAt: now() } });
+      const job = toJob(await c.findOne({ id }));
+      if (!job) throw new Error("تعذر إعادة محاولة مهمة الفصل.");
+      return job;
     },
-    input,
-  );
+  }, input);
 }
 
 export async function getChapterJob(id: string): Promise<ChapterJob | undefined> {
   const db = await requireDb();
-  const rows = await db.select().from(chapterJobs).where(eq(chapterJobs.id, id)).limit(1);
-  return rows[0];
+  const row = await collections(db).chapterJobs.findOne({ id });
+  return row ? stripMongoId(row) as ChapterJob : undefined;
 }
 
 export async function setDiscordProgressMessage(id: string, messageId: string): Promise<void> {
   const db = await requireDb();
-  await db.update(chapterJobs).set({ discordProgressMessageId: messageId, updatedAt: new Date() }).where(eq(chapterJobs.id, id));
+  await collections(db).chapterJobs.updateOne({ id }, { $set: { discordProgressMessageId: messageId, updatedAt: now() } });
 }
 
 export async function cancelChapterJob(id: string): Promise<ChapterJob> {
   const db = await requireDb();
   const before = await getChapterJob(id);
   if (!before) throw new Error("لم تُعثر المهمة المطلوب إلغاؤها.");
-  if (!["pending", "downloading", "uploading"].includes(before.status)) {
-    throw new Error("لا يمكن إلغاء مهمة منتهية أو ملغاة سابقًا.");
-  }
-  await db
-    .update(chapterJobs)
-    .set({ cancelRequested: true, status: "cancelled", completedAt: new Date() })
-    .where(and(eq(chapterJobs.id, id), inArray(chapterJobs.status, ["pending", "downloading", "uploading"])));
+  if (!["pending", "downloading", "uploading"].includes(before.status)) throw new Error("لا يمكن إلغاء مهمة منتهية أو ملغاة سابقًا.");
+  await collections(db).chapterJobs.updateOne({ id, status: { $in: ["pending", "downloading", "uploading"] } }, { $set: { cancelRequested: true, status: "cancelled", completedAt: now(), updatedAt: now() } });
   const job = await getChapterJob(id);
   if (!job) throw new Error("تعذر تأكيد إلغاء المهمة.");
   return job;
@@ -269,176 +361,123 @@ export async function cancelChapterJob(id: string): Promise<ChapterJob> {
 
 export async function getNextPendingChapterJob(): Promise<ChapterJob | undefined> {
   const db = await requireDb();
-  const rows = await db
-    .select()
-    .from(chapterJobs)
-    .where(eq(chapterJobs.status, "pending"))
-    .orderBy(chapterJobs.createdAt)
-    .limit(1);
-  return rows[0];
+  const row = await collections(db).chapterJobs.findOne({ status: "pending" }, { sort: { createdAt: 1 } });
+  return row ? stripMongoId(row) as ChapterJob : undefined;
 }
 
 export async function markJobStarted(id: string): Promise<void> {
   const db = await requireDb();
-  await db
-    .update(chapterJobs)
-    .set({ status: "downloading", startedAt: new Date(), updatedAt: new Date() })
-    .where(and(eq(chapterJobs.id, id), eq(chapterJobs.status, "pending")));
+  await collections(db).chapterJobs.updateOne({ id, status: "pending" }, { $set: { status: "downloading", startedAt: now(), updatedAt: now() } });
 }
 
-export async function setJobChapterDetails(
-  id: string,
-  details: { sourceChapterId: string; mangaTitle: string; chapterTitle: string; totalPages: number },
-): Promise<void> {
+export async function setJobChapterDetails(id: string, details: { sourceChapterId: string; mangaTitle: string; chapterTitle: string; totalPages: number }): Promise<void> {
   const db = await requireDb();
-  await db.update(chapterJobs).set({ ...details, updatedAt: new Date() }).where(eq(chapterJobs.id, id));
+  await collections(db).chapterJobs.updateOne({ id }, { $set: { ...details, updatedAt: now() } });
 }
 
 export async function markJobUploading(id: string, googleDriveFolderId: string, googleDriveUrl: string): Promise<void> {
   const db = await requireDb();
-  await db
-    .update(chapterJobs)
-    .set({ status: "uploading", googleDriveFolderId, googleDriveUrl, updatedAt: new Date() })
-    .where(eq(chapterJobs.id, id));
+  await collections(db).chapterJobs.updateOne({ id }, { $set: { status: "uploading", googleDriveFolderId, googleDriveUrl, updatedAt: now() } });
 }
 
 export async function updateJobUploadProgress(id: string, uploadedPages: number): Promise<void> {
   const db = await requireDb();
-  await db.update(chapterJobs).set({ uploadedPages, updatedAt: new Date() }).where(eq(chapterJobs.id, id));
+  await collections(db).chapterJobs.updateOne({ id }, { $set: { uploadedPages, updatedAt: now() } });
 }
 
 export async function markJobCompleted(id: string): Promise<void> {
   const db = await requireDb();
-  await db.update(chapterJobs).set({ status: "completed", completedAt: new Date(), updatedAt: new Date() }).where(eq(chapterJobs.id, id));
+  await collections(db).chapterJobs.updateOne({ id }, { $set: { status: "completed", completedAt: now(), updatedAt: now() } });
 }
 
 export async function markJobFailed(id: string, code: string, message: string): Promise<void> {
   const db = await requireDb();
-  await db
-    .update(chapterJobs)
-    .set({ status: "failed", failureCode: code, failureMessage: message.slice(0, 4000), completedAt: new Date(), updatedAt: new Date() })
-    .where(eq(chapterJobs.id, id));
+  await collections(db).chapterJobs.updateOne({ id }, { $set: { status: "failed", failureCode: code, failureMessage: message.slice(0, 4000), completedAt: now(), updatedAt: now() } });
 }
 
-export async function listChapterJobs(filters?: {
-  search?: string;
-  status?: ChapterJob["status"];
-  sourceId?: number;
-  from?: Date;
-  to?: Date;
-  pageCount?: number;
-  withDrive?: boolean;
-}) {
+export async function listChapterJobs(filters?: { search?: string; status?: ChapterJob["status"]; sourceId?: number; from?: Date; to?: Date; pageCount?: number; withDrive?: boolean }) {
   const db = await requireDb();
-  const conditions = [];
-  if (filters?.status) conditions.push(eq(chapterJobs.status, filters.status));
-  if (filters?.sourceId) conditions.push(eq(chapterJobs.sourceId, filters.sourceId));
-  if (filters?.from) conditions.push(gte(chapterJobs.createdAt, filters.from));
-  if (filters?.to) conditions.push(lte(chapterJobs.createdAt, filters.to));
-  if (filters?.pageCount) conditions.push(eq(chapterJobs.totalPages, filters.pageCount));
-  if (filters?.withDrive) conditions.push(isNotNull(chapterJobs.googleDriveUrl));
+  const c = collections(db);
+  const query: Filter<ChapterJob> = {};
+  if (filters?.status) query.status = filters.status;
+  if (filters?.sourceId) query.sourceId = filters.sourceId;
+  if (filters?.from || filters?.to) query.createdAt = { ...(filters.from ? { $gte: filters.from } : {}), ...(filters.to ? { $lte: filters.to } : {}) };
+  if (filters?.pageCount) query.totalPages = filters.pageCount;
+  if (filters?.withDrive) query.googleDriveUrl = { $ne: null } as never;
   if (filters?.search?.trim()) {
-    const search = `%${filters.search.trim()}%`;
-    conditions.push(or(like(chapterJobs.canonicalUrl, search), like(chapterJobs.requestedByName, search))!);
+    const regex = new RegExp(filters.search.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    query.$or = [{ canonicalUrl: regex }, { requestedByName: regex }] as never;
   }
 
-  return db
-    .select({ job: chapterJobs, sourceName: contentSources.name, sourceHostname: contentSources.hostname })
-    .from(chapterJobs)
-    .leftJoin(contentSources, eq(chapterJobs.sourceId, contentSources.id))
-    .where(conditions.length ? and(...conditions) : undefined)
-    .orderBy(desc(chapterJobs.createdAt))
-    .limit(200);
+  const jobs = (await c.chapterJobs.find(query).sort({ createdAt: -1 }).limit(200).toArray()).map(row => stripMongoId(row) as ChapterJob);
+  const sourceIds = Array.from(new Set(jobs.map(job => job.sourceId)));
+  const sources = await c.contentSources.find({ id: { $in: sourceIds } }).toArray();
+  const sourceById = new Map(sources.map(source => [source.id, source]));
+  return jobs.map(job => ({ job, sourceName: sourceById.get(job.sourceId)?.name ?? null, sourceHostname: sourceById.get(job.sourceId)?.hostname ?? null }));
 }
 
 export async function addJobAttempt(jobId: string, phase: string, message: string): Promise<void> {
   const db = await requireDb();
-  await db.insert(jobAttempts).values({ jobId, phase, message });
+  await collections(db).jobAttempts.insertOne({ id: await nextSequence("jobAttempts"), jobId, phase, message, createdAt: now() });
 }
 
 export async function listJobAttempts(jobId: string) {
   const db = await requireDb();
-  return db.select().from(jobAttempts).where(eq(jobAttempts.jobId, jobId)).orderBy(desc(jobAttempts.createdAt));
+  return (await collections(db).jobAttempts.find({ jobId }).sort({ createdAt: -1 }).toArray()).map(stripMongoId);
 }
 
-export async function saveIntegrationHealth(
-  service: string,
-  status: "healthy" | "degraded" | "offline" | "unknown",
-  message?: string,
-): Promise<{ consecutiveFailures: number }> {
+export async function saveIntegrationHealth(service: string, status: "healthy" | "degraded" | "offline" | "unknown", message?: string): Promise<{ consecutiveFailures: number }> {
   const db = await requireDb();
-  const existing = await db.select().from(integrationHealth).where(eq(integrationHealth.service, service)).limit(1);
-  const failed = status === "healthy" ? 0 : (existing[0]?.consecutiveFailures ?? 0) + 1;
-  await db
-    .insert(integrationHealth)
-    .values({ service, status, message: message ?? null, consecutiveFailures: failed, lastCheckedAt: new Date() })
-    .onDuplicateKeyUpdate({
-      set: { status, message: message ?? null, consecutiveFailures: failed, lastCheckedAt: new Date(), updatedAt: new Date() },
-    });
-  return { consecutiveFailures: failed };
+  const c = collections(db).integrationHealth;
+  const existing = await c.findOne({ service });
+  const consecutiveFailures = status === "healthy" ? 0 : (existing?.consecutiveFailures ?? 0) + 1;
+  await c.updateOne(
+    { service },
+    { $setOnInsert: { id: await nextSequence("integrationHealth") }, $set: { service, status, message: message ?? null, consecutiveFailures, lastCheckedAt: now(), updatedAt: now() } },
+    { upsert: true },
+  );
+  return { consecutiveFailures };
 }
 
 export async function listIntegrationHealth() {
   const db = await requireDb();
-  return db.select().from(integrationHealth).orderBy(integrationHealth.service);
+  return (await collections(db).integrationHealth.find().sort({ service: 1 }).toArray()).map(stripMongoId);
 }
 
-export async function createIntegrationAlert(input: {
-  service: string;
-  severity: "warning" | "critical";
-  fingerprint: string;
-  message: string;
-  recipientDiscordUserId?: string;
-}): Promise<{ id: number; reused: boolean }> {
+export async function createIntegrationAlert(input: { service: string; severity: "warning" | "critical"; fingerprint: string; message: string; recipientDiscordUserId?: string }): Promise<{ id: number; reused: boolean }> {
   const db = await requireDb();
-  const rows = await db
-    .select()
-    .from(integrationAlerts)
-    .where(and(eq(integrationAlerts.service, input.service), eq(integrationAlerts.fingerprint, input.fingerprint)))
-    .orderBy(desc(integrationAlerts.createdAt))
-    .limit(1);
-  const existing = rows[0];
-  if (existing && Date.now() - existing.createdAt.getTime() < 30 * 60 * 1000) {
-    return { id: existing.id, reused: true };
-  }
-  const result = await db.insert(integrationAlerts).values({
-    service: input.service,
-    severity: input.severity,
-    fingerprint: input.fingerprint,
-    message: input.message.slice(0, 4000),
-    recipientDiscordUserId: input.recipientDiscordUserId ?? null,
-  });
-  return { id: Number(result[0].insertId), reused: false };
+  const c = collections(db).integrationAlerts;
+  const existing = await c.find({ service: input.service, fingerprint: input.fingerprint }).sort({ createdAt: -1 }).limit(1).next();
+  if (existing && Date.now() - existing.createdAt.getTime() < 30 * 60 * 1000) return { id: existing.id, reused: true };
+  const alert: IntegrationAlert = { id: await nextSequence("integrationAlerts"), service: input.service, severity: input.severity, fingerprint: input.fingerprint, message: input.message.slice(0, 4000), recipientDiscordUserId: input.recipientDiscordUserId ?? null, deliveryStatus: "pending", createdAt: now(), deliveredAt: null };
+  await c.insertOne(alert);
+  return { id: alert.id, reused: false };
 }
 
 export async function markIntegrationAlertDelivered(id: number, deliveryStatus: "sent" | "failed"): Promise<void> {
   const db = await requireDb();
-  await db.update(integrationAlerts).set({ deliveryStatus, deliveredAt: new Date() }).where(eq(integrationAlerts.id, id));
+  await collections(db).integrationAlerts.updateOne({ id }, { $set: { deliveryStatus, deliveredAt: now() } });
 }
 
 export async function listIntegrationAlerts() {
   const db = await requireDb();
-  return db.select().from(integrationAlerts).orderBy(desc(integrationAlerts.createdAt)).limit(50);
+  return (await collections(db).integrationAlerts.find().sort({ createdAt: -1 }).limit(50).toArray()).map(stripMongoId);
 }
 
 export async function getDashboardSummary() {
   const db = await requireDb();
-  const counts = await db
-    .select({ status: chapterJobs.status, count: sql<number>`count(*)` })
-    .from(chapterJobs)
-    .groupBy(chapterJobs.status);
+  const c = collections(db);
+  const countsRows = await c.chapterJobs.aggregate<{ _id: ChapterJob["status"]; count: number }>([{ $group: { _id: "$status", count: { $sum: 1 } } }]).toArray();
   const recentJobs = await listChapterJobs();
   const recentAlerts = await listIntegrationAlerts();
-  const sourceCount = await db.select({ count: sql<number>`count(*)` }).from(contentSources);
-  const activeSourceCount = await db
-    .select({ count: sql<number>`count(*)` })
-    .from(contentSources)
-    .where(eq(contentSources.status, "active"));
-
+  const [sourceCount, activeSourceCount] = await Promise.all([
+    c.contentSources.countDocuments(),
+    c.contentSources.countDocuments({ status: "active" }),
+  ]);
   return {
-    counts: Object.fromEntries(counts.map(item => [item.status, Number(item.count)])),
-    sourceCount: Number(sourceCount[0]?.count ?? 0),
-    activeSourceCount: Number(activeSourceCount[0]?.count ?? 0),
+    counts: Object.fromEntries(countsRows.map(item => [item._id, item.count])),
+    sourceCount,
+    activeSourceCount,
     recentJobs: recentJobs.slice(0, 8),
     recentAlerts: recentAlerts.slice(0, 5),
   };

@@ -12,7 +12,7 @@ import {
   setJobChapterDetails,
   updateJobUploadProgress,
 } from "../db";
-import type { ChapterJob } from "../../drizzle/schema";
+import type { ChapterJob } from "../../shared/dbTypes";
 import { ENV } from "../_core/env";
 import { sendJobUpdate, sendOwnerAlert } from "./discordBot";
 import { GoogleDriveClient, GoogleDriveError } from "./googleDrive";
