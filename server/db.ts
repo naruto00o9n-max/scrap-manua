@@ -138,8 +138,10 @@ export async function upsertUser(user: InsertUser): Promise<void> {
   const timestamp = now();
   const update: Partial<User> = {
     lastSignedIn: user.lastSignedIn ?? timestamp,
-    role: user.role ?? "user",
     updatedAt: timestamp,
+    // Only overwrite the role when explicitly provided; otherwise every
+    // authenticated request (which upserts with no role) would demote admins.
+    ...(user.role !== undefined ? { role: user.role } : {}),
     ...(user.passwordHash !== undefined ? { passwordHash: user.passwordHash } : {}),
     ...(user.isBlocked !== undefined ? { isBlocked: user.isBlocked } : {}),
   };
@@ -148,7 +150,7 @@ export async function upsertUser(user: InsertUser): Promise<void> {
   }
   await collections(db).users.updateOne(
     { openId: user.openId },
-    { $setOnInsert: { id: await nextSequence("users"), openId: user.openId, createdAt: timestamp, passwordHash: user.passwordHash ?? null, isBlocked: user.isBlocked ?? false }, $set: update },
+    { $setOnInsert: { id: await nextSequence("users"), openId: user.openId, createdAt: timestamp, role: user.role ?? "user", passwordHash: user.passwordHash ?? null, isBlocked: user.isBlocked ?? false }, $set: update },
     { upsert: true },
   );
 }

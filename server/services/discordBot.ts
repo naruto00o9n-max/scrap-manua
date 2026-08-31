@@ -225,12 +225,31 @@ export async function startDiscordBot() {
   client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
   client.once(Events.ClientReady, async ready => {
     console.info(`[Discord] Connected as ${ready.user.tag}`);
-    try {
-      await refreshDiscordCommands();
-      console.info(`[Discord] Guild commands refreshed (${commandPayload.length})`);
-      await saveIntegrationHealth("discord", "healthy", `البوت متصل وحُدّثت ${commandPayload.length} أوامر.`);
-    } catch (error) {
-      console.error("[Discord] Command registration failed", error);
+    // Registering guild commands can fail with DiscordAPIError[50001]
+    // "Missing Access" when the bot was invited only with the `bot` scope.
+    // Re-authorizing the app with the `applications.commands` scope fixes it,
+    // so retry a few times instead of giving up after a single attempt.
+    const maxAttempts = 6;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await refreshDiscordCommands();
+        console.info(`[Discord] Guild commands refreshed (${commandPayload.length})`);
+        await saveIntegrationHealth("discord", "healthy", `البوت متصل وحُدّثت ${commandPayload.length} أوامر.`);
+        break;
+      } catch (error) {
+        const missingAccess = (error as { code?: number })?.code === 50001;
+        console.error(
+          `[Discord] Command registration attempt ${attempt}/${maxAttempts} failed`,
+          error
+        );
+        if (attempt === maxAttempts) break;
+        if (missingAccess) {
+          console.warn(
+            "[Discord] Missing Access: أعِد دعوة التطبيق إلى السيرفر مع نطاق applications.commands (رابط الدعوة في README/السجل). سنعيد المحاولة بعد 30 ثانية."
+          );
+        }
+        await new Promise(resolve => setTimeout(resolve, 30_000));
+      }
     }
   });
   client.on(Events.InteractionCreate, async interaction => {
