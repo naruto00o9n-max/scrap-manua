@@ -32,6 +32,10 @@ function normalizedUrl(value: string): string {
   const parsed = new URL(value);
   parsed.hash = "";
   parsed.hostname = parsed.hostname.replace(/^www\./, "");
+  // Webtoons serves the same catalog on webtoons.com, www.webtoons.com and
+  // m.webtoons.com (the extension stores realUrl on www). Canonicalize them
+  // onto one host so URL matching does not miss.
+  if (parsed.hostname === "webtoons.com") parsed.hostname = "m.webtoons.com";
   if (parsed.hostname === "comic.naver.com") {
     parsed.searchParams.delete("week");
   } else {
@@ -42,9 +46,16 @@ function normalizedUrl(value: string): string {
 
 export function mangaUrlFromChapterUrl(chapterUrl: string): string | null {
   const parsed = new URL(chapterUrl);
-  if (parsed.hostname.replace(/^www\./, "") === "comic.naver.com" && parsed.pathname === "/webtoon/detail") {
+  const host = parsed.hostname.replace(/^www\./, "");
+  if (host === "comic.naver.com" && parsed.pathname === "/webtoon/detail") {
     const titleId = parsed.searchParams.get("titleId");
     return titleId ? `${parsed.origin}/webtoon/list?titleId=${encodeURIComponent(titleId)}` : null;
+  }
+  if ((host === "m.webtoons.com" || host === "webtoons.com") && /\/viewer\/?$/i.test(parsed.pathname)) {
+    const titleNo = parsed.searchParams.get("title_no");
+    if (!titleNo) return null;
+    const listPath = parsed.pathname.replace(/\/ep-[^/]+\/viewer\/?$/i, "/list");
+    return `${parsed.origin}${listPath}?title_no=${encodeURIComponent(titleNo)}`;
   }
   const match = parsed.pathname.match(/^(.*)\/chapter\/[^/]+\/?$/i);
   if (!match?.[1]) return null;
@@ -67,7 +78,11 @@ export async function naverTitleFromChapterUrl(chapterUrl: string): Promise<stri
 export function sourceSearchQueryFromChapterUrl(chapterUrl: string): string | null {
   const mangaUrl = mangaUrlFromChapterUrl(chapterUrl);
   if (!mangaUrl) return null;
-  const slug = new URL(mangaUrl).pathname.split("/").filter(Boolean).at(-1);
+  const segments = new URL(mangaUrl).pathname
+    .split("/")
+    .filter(Boolean)
+    .filter(segment => !/^(list|detail|viewer|episode)$/i.test(segment));
+  const slug = segments.at(-1);
   if (!slug) return null;
   return slug
     .replace(/-[a-f0-9]{6,}$/i, "")
@@ -189,22 +204,42 @@ export class SuwayomiClient {
     const mangaUrl = mangaUrlFromChapterUrl(chapterUrl);
     const parsedChapterUrl = new URL(chapterUrl);
     const baseSearchQuery = sourceSearchQueryFromChapterUrl(chapterUrl);
-    const searchQuery = baseSearchQuery === "list" && parsedChapterUrl.hostname.replace(/^www\\./, "") === "comic.naver.com"
-      ? await naverTitleFromChapterUrl(chapterUrl)
-      : baseSearchQuery;
+    // Naver chapter URLs carry no readable slug, so derive the series title
+    // from the chapter page itself before searching the source.
+    const isNaver = parsedChapterUrl.hostname.replace(/^www\./, "") === "comic.naver.com";
+    const searchQuery = isNaver ? await naverTitleFromChapterUrl(chapterUrl) : baseSearchQuery;
     if (!mangaUrl) return null;
+
+    const targetMangaUrl = normalizedUrl(mangaUrl);
+    const matchManga = (candidates: SuwayomiManga[]): SuwayomiManga | undefined => {
+      const byUrl = candidates.find(candidate => {
+        const candidateUrl = absoluteUrl(candidate.realUrl || candidate.url, mangaUrl);
+        try { return normalizedUrl(candidateUrl) === targetMangaUrl; } catch { return false; }
+      });
+      if (byUrl) return byUrl;
+      return searchQuery
+        ? candidates.find(candidate => normalizedTitle(candidate.title) === normalizedTitle(searchQuery))
+        : undefined;
+    };
 
     const directManga = await this.findMangaByUrl(mangaUrl);
     const mangaCandidates = directManga ? [directManga] : searchQuery ? await this.searchSourceManga(sourceId, searchQuery) : [];
-    const targetMangaUrl = normalizedUrl(mangaUrl);
-    const mangaByUrl = mangaCandidates.find(candidate => {
-      const candidateUrl = absoluteUrl(candidate.realUrl || candidate.url, mangaUrl);
-      try { return normalizedUrl(candidateUrl) === targetMangaUrl; } catch { return false; }
-    });
-    const mangaByTitle = searchQuery
-      ? mangaCandidates.find(candidate => normalizedTitle(candidate.title) === normalizedTitle(searchQuery))
-      : undefined;
-    const manga = directManga ?? mangaByUrl ?? mangaByTitle;
+    let manga = directManga ?? matchManga(mangaCandidates);
+
+    // Webtoons.com search is punctuation-insensitive on its side, so the raw
+    // slug (which drops apostrophes) can miss the series. Retry with
+    // progressively shorter prefixes of the slug words.
+    if (!manga && !isNaver && searchQuery) {
+      const words = searchQuery.split(" ").filter(Boolean);
+      for (const length of [Math.min(6, words.length), Math.min(4, words.length), Math.min(3, words.length)]) {
+        if (length < 3) break;
+        const shortened = words.slice(0, length).join(" ");
+        if (shortened === searchQuery) continue;
+        const retry = await this.searchSourceManga(sourceId, shortened);
+        manga = matchManga(retry);
+        if (manga) break;
+      }
+    }
     if (!manga) return null;
 
     const chapters = await this.fetchMangaAndChapters(manga.id);

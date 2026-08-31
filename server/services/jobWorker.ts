@@ -47,7 +47,19 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
     if (source.extensionName && installedSource.extension.name !== source.extensionName) {
       throw new Error("اسم إضافة Suwayomi المثبتة لا يطابق الإضافة المعتمدة للمصدر.");
     }
-    const chapter = await suwayomi.findOrFetchChapterFromSource(source.suwayomiSourceId, job.canonicalUrl);
+    // Live source refreshes (webtoons.com, Naver, ...) occasionally return an
+    // empty chapter list or briefly fail. Retry resolution with a short
+    // backoff before declaring the job failed.
+    let chapter: Awaited<ReturnType<typeof suwayomi.findOrFetchChapterFromSource>> = null;
+    const resolutionAttempts = 3;
+    for (let attempt = 1; attempt <= resolutionAttempts; attempt++) {
+      chapter = await suwayomi.findOrFetchChapterFromSource(source.suwayomiSourceId, job.canonicalUrl);
+      if (chapter) break;
+      if (attempt < resolutionAttempts) {
+        await addJobAttempt(job.id, "downloading", `لم يُعثر على الفصل في المحاولة ${attempt}، تتم إعادة المحاولة بعد مهلة.`);
+        await new Promise(resolve => setTimeout(resolve, attempt === 1 ? 5_000 : 15_000));
+      }
+    }
     if (!chapter) {
       throw new Error("لم يعثر Suwayomi على الفصل بهذا الرابط. تأكد من تثبيت الإضافة المصرح بها وأن الفصل معروف للخادم.");
     }
