@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import { buildJobComponents, getRegisteredDiscordCommands } from "./discordBot";
 
 describe("Discord public chapter experience", () => {
-  it("registers only public chapter/help commands and no status command", () => {
+  it("registers Arabic-only commands and no status command", () => {
     const names = getRegisteredDiscordCommands().map(command => command.name);
-    expect(names).toEqual(["فصل", "chapter", "مساعدة", "help"]);
+    expect(names).toEqual(["فصل", "مساعدة"]);
     expect(names).not.toContain("حالة");
   });
 

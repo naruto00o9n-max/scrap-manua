@@ -15,7 +15,7 @@ import {
 } from "../db";
 import type { ChapterJob } from "../../shared/dbTypes";
 import { ENV } from "../_core/env";
-import { sendJobUpdate, sendOwnerAlert } from "./discordBot";
+import { sendJobUpdate, updateJobProgressMessage, type JobNotice } from "./discordBot";
 import { GoogleDriveClient, GoogleDriveError } from "./googleDrive";
 import { getUsableSuwayomiToken } from "./settings";
 import { SuwayomiClient } from "./suwayomi";
@@ -28,10 +28,36 @@ function describeError(error: unknown) {
   return error instanceof Error ? error.message : "حدث خطأ غير معروف أثناء معالجة الطلب.";
 }
 
+/**
+ * يحدّث بطاقة المتابعة في Discord في كل خطوة. التحديث مخنوق (كل 2.5 ثانية)
+ * احترامًا لحدود معدل Discord، مع إجبار التحديث عند نهاية كل مرحلة أو تغيّرها.
+ */
+function createProgressPoster(channelId: string | null, messageId: string | null) {
+  let lastKey = "";
+  let lastAt = 0;
+  return async (notice: JobNotice, force = false) => {
+    if (!channelId || !messageId) return;
+    const key = `${notice.status}|${notice.title}|${notice.description}|${notice.progress ? `${notice.progress.done}/${notice.progress.total}` : ""}`;
+    const isPhaseEnd = notice.progress ? notice.progress.done >= notice.progress.total : false;
+    const nowMs = Date.now();
+    if (!force && !isPhaseEnd && (key === lastKey || nowMs - lastAt < 2500)) return;
+    lastKey = key;
+    lastAt = nowMs;
+    try {
+      await updateJobProgressMessage(channelId, messageId, notice);
+    } catch {
+      /* فشل تحديث البطاقة لا يُفشل معالجة الفصل */
+    }
+  };
+}
+
 async function processChapterJob(job: ChapterJob): Promise<void> {
   try {
     await markJobStarted(job.id);
+    const live = await getChapterJob(job.id);
+    const post = createProgressPoster(job.requestedInChannelId, live?.discordProgressMessageId ?? null);
     await addJobAttempt(job.id, "downloading", "بدأ التحقق من الفصل عبر Suwayomi.");
+    await post({ jobId: job.id, status: "downloading", title: "🔎 جاري التحقق من الرابط", description: "جاري مطابقة الموقع والفصل مع المصدر المعتمد." }, true);
     const source = await getSourceById(job.sourceId);
     if (!source || source.status !== "active" || !source.allowDirectChapterLookup || !source.suwayomiSourceId) {
       throw new Error("المصدر لم يعد مفعّلًا أو غير مربوط بمصدر Suwayomi مصرح به.");
@@ -70,9 +96,17 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
 
     const fetched = await suwayomi.fetchChapterPages(chapter.id);
     if (!fetched.pages.length) throw new Error("لم يعد Suwayomi أي صفحات قابلة للرفع لهذا الفصل.");
+    const mangaLabel = `**${fetched.chapter.manga.title}** — ${fetched.chapter.name}`;
+    await post({ jobId: job.id, status: "downloading", title: "📖 تم العثور على الفصل", description: `${mangaLabel}\nعدد الصفحات: **${fetched.pages.length}**` }, true);
     // تُنزّل الصفحات وتُدمج عبر ملفات مؤقتة على القرص بدل الذاكرة؛ ذلك يمنع
     // قتل العملية بسبب نفاد الذاكرة (exit 137) في الفصول الطويلة.
-    const mergeSession = await openChapterMergeSession(fetched.pages);
+    const mergeSession = await openChapterMergeSession(fetched.pages, async event => {
+      if (event.phase === "downloading") {
+        await post({ jobId: job.id, status: "downloading", title: "⬇️ جاري سحب الصفحات", description: mangaLabel, progress: { done: event.done, total: event.total } });
+      } else {
+        await post({ jobId: job.id, status: "downloading", title: "🧩 جاري دمج الصفحات", description: mangaLabel, progress: { done: event.done, total: event.total } });
+      }
+    });
     try {
       const mergedImages = mergeSession.images;
       if (!mergedImages.length) throw new Error("تعذر دمج صفحات الفصل في صور قابلة للرفع.");
@@ -95,6 +129,7 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
       const folder = await drive.createChapterFolder(fetched.chapter.manga.title, fetched.chapter.name, sharing);
       await markJobUploading(job.id, folder.id, folder.url);
       await addJobAttempt(job.id, "uploading", "أُنشئ مجلد Google Drive وبدأ رفع الصور المرتبة.");
+      await post({ jobId: job.id, status: "uploading", title: "☁️ جاري الرفع", description: mangaLabel, progress: { done: 0, total: mergedImages.length } }, true);
 
       for (let offset = 0; offset < mergedImages.length; offset += 1) {
         const mergedImage = mergedImages[offset];
@@ -102,18 +137,19 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
         const latest = await getChapterJob(job.id);
         if (latest?.cancelRequested) {
           await addJobAttempt(job.id, "cancelled", "أُلغي الطلب قبل اكتمال رفع جميع الصفحات.");
-          await sendJobUpdate(job.requestedInChannelId, job.requestedByDiscordId, { jobId: job.id, status: "cancelled", title: "أُلغي طلب الفصل", description: "أُلغي الطلب قبل اكتمال رفع الصفحات." });
+          await sendJobUpdate(job.requestedInChannelId, job.requestedByDiscordId, { jobId: job.id, status: "cancelled", title: "🚫 أُلغي الطلب", description: "أوقفتَ هذه العملية قبل اكتمال الرفع." });
           return;
         }
         const pageNumber = offset + 1;
         await drive.uploadMergedPageFile(mergedImage.filePath, folder.id, pageNumber);
         await updateJobUploadProgress(job.id, pageNumber);
+        await post({ jobId: job.id, status: "uploading", title: "☁️ جاري الرفع", description: mangaLabel, progress: { done: pageNumber, total: mergedImages.length } });
       }
 
       await markJobCompleted(job.id);
       await addJobAttempt(job.id, "completed", `اكتمل رفع ${mergedImages.length} صورة طويلة مدمجة إلى Google Drive.`);
       await saveIntegrationHealth("job-worker", "healthy", "آخر مهمة اكتملت بنجاح.");
-      await sendJobUpdate(job.requestedInChannelId, job.requestedByDiscordId, { jobId: job.id, status: "completed", title: "اكتمل حفظ الفصل", description: "اكتمل دمج الصفحات ورفع الصور الطويلة بالترتيب إلى Google Drive.", pageCount: mergedImages.length, driveUrl: folder.url });
+      await sendJobUpdate(job.requestedInChannelId, job.requestedByDiscordId, { jobId: job.id, status: "completed", title: "✅ الفصل جاهز", description: mangaLabel, pageCount: mergedImages.length, driveUrl: folder.url });
     } finally {
       await mergeSession.cleanup();
     }
@@ -122,7 +158,7 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
     await markJobFailed(job.id, "PROCESSING_FAILED", message);
     await addJobAttempt(job.id, "failed", message);
     const health = await saveIntegrationHealth("job-worker", "degraded", message);
-    await sendJobUpdate(job.requestedInChannelId, job.requestedByDiscordId, { jobId: job.id, status: "failed", title: "تعذرت معالجة الفصل", description: message });
+    await sendJobUpdate(job.requestedInChannelId, job.requestedByDiscordId, { jobId: job.id, status: "failed", title: "❌ فشل تجهيز الفصل", description: message });
     if (health.consecutiveFailures === 3) {
       await recordOwnerAlert("job-worker", "critical", `فشل عامل الفصول 3 مرات متتالية. آخر سبب: ${message}`);
     }
@@ -137,12 +173,12 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
 async function failStaleInFlightJobs(): Promise<void> {
   const staleJobs = await getStaleInFlightChapterJobs();
   for (const job of staleJobs) {
-    const message = "توقفت معالجة الطلب فجأة (إعادة تشغيل الخدمة أو نفاد الذاكرة). أعد إرسال الطلب بأمر /فصل.";
+    const message = "توقفت المعالجة فجأة (إعادة تشغيل الخدمة أو نفاد الذاكرة). أعد إرسال الرابط بأمر /فصل وسيبدأ التجهيز من جديد.";
     try {
       await markJobFailed(job.id, "WORKER_INTERRUPTED", message);
       await addJobAttempt(job.id, "failed", message);
       await saveIntegrationHealth("job-worker", "degraded", message);
-      await sendJobUpdate(job.requestedInChannelId, job.requestedByDiscordId, { jobId: job.id, status: "failed", title: "انقطعت معالجة الفصل", description: message });
+      await sendJobUpdate(job.requestedInChannelId, job.requestedByDiscordId, { jobId: job.id, status: "failed", title: "❌ توقفت المعالجة", description: message });
     } catch (error) {
       console.error("[JobWorker] تعذر إغلاق طلب معلق قديم:", error);
     }
