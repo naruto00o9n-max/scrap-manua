@@ -1,3 +1,5 @@
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
 import { Readable, Transform } from "node:stream";
 import { isIP } from "node:net";
 import { google } from "googleapis";
@@ -5,6 +7,9 @@ import { ENV } from "../_core/env";
 
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const MAX_PAGE_SIZE_BYTES = 40 * 1024 * 1024;
+// الصورة المدمجة تُولَّد داخليًا وقد يتجاوز طول 14000px حد الصفحة الواحدة،
+// لذلك لها سقف أعلى من سقف صفحات المصدر.
+const MAX_MERGED_IMAGE_BYTES = 120 * 1024 * 1024;
 const PLATFORM_FOLDER_NAME = "Manga Drive Discord Bot";
 
 export type DriveSharingPolicy =
@@ -131,6 +136,24 @@ export class GoogleDriveClient {
     await this.drive.files.create({
       requestBody: { name: filename, parents: [folderId] },
       media: { mimeType: "image/png", body: Readable.from(data) },
+      fields: "id",
+    });
+  }
+
+  /** يرفع صورة مدمجة من ملف مؤقت على القرص عبر تدفق مباشر دون تحميلها في الذاكرة. */
+  async uploadMergedPageFile(filePath: string, folderId: string, imageIndex: number): Promise<void> {
+    const stats = await stat(filePath);
+    if (!stats.size || stats.size > MAX_MERGED_IMAGE_BYTES) throw new GoogleDriveError("حجم الصورة المدمجة غير صالح.");
+    const filename = buildPageFilename(imageIndex, "image/png");
+    const existing = await this.drive.files.list({
+      q: `'${escapeDriveQuery(folderId)}' in parents and name = '${escapeDriveQuery(filename)}' and trashed = false`,
+      fields: "files(id)",
+      pageSize: 1,
+    });
+    if (existing.data.files?.[0]?.id) return;
+    await this.drive.files.create({
+      requestBody: { name: filename, parents: [folderId] },
+      media: { mimeType: "image/png", body: createReadStream(filePath) },
       fields: "id",
     });
   }

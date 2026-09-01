@@ -4,6 +4,7 @@ import {
   getNextPendingChapterJob,
   getSetting,
   getSourceById,
+  getStaleInFlightChapterJobs,
   markJobCompleted,
   markJobFailed,
   markJobStarted,
@@ -18,7 +19,7 @@ import { sendJobUpdate, sendOwnerAlert } from "./discordBot";
 import { GoogleDriveClient, GoogleDriveError } from "./googleDrive";
 import { getUsableSuwayomiToken } from "./settings";
 import { SuwayomiClient } from "./suwayomi";
-import { mergeChapterPages } from "./imageMerging";
+import { openChapterMergeSession } from "./imageMerging";
 import { recordOwnerAlert } from "./alerts";
 
 let isDraining = false;
@@ -69,46 +70,53 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
 
     const fetched = await suwayomi.fetchChapterPages(chapter.id);
     if (!fetched.pages.length) throw new Error("لم يعد Suwayomi أي صفحات قابلة للرفع لهذا الفصل.");
-    const mergedImages = await mergeChapterPages(fetched.pages);
-    if (!mergedImages.length) throw new Error("تعذر دمج صفحات الفصل في صور قابلة للرفع.");
-    await setJobChapterDetails(job.id, {
-      sourceChapterId: String(chapter.id),
-      mangaTitle: fetched.chapter.manga.title,
-      chapterTitle: fetched.chapter.name,
-      totalPages: mergedImages.length,
-    });
-    await addJobAttempt(job.id, "downloading", `استلم Suwayomi ${fetched.pages.length} صفحة ودمجها في ${mergedImages.length} صور طويلة غير خسارية.`);
+    // تُنزّل الصفحات وتُدمج عبر ملفات مؤقتة على القرص بدل الذاكرة؛ ذلك يمنع
+    // قتل العملية بسبب نفاد الذاكرة (exit 137) في الفصول الطويلة.
+    const mergeSession = await openChapterMergeSession(fetched.pages);
+    try {
+      const mergedImages = mergeSession.images;
+      if (!mergedImages.length) throw new Error("تعذر دمج صفحات الفصل في صور قابلة للرفع.");
+      await setJobChapterDetails(job.id, {
+        sourceChapterId: String(chapter.id),
+        mangaTitle: fetched.chapter.manga.title,
+        chapterTitle: fetched.chapter.name,
+        totalPages: mergedImages.length,
+      });
+      await addJobAttempt(job.id, "downloading", `استلم Suwayomi ${fetched.pages.length} صفحة ودمجها في ${mergedImages.length} صور طويلة غير خسارية.`);
 
-    const drive = new GoogleDriveClient();
-    const sharingMode = await getSetting("google_drive_sharing_mode") ?? "link_reader";
-    const sharingDomain = await getSetting("google_drive_sharing_domain");
-    const sharing = sharingMode === "private"
-      ? { mode: "private" as const }
-      : sharingMode === "domain_reader" && sharingDomain
-        ? { mode: "domain_reader" as const, domain: sharingDomain }
-        : { mode: "link_reader" as const };
-    const folder = await drive.createChapterFolder(fetched.chapter.manga.title, fetched.chapter.name, sharing);
-    await markJobUploading(job.id, folder.id, folder.url);
-    await addJobAttempt(job.id, "uploading", "أُنشئ مجلد Google Drive وبدأ رفع الصور المرتبة.");
+      const drive = new GoogleDriveClient();
+      const sharingMode = await getSetting("google_drive_sharing_mode") ?? "link_reader";
+      const sharingDomain = await getSetting("google_drive_sharing_domain");
+      const sharing = sharingMode === "private"
+        ? { mode: "private" as const }
+        : sharingMode === "domain_reader" && sharingDomain
+          ? { mode: "domain_reader" as const, domain: sharingDomain }
+          : { mode: "link_reader" as const };
+      const folder = await drive.createChapterFolder(fetched.chapter.manga.title, fetched.chapter.name, sharing);
+      await markJobUploading(job.id, folder.id, folder.url);
+      await addJobAttempt(job.id, "uploading", "أُنشئ مجلد Google Drive وبدأ رفع الصور المرتبة.");
 
-    for (let offset = 0; offset < mergedImages.length; offset += 1) {
-      const mergedImage = mergedImages[offset];
-      if (!mergedImage) continue;
-      const latest = await getChapterJob(job.id);
-      if (latest?.cancelRequested) {
-        await addJobAttempt(job.id, "cancelled", "أُلغي الطلب قبل اكتمال رفع جميع الصفحات.");
-        await sendJobUpdate(job.requestedInChannelId, job.requestedByDiscordId, { jobId: job.id, status: "cancelled", title: "أُلغي طلب الفصل", description: "أُلغي الطلب قبل اكتمال رفع الصفحات." });
-        return;
+      for (let offset = 0; offset < mergedImages.length; offset += 1) {
+        const mergedImage = mergedImages[offset];
+        if (!mergedImage) continue;
+        const latest = await getChapterJob(job.id);
+        if (latest?.cancelRequested) {
+          await addJobAttempt(job.id, "cancelled", "أُلغي الطلب قبل اكتمال رفع جميع الصفحات.");
+          await sendJobUpdate(job.requestedInChannelId, job.requestedByDiscordId, { jobId: job.id, status: "cancelled", title: "أُلغي طلب الفصل", description: "أُلغي الطلب قبل اكتمال رفع الصفحات." });
+          return;
+        }
+        const pageNumber = offset + 1;
+        await drive.uploadMergedPageFile(mergedImage.filePath, folder.id, pageNumber);
+        await updateJobUploadProgress(job.id, pageNumber);
       }
-      const pageNumber = offset + 1;
-      await drive.uploadMergedPage(mergedImage.data, folder.id, pageNumber);
-      await updateJobUploadProgress(job.id, pageNumber);
-    }
 
-    await markJobCompleted(job.id);
-    await addJobAttempt(job.id, "completed", `اكتمل رفع ${mergedImages.length} صورة طويلة مدمجة إلى Google Drive.`);
-    await saveIntegrationHealth("job-worker", "healthy", "آخر مهمة اكتملت بنجاح.");
-    await sendJobUpdate(job.requestedInChannelId, job.requestedByDiscordId, { jobId: job.id, status: "completed", title: "اكتمل حفظ الفصل", description: "اكتمل دمج الصفحات ورفع الصور الطويلة بالترتيب إلى Google Drive.", pageCount: mergedImages.length, driveUrl: folder.url });
+      await markJobCompleted(job.id);
+      await addJobAttempt(job.id, "completed", `اكتمل رفع ${mergedImages.length} صورة طويلة مدمجة إلى Google Drive.`);
+      await saveIntegrationHealth("job-worker", "healthy", "آخر مهمة اكتملت بنجاح.");
+      await sendJobUpdate(job.requestedInChannelId, job.requestedByDiscordId, { jobId: job.id, status: "completed", title: "اكتمل حفظ الفصل", description: "اكتمل دمج الصفحات ورفع الصور الطويلة بالترتيب إلى Google Drive.", pageCount: mergedImages.length, driveUrl: folder.url });
+    } finally {
+      await mergeSession.cleanup();
+    }
   } catch (error) {
     const message = describeError(error);
     await markJobFailed(job.id, "PROCESSING_FAILED", message);
@@ -117,6 +125,26 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
     await sendJobUpdate(job.requestedInChannelId, job.requestedByDiscordId, { jobId: job.id, status: "failed", title: "تعذرت معالجة الفصل", description: message });
     if (health.consecutiveFailures === 3) {
       await recordOwnerAlert("job-worker", "critical", `فشل عامل الفصول 3 مرات متتالية. آخر سبب: ${message}`);
+    }
+  }
+}
+
+/**
+ * يُغلق الطلبات التي كانت قيد المعالجة وتوقفت تحديثاتها لأكثر من 15 دقيقة،
+ * مثلما يحدث عند قتل العملية (نفاد الذاكرة) أو إعادة تشغيل الخدمة، ثم يُشعر
+ * صاحب الطلب في Discord بدل تركه ينتظر بلا نتيجة ولا رسالة.
+ */
+async function failStaleInFlightJobs(): Promise<void> {
+  const staleJobs = await getStaleInFlightChapterJobs();
+  for (const job of staleJobs) {
+    const message = "توقفت معالجة الطلب فجأة (إعادة تشغيل الخدمة أو نفاد الذاكرة). أعد إرسال الطلب بأمر /فصل.";
+    try {
+      await markJobFailed(job.id, "WORKER_INTERRUPTED", message);
+      await addJobAttempt(job.id, "failed", message);
+      await saveIntegrationHealth("job-worker", "degraded", message);
+      await sendJobUpdate(job.requestedInChannelId, job.requestedByDiscordId, { jobId: job.id, status: "failed", title: "انقطعت معالجة الفصل", description: message });
+    } catch (error) {
+      console.error("[JobWorker] تعذر إغلاق طلب معلق قديم:", error);
     }
   }
 }
@@ -140,5 +168,12 @@ export async function processPendingChapterJobs(): Promise<void> {
 }
 
 export function startJobWorker(): void {
-  void processPendingChapterJobs();
+  void (async () => {
+    try {
+      await failStaleInFlightJobs();
+    } catch (error) {
+      console.error("[JobWorker] تعذر فحص الطلبات المعلقة القديمة:", error);
+    }
+    await processPendingChapterJobs();
+  })();
 }

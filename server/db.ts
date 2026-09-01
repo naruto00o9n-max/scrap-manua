@@ -416,6 +416,21 @@ export async function getNextPendingChapterJob(): Promise<ChapterJob | undefined
   return row ? stripMongoId(row) as ChapterJob : undefined;
 }
 
+/**
+ * يُعيد الطلبات التي كانت قيد المعالجة (downloading/uploading) وتوقفت تحديثاتها
+ * لمدة أطول من الحد المحدد، مثلما يحدث عند قتل العملية بسبب نفاد الذاكرة أو
+ * إعادة تشغيل الخدمة. بدون هذه المعالجة يبقى الطلب معلقًا للأبد بصمت.
+ */
+export async function getStaleInFlightChapterJobs(thresholdMs: number = 15 * 60 * 1000): Promise<ChapterJob[]> {
+  const db = await requireDb();
+  const cutoff = new Date(Date.now() - thresholdMs);
+  const rows = await collections(db).chapterJobs
+    .find({ status: { $in: ["downloading", "uploading"] as ChapterJob["status"][] }, updatedAt: { $lt: cutoff } })
+    .sort({ updatedAt: 1 })
+    .toArray();
+  return rows.map(row => stripMongoId(row) as ChapterJob);
+}
+
 export async function markJobStarted(id: string): Promise<void> {
   const db = await requireDb();
   await collections(db).chapterJobs.updateOne({ id, status: "pending" }, { $set: { status: "downloading", startedAt: now(), updatedAt: now() } });
