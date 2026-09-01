@@ -1,23 +1,241 @@
 import { describe, expect, it } from "vitest";
-import { buildJobComponents, getRegisteredDiscordCommands } from "./discordBot";
+import {
+  buildHelpComponents,
+  buildJobCard,
+  buildPromptComponents,
+  getRegisteredDiscordCommands,
+  noticeFromJob,
+} from "./discordBot";
 
-describe("Discord public chapter experience", () => {
-  it("registers Arabic-only commands and no status command", () => {
+type ComponentShape = {
+  type: number;
+  accent_color?: number;
+  content?: string;
+  components?: unknown[];
+  accessory?: unknown;
+  custom_id?: string;
+  url?: string;
+  style?: number;
+  media?: { url?: string };
+};
+
+function flatten(component: ComponentShape): ComponentShape[] {
+  const found: ComponentShape[] = [component];
+  if (Array.isArray(component.components)) {
+    for (const child of component.components as ComponentShape[])
+      found.push(...flatten(child));
+  }
+  // القسم (type 9) يحمل الصورة المصغرة في خاصية accessory وليس داخل components.
+  if (component.accessory)
+    found.push(...flatten(component.accessory as ComponentShape));
+  return found;
+}
+
+function collectTexts(components: unknown[]): string[] {
+  return flatten({ type: 0, components: components as ComponentShape[] })
+    .filter(item => item.type === 10 && typeof item.content === "string")
+    .map(item => item.content as string);
+}
+
+function collectButtons(components: unknown[]): ComponentShape[] {
+  return flatten({
+    type: 0,
+    components: components as ComponentShape[],
+  }).filter(item => item.type === 2);
+}
+
+function collectThumbnails(components: unknown[]): ComponentShape[] {
+  return flatten({
+    type: 0,
+    components: components as ComponentShape[],
+  }).filter(item => item.type === 11);
+}
+
+describe("Discord ZEUS chapter experience", () => {
+  it("registers Arabic-only commands", () => {
     const names = getRegisteredDiscordCommands().map(command => command.name);
     expect(names).toEqual(["فصل", "مساعدة"]);
-    expect(names).not.toContain("حالة");
   });
 
-  it("builds a Components V2 container with a gold progress state", () => {
-    const [container] = buildJobComponents({ status: "uploading", title: "طلب فصل", description: "جارٍ الرفع", pageCount: 25, uploadedPages: 4 });
+  it("builds a gold Components V2 card with a live progress bar and pipeline checklist", () => {
+    const [container] = buildJobCard({
+      jobId: "job-1",
+      status: "downloading",
+      stage: "download",
+      label: "**Solo Leveling** — الفصل 101",
+      pageCount: 34,
+      progress: { done: 12, total: 34 },
+    }) as unknown as [ComponentShape];
+
     expect(container.type).toBe(17);
-    expect((container as { accent_color?: number }).accent_color).toBe(0xd4af37);
+    expect(container.accent_color).toBe(0xd4af37);
+    const texts = collectTexts([container]).join("\n");
+    expect(texts).toContain("▰");
+    expect(texts).toContain("12 / 34");
+    expect(texts).toContain("✓ فحص الرابط والمصدر");
+    expect(texts).toContain("▸ سحب الصفحات — 12/34");
+    expect(texts).toContain("· رفع الصور إلى Drive");
+    const cancelButtons = collectButtons([container]).filter(
+      button => button.custom_id === "job:cancel:job-1"
+    );
+    expect(cancelButtons).toHaveLength(1);
   });
 
-  it("keeps the gold identity except for failure states", () => {
-    const [success] = buildJobComponents({ status: "completed", title: "طلب فصل", description: "اكتمل", driveUrl: "https://drive.google.com/drive/folders/test" });
-    const [failure] = buildJobComponents({ status: "failed", title: "طلب فصل", description: "فشل" });
-    expect((success as { accent_color?: number }).accent_color).toBe(0xd4af37);
-    expect((failure as { accent_color?: number }).accent_color).toBe(0xed4245);
+  it("marks the merge stage live while pages are merged", () => {
+    const texts = collectTexts(
+      buildJobCard({
+        status: "downloading",
+        stage: "merge",
+        pageCount: 34,
+        progress: { done: 3, total: 17 },
+      }) as unknown as unknown[]
+    ).join("\n");
+    expect(texts).toContain("▸ دمج الصفحات — 3/17");
+    expect(texts).toContain("✓ سحب الصفحات — 34 صفحة");
+  });
+
+  it("finalizes with one green card: full checklist, drive link, and open button", () => {
+    const driveUrl = "https://drive.google.com/drive/folders/test";
+    const [container] = buildJobCard(
+      {
+        jobId: "job-2",
+        status: "completed",
+        stage: "upload",
+        label: "**Solo Leveling** — الفصل 101",
+        pageCount: 34,
+        mergedCount: 17,
+        driveUrl,
+      },
+      { requesterId: "656783724662226963" }
+    ) as unknown as [ComponentShape];
+
+    expect(container.accent_color).toBe(0x57f287);
+    const texts = collectTexts([container]).join("\n");
+    expect(texts).toContain("✓ فحص الرابط والمصدر");
+    expect(texts).toContain("✓ دمج الصفحات — 17 صورة");
+    expect(texts).toContain(`**رابط الفصل:** ${driveUrl}`);
+    expect(texts).toContain("<@656783724662226963>");
+    const linkButtons = collectButtons([container]).filter(
+      button => button.style === 5 && button.url === driveUrl
+    );
+    expect(linkButtons).toHaveLength(1);
+    // لا يوجد زر إلغاء في البطاقة النهائية.
+    expect(
+      collectButtons([container]).some(button =>
+        button.custom_id?.startsWith("job:cancel:")
+      )
+    ).toBe(false);
+  });
+
+  it("renders failure in red with the failing stage marked", () => {
+    const [container] = buildJobCard({
+      status: "failed",
+      stage: "validate",
+      detail: "المصدر لم يعد مفعّلًا.",
+    }) as unknown as [ComponentShape];
+    expect(container.accent_color).toBe(0xed4245);
+    const texts = collectTexts([container]).join("\n");
+    expect(texts).toContain("✗ فحص الرابط والمصدر");
+    expect(texts).toContain("المصدر لم يعد مفعّلًا.");
+  });
+
+  it("renders cancellation in gray", () => {
+    const [container] = buildJobCard({
+      status: "cancelled",
+      stage: "upload",
+      mergedCount: 5,
+    }) as unknown as [ComponentShape];
+    expect(container.accent_color).toBe(0x95a5a6);
+    const texts = collectTexts([container]).join("\n");
+    expect(texts).toContain("⊘ رفع الصور إلى Drive");
+  });
+
+  it("shows no checklist for stageless info cards", () => {
+    const texts = collectTexts(
+      buildJobCard({
+        status: "info",
+        title: "عنوان",
+        detail: "تفصيل",
+      }) as unknown as unknown[]
+    ).join("\n");
+    expect(texts).toContain("عنوان");
+    expect(texts).toContain("تفصيل");
+    expect(texts).not.toContain("▸");
+  });
+
+  it("help panel explains the bot and both commands with the ZEUS signature", () => {
+    const texts = collectTexts(
+      buildHelpComponents(
+        "https://cdn.discordapp.com/avatars/1/x.png"
+      ) as unknown as unknown[]
+    ).join("\n");
+    expect(texts).toContain("## 📖 ZEUS");
+    expect(texts).toContain("### 🔹 /فصل");
+    expect(texts).toContain("### 🔹 /مساعدة");
+    expect(texts).toContain("-# ZEUS");
+    expect(
+      collectThumbnails(
+        buildHelpComponents(
+          "https://cdn.discordapp.com/avatars/1/x.png"
+        ) as unknown as unknown[]
+      )
+    ).toHaveLength(1);
+  });
+
+  it("prompt panel asks for the link with numbered steps", () => {
+    const texts = collectTexts(
+      buildPromptComponents(null) as unknown as unknown[]
+    ).join("\n");
+    expect(texts).toContain("## ✍️ أرسل رابط الفصل");
+    expect(texts).toContain("خلال دقيقتين");
+  });
+
+  it("keeps every card free of the removed boilerplate and old branding", () => {
+    const samples: unknown[] = [
+      ...buildJobCard({ status: "pending", stage: "validate", jobId: "j" }),
+      ...buildJobCard({
+        status: "completed",
+        stage: "upload",
+        driveUrl: "https://x",
+        mergedCount: 2,
+      }),
+      ...buildJobCard({ status: "failed", stage: "chapter", detail: "خطأ" }),
+      ...buildHelpComponents(null),
+      ...buildPromptComponents(null),
+    ];
+    const texts = collectTexts(samples).join("\n");
+    expect(texts).not.toContain("الخطوة التالية");
+    expect(texts).not.toContain("دار الفصول");
+    expect(texts).not.toContain("طابور");
+  });
+
+  it("maps a database job to a stage-aware notice", () => {
+    const notice = noticeFromJob({
+      id: "job-9",
+      status: "uploading",
+      totalPages: 17,
+      uploadedPages: 4,
+      googleDriveUrl: null,
+      mangaTitle: "Solo Leveling",
+      chapterTitle: "الفصل 101",
+      failureMessage: null,
+    });
+    expect(notice.stage).toBe("upload");
+    expect(notice.progress).toEqual({ done: 4, total: 17 });
+    expect(notice.label).toBe("Solo Leveling — الفصل 101");
+
+    const stale = noticeFromJob({
+      id: "job-10",
+      status: "failed",
+      totalPages: 0,
+      uploadedPages: 0,
+      googleDriveUrl: null,
+      mangaTitle: null,
+      chapterTitle: null,
+      failureMessage: "توقفت المعالجة",
+    });
+    expect(stale.status).toBe("failed");
+    expect(stale.detail).toBe("توقفت المعالجة");
+    expect(stale.stage).toBe("validate");
   });
 });
