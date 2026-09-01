@@ -316,24 +316,35 @@ type ChapterJobStore = {
   findByUrlHash: (urlHash: string) => Promise<ChapterJob | undefined>;
   insert: (input: QueueChapterJobInput) => Promise<void>;
   findById: (id: string) => Promise<ChapterJob | undefined>;
-  requeueFailed: (id: string) => Promise<ChapterJob>;
+  requeue: (id: string, input: QueueChapterJobInput) => Promise<ChapterJob>;
 };
 
+const ACTIVE_JOB_STATUSES: ChapterJob["status"][] = ["pending", "downloading", "uploading"];
+
+/**
+ * منع التكرار يحمي فقط من تشغيل نفس الفصل مرتين **أثناء العمل**.
+ * الطلبات الفاشلة أو الملغاة أو المكتملة سابقًا تُعاد تهيئتها وتُعالج من جديد
+ * فورًا، بدل الرد ببطاقة قديمة كأن الفصل "جاهز" وهو في الحقيقة فاشل.
+ */
 export async function resolveChapterJobCreation(
   store: ChapterJobStore,
   input: QueueChapterJobInput,
 ): Promise<{ job: ChapterJob; created: boolean }> {
+  const reuseExisting = async (existing: ChapterJob): Promise<{ job: ChapterJob; created: boolean }> => {
+    if (ACTIVE_JOB_STATUSES.includes(existing.status)) return { job: existing, created: false };
+    return { job: await store.requeue(existing.id, input), created: true };
+  };
+
   const existing = await store.findByUrlHash(input.urlHash);
   if (existing && isChapterRequestDuplicate(existing.urlHash, input.urlHash)) {
-    if (existing.status === "failed") return { job: await store.requeueFailed(existing.id), created: true };
-    return { job: existing, created: false };
+    return reuseExisting(existing);
   }
 
   try {
     await store.insert(input);
   } catch (error) {
     const conflicting = await store.findByUrlHash(input.urlHash);
-    if (conflicting && isChapterRequestDuplicate(conflicting.urlHash, input.urlHash)) return { job: conflicting, created: false };
+    if (conflicting && isChapterRequestDuplicate(conflicting.urlHash, input.urlHash)) return reuseExisting(conflicting);
     throw error;
   }
 
@@ -379,8 +390,31 @@ export async function createOrGetChapterJob(input: QueueChapterJobInput): Promis
     findByUrlHash: async urlHash => toJob(await c.findOne({ urlHash })),
     insert: async values => { await c.insertOne(newChapterJob(values)); },
     findById: async id => toJob(await c.findOne({ id })),
-    requeueFailed: async id => {
-      await c.updateOne({ id, status: "failed" }, { $set: { status: "pending", cancelRequested: false, totalPages: 0, uploadedPages: 0, failureCode: null, failureMessage: null, startedAt: null, completedAt: null, updatedAt: now() } });
+    requeue: async (id, values) => {
+      // إعادة تهيئة كاملة للسجل مع تحويل الطلب إلى صاحب الطلب الجديد،
+      // لتبدأ معالجة فعلية جديدة بدل الرد بنتيجة قديمة.
+      const timestamp = now();
+      await c.updateOne({ id }, { $set: {
+        status: "pending",
+        cancelRequested: false,
+        totalPages: 0,
+        uploadedPages: 0,
+        sourceChapterId: null,
+        mangaTitle: null,
+        chapterTitle: null,
+        googleDriveFolderId: null,
+        googleDriveUrl: null,
+        failureCode: null,
+        failureMessage: null,
+        startedAt: null,
+        completedAt: null,
+        requestedByDiscordId: values.requestedByDiscordId,
+        requestedByName: values.requestedByName,
+        requestedInChannelId: values.requestedInChannelId ?? null,
+        canonicalUrl: values.canonicalUrl,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      } });
       const job = toJob(await c.findOne({ id }));
       if (!job) throw new Error("تعذر إعادة محاولة مهمة الفصل.");
       return job;

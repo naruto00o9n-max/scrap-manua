@@ -41,7 +41,7 @@ describe("create or reuse chapter job", () => {
       findByUrlHash: async (urlHash: string) => [...rows.values()].find(row => row.urlHash === urlHash),
       insert: async (request: QueueChapterJobInput) => { insertCalls += 1; rows.set(request.id, jobFrom(request)); },
       findById: async (id: string) => rows.get(id),
-      requeueFailed: async (id: string) => {
+      requeue: async (id: string) => {
         const job = rows.get(id)!;
         const updated = { ...job, status: "pending" as const, failureCode: null, failureMessage: null, updatedAt: new Date() };
         rows.set(id, updated);
@@ -65,7 +65,7 @@ describe("create or reuse chapter job", () => {
       findByUrlHash: async (urlHash: string) => [...rows.values()].find(row => row.urlHash === urlHash),
       insert: async () => { throw new Error("لا ينبغي إنشاء سجل جديد"); },
       findById: async (id: string) => rows.get(id),
-      requeueFailed: async (id: string) => {
+      requeue: async (id: string) => {
         retryCalls += 1;
         const job = { ...rows.get(id)!, status: "pending" as const, failureCode: null, failureMessage: null };
         rows.set(id, job);

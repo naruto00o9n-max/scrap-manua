@@ -36,6 +36,14 @@ export type ChapterMergeSession = {
   cleanup(): Promise<void>;
 };
 
+export type MergeProgressEvent = {
+  phase: "downloading" | "merging";
+  done: number;
+  total: number;
+};
+
+export type MergeProgressListener = (event: MergeProgressEvent) => Promise<void> | void;
+
 function byteCappedStream(limit: number, label: string) {
   let bytes = 0;
   return new Transform({
@@ -77,9 +85,14 @@ async function downloadPageToTemp(url: string, index: number, targetPath: string
   throw lastError instanceof Error ? lastError : new Error(`تعذر تنزيل الصفحة ${index}.`);
 }
 
-async function downloadPagesToTemp(urls: string[], dir: string): Promise<string[]> {
+async function downloadPagesToTemp(
+  urls: string[],
+  dir: string,
+  onProgress?: MergeProgressListener,
+): Promise<string[]> {
   const results: string[] = new Array(urls.length);
   let next = 0;
+  let completed = 0;
   async function worker() {
     while (true) {
       const index = next++;
@@ -87,6 +100,10 @@ async function downloadPagesToTemp(urls: string[], dir: string): Promise<string[
       const targetPath = path.join(dir, `page-${String(index + 1).padStart(4, "0")}.img`);
       await downloadPageToTemp(urls[index]!, index + 1, targetPath);
       results[index] = targetPath;
+      completed += 1;
+      if (onProgress) {
+        try { await onProgress({ phase: "downloading", done: completed, total: urls.length }); } catch { /* فشل الإشعار لا يُفشل المعالجة */ }
+      }
     }
   }
   await Promise.all(Array.from({ length: Math.min(PAGE_DOWNLOAD_CONCURRENCY, urls.length) }, () => worker()));
@@ -174,13 +191,16 @@ async function renderGroupToFile(
  * الصور المدمجة في الذاكرة معًا (سبب قتل الحاوية بخطأ 137 على Railway).
  * تنظيف الملفات المؤقتة يتم عبر cleanup() في كل الحالات.
  */
-export async function openChapterMergeSession(pageUrls: string[]): Promise<ChapterMergeSession> {
+export async function openChapterMergeSession(
+  pageUrls: string[],
+  onProgress?: MergeProgressListener,
+): Promise<ChapterMergeSession> {
   if (!pageUrls.length) {
     return { images: [], cleanup: async () => {} };
   }
   const dir = await mkdtemp(path.join(tmpdir(), "manga-merge-"));
   try {
-    const pagePaths = await downloadPagesToTemp(pageUrls, dir);
+    const pagePaths = await downloadPagesToTemp(pageUrls, dir, onProgress);
     const dimensions = await Promise.all(pagePaths.map(pagePath => sharp(pagePath).metadata()));
     const width = Math.max(...dimensions.map(item => item.width ?? 0));
     if (!width) throw new Error("تعذر تحديد أكبر عرض لصفحات الفصل.");
@@ -192,6 +212,9 @@ export async function openChapterMergeSession(pageUrls: string[]): Promise<Chapt
       const outputPath = path.join(dir, `merged-${String(groupIndex + 1).padStart(3, "0")}.png`);
       const height = await renderGroupToFile(groups[groupIndex]!, pagePaths, dimensions, width, outputPath);
       images.push({ filePath: outputPath, width, height, mimeType: OUTPUT_MIME });
+      if (onProgress) {
+        try { await onProgress({ phase: "merging", done: groupIndex + 1, total: groups.length }); } catch { /* فشل الإشعار لا يُفشل المعالجة */ }
+      }
     }
     return { images, cleanup: () => rm(dir, { recursive: true, force: true }) };
   } catch (error) {

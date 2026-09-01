@@ -44,10 +44,7 @@ export async function queueAuthorizedChapter(request: ChapterRequest) {
   });
 
   if (result.created) {
-    await addJobAttempt(result.job.id, "pending", "تمت الموافقة على الرابط ووُضعت المهمة في طابور المعالجة.");
-  }
-  if (result.created && result.job.createdAt.getTime() !== result.job.updatedAt.getTime()) {
-    await addJobAttempt(result.job.id, "pending", "أُعيدت محاولة المهمة من سجل فشل سابق بعد إصلاح مصدر المعالجة.");
+    await addJobAttempt(result.job.id, "pending", "تم التحقق من الرابط وبدأت المعالجة.");
   }
   return result;
 }
