@@ -1,27 +1,33 @@
 import { z } from "zod";
 import {
   cancelChapterJob,
+  ensureDefaultAdminUser,
   getDashboardSummary,
   getSetting,
+  getUserByEmail,
   listChapterJobs,
   listDiscordRoles,
   listIntegrationHealth,
   listIntegrationAlerts,
   listJobAttempts,
   listSources,
+  listUsers,
   removeDiscordRole,
   saveDiscordRole,
   saveIntegrationHealth,
   saveSource,
   setSetting,
+  setUserBlocked,
 } from "./db";
-import { COOKIE_NAME } from "../shared/const";
+import { COOKIE_NAME, ONE_YEAR_MS } from "../shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { adminProcedure, protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { getIntegrationConfiguration, getUsableSuwayomiToken } from "./services/settings";
 import { SuwayomiClient } from "./services/suwayomi";
 import { ENV } from "./_core/env";
 import { GoogleDriveClient } from "./services/googleDrive";
+import { verifyPassword } from "./_core/auth";
+import { sdk } from "./_core/sdk";
 
 const sourceInput = z.object({
   id: z.number().int().positive().optional(),
@@ -41,6 +47,18 @@ export const appRouter = router({
   system: router({}),
   auth: router({
     me: publicProcedure.query(opts => opts.ctx.user),
+    login: publicProcedure
+      .input(z.object({ email: z.string().email().max(320), password: z.string().min(1).max(200) }))
+      .mutation(async ({ input, ctx }) => {
+        await ensureDefaultAdminUser();
+        const user = await getUserByEmail(input.email);
+        if (!user || user.isBlocked || !(await verifyPassword(input.password, user.passwordHash))) {
+          throw new Error("البريد أو كلمة المرور غير صحيحة.");
+        }
+        const sessionToken = await sdk.createSessionToken(user.openId, { name: user.name ?? user.email ?? "Admin", role: user.role, expiresInMs: ONE_YEAR_MS });
+        ctx.res.cookie(COOKIE_NAME, sessionToken, { ...getSessionCookieOptions(ctx.req), maxAge: ONE_YEAR_MS });
+        return { user: { ...user, passwordHash: null } };
+      }),
     logout: publicProcedure.mutation(({ ctx }) => {
       const cookieOptions = getSessionCookieOptions(ctx.req);
       ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
@@ -74,6 +92,12 @@ export const appRouter = router({
         await setSetting("google_drive_sharing_domain", input.mode === "domain_reader" ? input.domain ?? "" : "");
         return { mode: input.mode, domain: input.mode === "domain_reader" ? input.domain ?? "" : "" };
       }),
+  }),
+  users: router({
+    list: adminProcedure.query(() => listUsers()),
+    setBlocked: adminProcedure
+      .input(z.object({ id: z.number().int().positive(), isBlocked: z.boolean() }))
+      .mutation(({ input }) => setUserBlocked(input.id, input.isBlocked)),
   }),
   discordRoles: router({
     list: adminProcedure.query(() => listDiscordRoles()),
