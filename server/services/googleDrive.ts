@@ -37,15 +37,22 @@ export function sharingPolicyFromMode(
   return { mode: "link_editor" };
 }
 
-/** جسم صلاحية Drive المقابل لسياسة المشاركة (دالة نقية قابلة للاختبار). */
+/** جسم صلاحية Drive المقابل لسياسة المشاركة (دالة نقية قابلة للاختبار).
+ *
+ * تنبيه مهم: أدوار Drive API هي reader/commenter/writer/fileOrganizer/
+ * organizer/owner — لا يوجد دور اسمه «editor»! واجهة Drive تسمّي المحرر
+ * «Editor» لكن قيمة API له هي **writer**. إرسال role:"editor" يرفضه
+ * Google بخطأ 400 «The specified permission role is invalid» وقد يُسقط
+ * سحبة فصل كاملة أنجزت حتى آخر صفحة.
+ */
 export function linkPermissionBody(policy: DriveSharingPolicy): {
   type: "anyone" | "domain";
-  role: "reader" | "editor";
+  role: "reader" | "commenter" | "writer";
   domain?: string;
 } {
   if (policy.mode === "domain_reader")
     return { type: "domain", role: "reader", domain: policy.domain };
-  if (policy.mode === "link_editor") return { type: "anyone", role: "editor" };
+  if (policy.mode === "link_editor") return { type: "anyone", role: "writer" };
   return { type: "anyone", role: "reader" };
 }
 
@@ -161,25 +168,40 @@ export class GoogleDriveClient {
     return { id: created.data.id, name: created.data.name ?? name };
   }
 
-  private async applyFolderSharing(folderId: string, policy: DriveSharingPolicy): Promise<void> {
-    if (policy.mode === "private") return;
+  private async applyFolderSharing(folderId: string, policy: DriveSharingPolicy): Promise<boolean> {
+    if (policy.mode === "private") return true;
     try {
       await this.drive.permissions.create({
         fileId: folderId,
         requestBody: linkPermissionBody(policy),
         fields: "id",
       });
+      return true;
     } catch (error) {
-      throw new GoogleDriveError(`تعذر ضبط مشاركة رابط المجلد. تحقق من سياسة Google Drive: ${error instanceof Error ? error.message : "خطأ غير معروف"}`);
+      // فشل المشاركة لا يُسقط السحبة: الصور الثمانين سحبت بالفعل ويجب رفعها،
+      // والمشاركة تُصلح يدويًا من Drive (فتح المجلد ← مشاركة).
+      console.warn(
+        `[GoogleDrive] تعذر ضبط مشاركة المجلد ${folderId} — سيستمر الرفع والمجلد سيحتاج مشاركة يدوية:`,
+        error instanceof Error ? error.message : error
+      );
+      return false;
     }
   }
 
-  async createChapterFolder(mangaTitle: string, chapterTitle: string, sharing: DriveSharingPolicy = { mode: "link_editor" }) {
+  async createChapterFolder(
+    mangaTitle: string,
+    chapterTitle: string,
+    sharing: DriveSharingPolicy = { mode: "link_editor" }
+  ): Promise<{ id: string; url: string; shared: boolean }> {
     const platformFolder = await this.ensureFolder("root", PLATFORM_FOLDER_NAME);
     const mangaFolder = await this.ensureFolder(platformFolder.id, mangaTitle);
     const chapterFolder = await this.ensureFolder(mangaFolder.id, chapterTitle);
-    await this.applyFolderSharing(chapterFolder.id, sharing);
-    return { id: chapterFolder.id, url: `https://drive.google.com/drive/folders/${chapterFolder.id}` };
+    const shared = await this.applyFolderSharing(chapterFolder.id, sharing);
+    return {
+      id: chapterFolder.id,
+      url: `https://drive.google.com/drive/folders/${chapterFolder.id}`,
+      shared,
+    };
   }
 
   async uploadMergedPage(data: Buffer, folderId: string, imageIndex: number): Promise<void> {
