@@ -6,9 +6,12 @@ import {
   buildMergePromptComponents,
   buildPromptComponents,
   buildSearchCardComponents,
+  buildSearchPageNavRow,
   buildSourcesComponents,
   getRegisteredDiscordCommands,
   noticeFromJob,
+  paginateForSelect,
+  sitesCount,
 } from "./discordBot";
 
 type ComponentShape = {
@@ -58,7 +61,110 @@ function collectThumbnails(components: unknown[]): ComponentShape[] {
 describe("Discord ZEUS chapter experience", () => {
   it("registers Arabic-only commands", () => {
     const names = getRegisteredDiscordCommands().map(command => command.name);
-    expect(names).toEqual(["فصل", "دمج", "مصادر", "بحث", "مساعدة"]);
+    expect(names).toEqual(["فصل", "دمج", "مواقع", "بحث", "مساعدة"]);
+  });
+
+  it("never mentions Suwayomi in the registered command descriptions", () => {
+    const descriptions = getRegisteredDiscordCommands().map(
+      command => command.description
+    );
+    for (const description of descriptions) {
+      expect(description.toLowerCase()).not.toContain("suwayomi");
+    }
+  });
+
+  it("paginates lists with the Discord select limit and stable global offsets", () => {
+    const items = Array.from({ length: 63 }, (_, index) => index);
+    const first = paginateForSelect(items, 0);
+    expect(first.slice).toHaveLength(25);
+    expect(first.totalPages).toBe(3);
+    expect(first.start).toBe(0);
+    const second = paginateForSelect(items, 1);
+    expect(second.start).toBe(25);
+    expect(second.slice[0]).toBe(25);
+    const last = paginateForSelect(items, 99);
+    expect(last.page).toBe(2);
+    expect(last.slice).toHaveLength(13);
+    expect(paginateForSelect([], 0).totalPages).toBe(1);
+  });
+
+  it("builds page navigation row with disabled bounds and a page indicator", () => {
+    const nav = buildSearchPageNavRow("page", "s1", 0, 3);
+    expect(nav).not.toBeNull();
+    const buttons = (nav as { components: Array<Record<string, unknown>> }).components;
+    expect(buttons).toHaveLength(3);
+    expect(buttons[0]).toMatchObject({
+      type: 2,
+      custom_id: "search:page:s1:prev",
+      disabled: true,
+    });
+    expect(buttons[1]).toMatchObject({ disabled: true });
+    expect(buttons[2]).toMatchObject({
+      type: 2,
+      custom_id: "search:page:s1:next",
+      disabled: false,
+    });
+    expect(buildSearchPageNavRow("cpage", "s2", 0, 1)).toBeNull();
+  });
+
+  it("phrases site counts in Arabic", () => {
+    expect(sitesCount(1)).toBe("موقع واحد");
+    expect(sitesCount(2)).toBe("موقعين");
+    expect(sitesCount(5)).toBe("5 مواقع");
+    expect(sitesCount(12)).toBe("12 موقعًا");
+  });
+
+  it("renders pagination info and page nav buttons on the search results card", () => {
+    const matches = Array.from({ length: 25 }, (_, index) => ({
+      title: `Work ${26 + index}`,
+      sourceName: "Site A",
+      lang: "en",
+    }));
+    const [container] = buildSearchCardComponents(
+      {
+        state: "results",
+        query: "سولو",
+        resultCount: 63,
+        failedCount: 2,
+        page: 2,
+        totalPages: 3,
+        matches,
+      },
+      {
+        customId: "search:pick:s1",
+        placeholder: "اختر…",
+        options: matches.map((match, index) => ({
+          label: match.title,
+          description: "Site A (en)",
+          value: String(25 + index),
+        })),
+      },
+      null,
+      buildSearchPageNavRow("page", "s1", 1, 3)
+    ) as unknown as [
+      {
+        type: number;
+        components: Array<Record<string, unknown>>;
+      }
+    ];
+
+    expect(container.type).toBe(17);
+    const texts = collectTexts([container]).join("\n");
+    expect(texts).toContain("63 نتيجة");
+    expect(texts).toContain("تعذر الوصول إلى موقعين");
+    expect(texts).toContain("الصفحة 2 من 3");
+    // ترقيم النتائج يواصل التسلسل العالمي عبر الصفحات (الصفحة الثانية تبدأ من 26).
+    expect(texts).toContain("26. Work 26");
+    // أزرار التنقل موجودة داخل البطاقة مع قيمها العالمية في القائمة المنسدلة.
+    const buttons = collectButtons([container as unknown as ComponentShape]);
+    const customIds = buttons
+      .map(button => button.custom_id ?? "")
+      .filter(Boolean);
+    expect(customIds).toContain("search:page:s1:next");
+    const select = flatten(container as unknown as ComponentShape).find(
+      item => item.type === 3
+    );
+    expect(select).toBeTruthy();
   });
 
   it("builds a gold Components V2 card with a live progress bar and pipeline checklist", () => {
@@ -76,7 +182,7 @@ describe("Discord ZEUS chapter experience", () => {
     const texts = collectTexts([container]).join("\n");
     expect(texts).toContain("▰");
     expect(texts).toContain("12 / 34");
-    expect(texts).toContain("✓ فحص الرابط والمصدر");
+    expect(texts).toContain("✓ فحص الرابط والموقع");
     expect(texts).toContain("▸ سحب الصفحات — 12/34");
     expect(texts).toContain("· رفع الصور إلى Drive");
     const cancelButtons = collectButtons([container]).filter(
@@ -115,7 +221,7 @@ describe("Discord ZEUS chapter experience", () => {
 
     expect(container.accent_color).toBe(0x57f287);
     const texts = collectTexts([container]).join("\n");
-    expect(texts).toContain("✓ فحص الرابط والمصدر");
+    expect(texts).toContain("✓ فحص الرابط والموقع");
     expect(texts).toContain("✓ دمج الصفحات — 17 صورة");
     expect(texts).toContain(`**رابط الفصل:** ${driveUrl}`);
     expect(texts).toContain("<@656783724662226963>");
@@ -139,7 +245,7 @@ describe("Discord ZEUS chapter experience", () => {
     }) as unknown as [ComponentShape];
     expect(container.accent_color).toBe(0xed4245);
     const texts = collectTexts([container]).join("\n");
-    expect(texts).toContain("✗ فحص الرابط والمصدر");
+    expect(texts).toContain("✗ فحص الرابط والموقع");
     expect(texts).toContain("المصدر لم يعد مفعّلًا.");
   });
 
@@ -521,6 +627,24 @@ describe("Discord ZEUS chapter experience", () => {
         })
       ),
       buildSearchCardComponents({ state: "results" as const, query: "x", resultCount: 1, matches: [{ title: "T", sourceName: "S", lang: "en" }] }, null),
+      buildSearchCardComponents(
+        {
+          state: "results" as const,
+          query: "سولو",
+          resultCount: 63,
+          failedCount: 2,
+          page: 2,
+          totalPages: 3,
+          matches: [{ title: "Work 26", sourceName: "A", lang: "en" }],
+        },
+        {
+          customId: "search:pick:s1",
+          placeholder: "اختر…",
+          options: [{ label: "Work 26", description: "A (en)", value: "25" }],
+        },
+        null,
+        buildSearchPageNavRow("page", "s1", 1, 3)
+      ),
     ];
 
     for (const components of samples) {

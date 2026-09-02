@@ -111,7 +111,7 @@ const STAGE_ORDER: JobStage[] = [
 ];
 
 const STAGE_LABELS: Record<JobStage, string> = {
-  validate: "فحص الرابط والمصدر",
+  validate: "فحص الرابط والموقع",
   chapter: "العثور على الفصل",
   download: "سحب الصفحات",
   merge: "دمج الصفحات",
@@ -168,21 +168,21 @@ const commandPayload = [
         .setRequired(false)
     ),
   new SlashCommandBuilder()
-    .setName("مصادر")
-    .setDescription("عرض مصادر البوت المُزامنة تلقائيًا من Suwayomi"),
+    .setName("مواقع")
+    .setDescription("عرض المواقع المتاحة في البوت"),
   new SlashCommandBuilder()
     .setName("بحث")
-    .setDescription("البحث عن مانها في كل مصادر Suwayomi وفحص توفر الفصول")
+    .setDescription("البحث عن أي عمل في كل المواقع وفحص توفر الفصول")
     .addStringOption(option =>
       option
         .setName("الاسم")
-        .setDescription("اسم المانها أو كلمة من اسمها")
+        .setDescription("اسم العمل أو كلمة من اسمه")
         .setRequired(true)
     )
     .addStringOption(option =>
       option
         .setName("الفصل")
-        .setDescription("رقم فصل لفحص توفره في كل المصادر — اختياري")
+        .setDescription("رقم فصل لفحص توفره في كل المواقع — اختياري")
         .setRequired(false)
     ),
   new SlashCommandBuilder()
@@ -393,7 +393,7 @@ export function buildHelpComponents(
     text(
       [
         "### 🔹 /فصل",
-        "يسحب فصلًا من المصادر المدعومة ويسلّمك رابطه.",
+        "يسحب فصلًا من المواقع المدعومة ويسلّمك رابطه.",
         "**1.** نفّذ `/فصل` واكتب رابط الفصل في الخانة المخصصة.",
         "**2.** أو نفّذ `/فصل` بدون رابط ثم أرسله كرسالة عادية في القناة خلال دقيقتين.",
         "**3.** بطاقة التقدم تتحدث تلقائيًا مع كل خطوة: فحص الرابط ← العثور على الفصل ← سحب الصفحات ← دمج الصفحات ← الرفع إلى Drive، وعند الاكتمال تجد زر فتح الفصل.",
@@ -412,18 +412,18 @@ export function buildHelpComponents(
     separator(),
     text(
       [
-        "### 🔹 /مصادر",
-        "يعرض كل المصادر المتاحة في البوت — أي مصدر تثبته في Suwayomi يُضاف هنا تلقائيًا ⚡.",
+        "### 🔹 /مواقع",
+        "يعرض كل المواقع المتاحة في البوت — أي موقع يُضاف للبوت يظهر هنا تلقائيًا ⚡.",
       ].join("\n")
     ),
     separator(),
     text(
       [
         "### 🔹 /بحث",
-        "يبحث عن أي مانها في كل مصادر Suwayomi دفعة واحدة، بدل الدخول للسيرفر والبحث يدويًا.",
-        "**1.** نفّذ `/بحث` واكتب اسم المانها (وكلمة واحدة تكفي) — يبحث في كل المصادر ويعرض المطابقات مصدرًا بمصدر.",
-        "**2.** اختر عملًا من القائمة المنسدلة لتعرض فصوله، ثم اختر فصلًا ليُسحب ويُدمج ويُرفع Drive كأمر /فصل تمامًا.",
-        "**3.** لو تريد معرفة هل الفصل نزل أو لا: ضع رقم الفصل في خانة «الفصل» — سيفحصه في كل المصادر ويوضح أين هو متاح بتاريخه.",
+        "يبحث عن أي عمل في كل المواقع دفعة واحدة، بدل الدخول لكل موقع والبحث فيه يدويًا.",
+        "**1.** نفّذ `/بحث` واكتب اسم العمل (وكلمة واحدة تكفي) — يبحث في كل المواقع ويعرض المطابقات موقعًا بموقع، ولو كثرت النتائج تنقّل بين الصفحات بالأزرار.",
+        "**2.** اختر عملًا من القائمة المنسدلة لتعرض فصوله (صفحة صفحة مهما كثرت)، ثم اختر فصلًا ليُسحب ويُدمج ويُرفع Drive كأمر /فصل تمامًا.",
+        "**3.** لو تريد معرفة هل الفصل نزل أو لا: ضع رقم الفصل في خانة «الفصل» — سيفحصه في كل المواقع ويعرض فقط المواقع التي وُجد فيه.",
       ].join("\n")
     ),
     separator(),
@@ -1153,12 +1153,12 @@ export type SearchNotice = {
   resultCount?: number;
   matches?: Array<{ title: string; sourceName: string; lang: string }>;
   chapterNumber?: number;
+  /** صفوف التوفر المعروضة: النتائج الإيجابية فقط — المتعثر أو غير المتاح لا يُعرض أبدًا. */
   availability?: Array<{
     ok: boolean;
     sourceName: string;
     title: string;
     detail: string | null;
-    /** فشل فحص المصدر نفسه (مثلاً مهلة) — يعرض بعلامة تحذير بدل الخطأ. */
     failed?: boolean;
   }>;
   anyAvailable?: boolean;
@@ -1166,6 +1166,9 @@ export type SearchNotice = {
   sourceName?: string;
   totalChapters?: number;
   chaptersShown?: number;
+  /** ترقيم صفحات القائمة المعروضة (نتائج البحث أو الفصول) — 1-based للعرض. */
+  page?: number;
+  totalPages?: number;
   detail?: string | null;
 };
 
@@ -1176,6 +1179,67 @@ export type SearchSelectSpec = {
 };
 
 const SEARCH_SELECT_TYPES = { ROW: 1, STRING_SELECT: 3 } as const;
+
+/** حد Discord الأقصى لخيارات القائمة المنسدلة الواحدة — ما زاد يُصفّح بأزرار. */
+export const SEARCH_PAGE_SIZE = 25;
+/** عدد نتائج معاينة النص فوق القائمة — القائمة نفسها تعرض صفحتها كاملة. */
+const SEARCH_PREVIEW_LIMIT = 8;
+
+/**
+ * تُقسّم قائمة إلى صفحات بحجم حد Discord، وتُثبّت رقم الصفحة داخل المدى الصالح.
+ * start هو إزاحة أول عنصر في الصفحة داخل القائمة الأصلية (لأُسامة القيم عالميًا).
+ */
+export function paginateForSelect<T>(items: T[], page: number) {
+  const totalPages = Math.max(1, Math.ceil(items.length / SEARCH_PAGE_SIZE));
+  const current = Math.min(Math.max(0, page), totalPages - 1);
+  const start = current * SEARCH_PAGE_SIZE;
+  return {
+    slice: items.slice(start, start + SEARCH_PAGE_SIZE),
+    page: current,
+    totalPages,
+    start,
+  };
+}
+
+/**
+ * صف أزرار التنقل بين الصفحات: السابق / مؤشر الصفحة / التالي.
+ * زر المؤشر معطّل دائمًا — عرض فقط. يُرجع null لو لا توجد إلا صفحة واحدة.
+ */
+export function buildSearchPageNavRow(
+  kind: "page" | "cpage",
+  searchId: string,
+  page: number,
+  totalPages: number
+): Raw | null {
+  if (totalPages <= 1) return null;
+  return {
+    type: 1,
+    components: [
+      {
+        type: 2,
+        style: 2,
+        label: "السابق",
+        emoji: { name: "◀" },
+        custom_id: `search:${kind}:${searchId}:prev`,
+        disabled: page <= 0,
+      },
+      {
+        type: 2,
+        style: 2,
+        label: `صفحة ${page + 1} من ${totalPages}`,
+        disabled: true,
+      },
+      {
+        type: 2,
+        style: 2,
+        label: "التالي",
+        emoji: { name: "▶" },
+        custom_id: `search:${kind}:${searchId}:next`,
+        disabled: page >= totalPages - 1,
+      },
+    ],
+  };
+}
 
 /** صف قائمة منسدلة — النوع 3 مسموح داخل الصف (1) في رسائل Components V2. */
 export function buildSearchSelectRow(spec: SearchSelectSpec): Raw {
@@ -1199,11 +1263,11 @@ export function buildSearchSelectRow(spec: SearchSelectSpec): Raw {
 function searchStateTitle(state: SearchNoticeState): string {
   switch (state) {
     case "progress":
-      return "🔍 جاري البحث في كل المصادر";
+      return "🔍 جاري البحث في كل المواقع";
     case "results":
       return "🔎 نتائج البحث";
     case "availability":
-      return "🔢 فحص توفر الفصل في كل المصادر";
+      return "🔢 فحص توفر الفصل في كل المواقع";
     case "chapters":
       return "📚 فصول العمل";
     case "failed":
@@ -1211,10 +1275,19 @@ function searchStateTitle(state: SearchNoticeState): string {
   }
 }
 
+/** صياغة عدد المواقع عربيًا بعد حرف الجر (إلى/في): موقع واحد، موقعين، مواقع… */
+export function sitesCount(count: number): string {
+  if (count === 1) return "موقع واحد";
+  if (count === 2) return "موقعين";
+  if (count <= 10) return `${count} مواقع`;
+  return `${count} موقعًا`;
+}
+
 export function buildSearchCardComponents(
   notice: SearchNotice,
   select?: SearchSelectSpec | null,
-  avatar: string | null = avatarUrl()
+  avatar: string | null = avatarUrl(),
+  nav?: Raw | null
 ): APIMessageTopLevelComponent[] {
   const body: Raw[] = [
     headerBlock(`## ${searchStateTitle(notice.state)}`, [], avatar),
@@ -1228,19 +1301,24 @@ export function buildSearchCardComponents(
         [
           `**«${notice.query ?? ""}»**`,
           progressBar(progress.done, progress.total),
-          `-# ${progress.done}/${progress.total} مصدر${notice.failedCount ? ` — ${notice.failedCount} مصدر لم يستجب` : ""}`,
+          `-# ${progress.done}/${progress.total} موقع${notice.failedCount ? ` — تعذر الوصول إلى ${sitesCount(notice.failedCount)}` : ""}`,
         ].join("\n")
       )
     );
   } else if (notice.state === "results") {
-    const lines: string[] = [`نتائج البحث عن **«${notice.query ?? ""}»** — ${notice.resultCount ?? 0} نتيجة${notice.failedCount ? ` (${notice.failedCount} مصدر لم يستجب)` : ""}`];
+    const lines: string[] = [
+      `نتائج البحث عن **«${notice.query ?? ""}»** — ${notice.resultCount ?? 0} نتيجة${notice.failedCount ? ` (تعذر الوصول إلى ${sitesCount(notice.failedCount)})` : ""}`,
+    ];
     const matches = notice.matches ?? [];
     for (let index = 0; index < matches.length; index += 1) {
       const match = matches[index]!;
-      lines.push(`**${index + 1}. ${match.title}**\n-# ${match.sourceName} (${match.lang})`);
+      const number = ((notice.page ?? 1) - 1) * SEARCH_PAGE_SIZE + index + 1;
+      lines.push(`**${number}. ${match.title}**\n-# ${match.sourceName} (${match.lang})`);
     }
-    if ((notice.resultCount ?? 0) > matches.length) {
-      lines.push(`-# القائمة المنسدلة أدناه تحوي ${Math.min(notice.resultCount ?? 0, 25)} نتيجة.`);
+    if ((notice.totalPages ?? 1) > 1) {
+      lines.push(
+        `-# الصفحة ${notice.page ?? 1} من ${notice.totalPages} — القائمة المنسدلة تعرض نتائج هذه الصفحة كاملة، وتنقّل بالأزرار.`
+      );
     }
     body.push(text(lines.join("\n")));
   } else if (notice.state === "availability") {
@@ -1248,19 +1326,20 @@ export function buildSearchCardComponents(
       `**«${notice.query ?? ""}»** — الفصل ${notice.chapterNumber ?? "?"}`,
       "",
     ];
+    // النتائج الإيجابية فقط: الموقع الذي وُجد فيه الفصل يُعرض، وما تعثر أو
+    // لم يقدّمه لا يظهر إطلاقًا.
     for (const row of notice.availability ?? []) {
-      lines.push(
-        `${row.ok ? "✅" : row.failed ? "⚠️" : "❌"} **${row.sourceName}** — ${row.title}${row.detail ? `\n-# ${row.detail}` : ""}`
-      );
+      lines.push(`• **${row.sourceName}** — ${row.title}${row.detail ? `\n-# ${row.detail}` : ""}`);
     }
     if (notice.detail) lines.push("", notice.detail);
     body.push(text(lines.join("\n")));
   } else if (notice.state === "chapters") {
+    const pageInfo = (notice.totalPages ?? 1) > 1 ? ` — الصفحة ${notice.page ?? 1} من ${notice.totalPages}` : "";
     body.push(
       text(
         [
           `**${notice.mangaTitle ?? ""}**`,
-          `-# المصدر: ${notice.sourceName ?? "—"} — ${notice.totalChapters ?? 0} فصلًا — القائمة تعرض أحدث ${notice.chaptersShown ?? 0}. اختر فصلًا ليُسحب ويُدمج ويُرفع إلى Drive.`,
+          `-# الموقع: ${notice.sourceName ?? "—"} — ${notice.totalChapters ?? 0} فصلًا${pageInfo}. اختر فصلًا ليُسحب ويُدمج ويُرفع إلى Drive.`,
         ].join("\n")
       )
     );
@@ -1274,10 +1353,9 @@ export function buildSearchCardComponents(
   }
 
   body.push(separator());
-  if (select && select.options.length) {
-    body.push(buildSearchSelectRow(select));
-    body.push(separator());
-  }
+  if (select && select.options.length) body.push(buildSearchSelectRow(select));
+  if (nav) body.push(nav);
+  if ((select && select.options.length) || nav) body.push(separator());
   body.push(text("-# ZEUS"));
   return [raw({ type: 17, accent_color: GOLD, components: body })];
 }
@@ -1288,8 +1366,8 @@ export function buildSourcesComponents(
   avatar: string | null = avatarUrl()
 ): APIMessageTopLevelComponent[] {
   const lines: string[] = [
-    `**${active.length}** مصدرًا متاحًا من إجمالي ${totalCount} مسجل.`,
-    "كل مصدر مثبت في Suwayomi يظهر هنا تلقائيًا، ويستخدم عبر /بحث مباشرة.",
+    `**${active.length}** ${active.length === 1 ? "موقع متاح" : "مواقع متاحة"} من إجمالي ${totalCount} مسجل.`,
+    "كل موقع يُضاف للبوت يظهر هنا تلقائيًا، ويُستخدم عبر /بحث مباشرة.",
     "",
   ];
   const shown = active.slice(0, 40);
@@ -1299,40 +1377,40 @@ export function buildSourcesComponents(
     );
   }
   if (active.length > shown.length) {
-    lines.push(`-# و${active.length - shown.length} مصدرًا آخر…`);
+    lines.push(`-# و${active.length - shown.length} موقعًا آخر…`);
   }
   const body: Raw[] = [
-    headerBlock("## 🗂️ مصادر ZEUS", [], avatar),
+    headerBlock("## 🗂️ مواقع ZEUS", [], avatar),
     separator(2),
     text(lines.join("\n")),
     separator(),
-    text("-# ⚡ مُضاف تلقائيًا من Suwayomi — ZEUS"),
+    text("-# ⚡ مُضاف تلقائيًا — ZEUS"),
   ];
   return [raw({ type: 17, accent_color: GOLD, components: body })];
 }
 
-function searchCardPayload(notice: SearchNotice, select?: SearchSelectSpec | null) {
+function searchCardPayload(notice: SearchNotice, select?: SearchSelectSpec | null, nav?: Raw | null) {
   return {
     flags: MessageFlags.IsComponentsV2 as MessageFlags.IsComponentsV2,
-    components: buildSearchCardComponents(notice, select),
+    components: buildSearchCardComponents(notice, select, avatarUrl(), nav),
   };
 }
 
 type SearchCardTarget = {
-  show: (notice: SearchNotice, select?: SearchSelectSpec | null) => Promise<string>;
+  show: (notice: SearchNotice, select?: SearchSelectSpec | null, nav?: Raw | null) => Promise<string>;
 };
 
 function searchInteractionCard(interaction: any): SearchCardTarget {
   let messageId: string | null = null;
   const channelId = interaction.channelId as string;
   return {
-    show: async (notice, select) => {
+    show: async (notice, select, nav) => {
       if (!messageId) {
-        const sent = await interaction.editReply(searchCardPayload(notice, select));
+        const sent = await interaction.editReply(searchCardPayload(notice, select, nav));
         messageId = String(sent.id);
         return messageId;
       }
-      await editMessageContent(channelId, messageId, searchCardPayload(notice, select));
+      await editMessageContent(channelId, messageId, searchCardPayload(notice, select, nav));
       return messageId;
     },
   };
@@ -1341,7 +1419,7 @@ function searchInteractionCard(interaction: any): SearchCardTarget {
 function createSearchProgressPoster(target: SearchCardTarget) {
   let lastKey = "";
   let lastAt = 0;
-  return async (notice: SearchNotice, select?: SearchSelectSpec | null, force = false) => {
+  return async (notice: SearchNotice, select?: SearchSelectSpec | null, force = false, nav?: Raw | null) => {
     const key = `${notice.state}|${notice.progress ? `${notice.progress.done}/${notice.progress.total}` : ""}`;
     const isPhaseEnd = notice.progress
       ? notice.progress.done >= notice.progress.total
@@ -1351,17 +1429,20 @@ function createSearchProgressPoster(target: SearchCardTarget) {
     lastKey = key;
     lastAt = nowMs;
     try {
-      await target.show(notice, select);
+      await target.show(notice, select, nav);
     } catch {
       /* فشل تحديث البطاقة لا يُفشل البحث */
     }
   };
 }
 
+export type SearchSessionView = "results" | "availability" | "chapters";
+
 type SearchSession = {
   requesterId: string;
   channelId: string;
   createdAt: number;
+  /** كل نتائج البحث — القائمة المنسدلة تعرضها صفحة صفحة عبر أزرار التنقل. */
   matches: SearchMatch[];
   chapters: Array<{
     label: string;
@@ -1369,6 +1450,15 @@ type SearchSession = {
     realUrl: string | null;
     number: number | null;
   }>;
+  /** العرض الحالي الذي تُبنى منه البطاقة عند التنقل بين الصفحات. */
+  view: SearchSessionView;
+  matchPage: number;
+  chapterPage: number;
+  query: string;
+  failedCount: number;
+  chapterNumber: number | null;
+  availability?: SearchNotice["availability"];
+  anyAvailable?: boolean;
   mangaTitle?: string;
   sourceName?: string;
   suwayomiSourceId?: string;
@@ -1391,10 +1481,112 @@ function searchRequesterOf(interaction: any): Requester {
   };
 }
 
+/**
+ * يبني حالة العرض (البطاقة + القائمة المنسدلة + أزرار الصفحات) من الجلسة
+ * في حالتها الحالية — يستخدم في العرض الأول وفي التنقل وإعادة الرسم.
+ */
+function buildSearchSessionView(
+  session: SearchSession,
+  searchId: string
+): { notice: SearchNotice; select: SearchSelectSpec | null; nav: Raw | null } {
+  if (session.view === "chapters") {
+    const pagination = paginateForSelect(session.chapters, session.chapterPage);
+    return {
+      notice: {
+        state: "chapters",
+        mangaTitle: session.mangaTitle,
+        sourceName: session.sourceName,
+        totalChapters: session.chapters.length,
+        chaptersShown: pagination.slice.length,
+        page: pagination.page + 1,
+        totalPages: pagination.totalPages,
+      },
+      select: {
+        customId: `search:chap:${searchId}`,
+        placeholder: "اختر فصلًا لسحبه ودمجه ورفعه…",
+        options: pagination.slice.map((chapter, index) => ({
+          label: chapter.label,
+          description: "سحب هذا الفصل وتسليمه على Drive",
+          value: String(pagination.start + index),
+        })),
+      },
+      nav: buildSearchPageNavRow("cpage", searchId, pagination.page, pagination.totalPages),
+    };
+  }
+
+  const pagination = paginateForSelect(session.matches, session.matchPage);
+  if (session.view === "availability") {
+    return {
+      notice: {
+        state: "availability",
+        query: session.query,
+        chapterNumber: session.chapterNumber ?? undefined,
+        availability: session.availability,
+        anyAvailable: session.anyAvailable,
+        failedCount: session.failedCount,
+        page: pagination.page + 1,
+        totalPages: pagination.totalPages,
+        detail: session.anyAvailable
+          ? "اختر عملًا من القائمة لعرض فصوله وسحب الفصل مباشرة."
+          : "هذا الرقم غير متاح بعد في أي موقع مطابق — قد ينزل قريبًا، جرّب من جديد لاحقًا.",
+      },
+      select: session.anyAvailable
+        ? {
+            customId: `search:pick:${searchId}`,
+            placeholder: "اختر عملًا لعرض فصوله أو سحبه…",
+            options: pagination.slice.map((match, index) => ({
+              label: match.title,
+              description: `${match.sourceName} (${match.lang})`,
+              value: String(pagination.start + index),
+            })),
+          }
+        : null,
+      nav: session.anyAvailable
+        ? buildSearchPageNavRow("page", searchId, pagination.page, pagination.totalPages)
+        : null,
+    };
+  }
+
+  return {
+    notice: {
+      state: "results",
+      query: session.query,
+      resultCount: session.matches.length,
+      failedCount: session.failedCount,
+      page: pagination.page + 1,
+      totalPages: pagination.totalPages,
+      matches: pagination.slice.slice(0, SEARCH_PREVIEW_LIMIT).map(match => ({
+        title: match.title,
+        sourceName: match.sourceName,
+        lang: match.lang,
+      })),
+    },
+    select: {
+      customId: `search:pick:${searchId}`,
+      placeholder: "اختر عملًا لعرض فصوله أو سحبه…",
+      options: pagination.slice.map((match, index) => ({
+        label: match.title,
+        description: `${match.sourceName} (${match.lang})`,
+        value: String(pagination.start + index),
+      })),
+    },
+    nav: buildSearchPageNavRow("page", searchId, pagination.page, pagination.totalPages),
+  };
+}
+
+async function showSearchSessionView(interaction: any, session: SearchSession, searchId: string) {
+  const view = buildSearchSessionView(session, searchId);
+  await editMessageContent(
+    interaction.channelId,
+    interaction.message.id,
+    searchCardPayload(view.notice, view.select, view.nav)
+  );
+}
+
 async function replySources(interaction: any) {
   await interaction.deferReply();
   try {
-    // مزامنة فورية حتى يظهر أي مصدر أُضيف حديثًا في Suwayomi بلا انتظار الدورة.
+    // مزامنة فورية حتى يظهر أي موقع أُضيف حديثًا بلا انتظار الدورة.
     await syncSourcesFromSuwayomi();
     const sources = await listSources();
     const active = sources.filter(source => source.status === "active");
@@ -1402,13 +1594,13 @@ async function replySources(interaction: any) {
       panelPayload(buildSourcesComponents(active, sources.length))
     );
   } catch (error) {
-    console.warn("[Discord] /مصادر failed", error);
+    console.warn("[Discord] /مواقع failed", error);
     await interaction
       .editReply(
         panelPayload(
           buildSearchCardComponents({
             state: "failed",
-            detail: "تعذر قراءة المصادر الآن. تأكد أن Suwayomi يعمل ثم أعد المحاولة.",
+            detail: "تعذر قراءة قائمة المواقع الآن — أعد المحاولة بعد قليل.",
           })
         )
       )
@@ -1460,7 +1652,7 @@ async function replySearch(interaction: any) {
       await interaction.editReply(
         searchCardPayload({
           state: "failed",
-          detail: "لا توجد مصادر مثبتة في Suwayomi بعد. ثبّت إضافة مصدر واحد على الأقل.",
+          detail: "لا توجد مواقع متاحة بعد — أضف موقعًا واحدًا على الأقل ثم أعد المحاولة.",
         })
       );
       return;
@@ -1483,7 +1675,7 @@ async function replySearch(interaction: any) {
       .editReply(
         searchCardPayload({
           state: "failed",
-          detail: "تعذر تنفيذ البحث الآن. تأكد أن Suwayomi يعمل ثم أعد المحاولة.",
+          detail: "تعذر تنفيذ البحث الآن — أعد المحاولة بعد قليل.",
         })
       )
       .catch(() => undefined);
@@ -1526,32 +1718,29 @@ async function runSearchFlow(
         state: "failed",
         query: request.query,
         failedCount: outcome.failed.length,
-        detail: `لم أعثر على عمل مطابق لـ «${request.query}» في ${outcome.searched} مصدرًا.${outcome.failed.length ? `\n-# ${outcome.failed.length} مصدرًا لم يستجب وأُثيل عنه.` : ""} جرّب اسمًا آخر أو كتابة مختلفة.`,
+        detail: `لم أعثر على عمل مطابق لـ «${request.query}» في ${sitesCount(outcome.searched)}.${outcome.failed.length ? `\n-# تعذر الوصول إلى ${sitesCount(outcome.failed.length)} أثناء البحث.` : ""} جرّب اسمًا آخر أو كتابة مختلفة.`,
       },
       null
     );
     return;
   }
 
-  const matches = outcome.matches.slice(0, 25);
-  activeSearchSessions.set(searchId, {
+  // كل النتائج تبقى في الجلسة — القائمة تعرضها صفحة صفحة عبر أزرار التنقل.
+  const session: SearchSession = {
     requesterId: requester.id,
     channelId: requester.channelId,
     createdAt: Date.now(),
-    matches,
+    query: request.query,
+    failedCount: outcome.failed.length,
+    chapterNumber: request.chapterNumber,
+    matches: outcome.matches,
+    matchPage: 0,
+    view: "results",
     chapters: [],
-  });
-  scheduleSearchSessionCleanup(searchId);
-
-  const matchSelect: SearchSelectSpec = {
-    customId: `search:pick:${searchId}`,
-    placeholder: "اختر عملًا لعرض فصوله أو سحبه…",
-    options: matches.map((match, index) => ({
-      label: match.title,
-      description: `${match.sourceName} (${match.lang})`,
-      value: String(index),
-    })),
+    chapterPage: 0,
   };
+  activeSearchSessions.set(searchId, session);
+  scheduleSearchSessionCleanup(searchId);
 
   if (request.chapterNumber !== null) {
     await post(
@@ -1566,55 +1755,29 @@ async function runSearchFlow(
     );
     const rows = await checkChapterAvailability(
       searcher,
-      matches,
+      session.matches,
       request.chapterNumber,
-      { concurrency: 5, timeoutMs: 25_000, limit: 12 }
+      { concurrency: 5, timeoutMs: 25_000, limit: 18 }
     );
-    const availability = rows.map(row => ({
-      ok: Boolean(row.chapter),
+    // النتائج الإيجابية فقط: يُعرض الموقع الذي وُجد فيه الفصل مع اسمه.
+    // المتعثر أو غير المتاح لا يُعرض إطلاقًا — إظهار الأخطاء ضجيج لا يفيد.
+    const found = rows.filter(row => row.chapter && !row.error);
+    session.view = "availability";
+    session.anyAvailable = found.length > 0;
+    session.availability = found.map(row => ({
+      ok: true,
       sourceName: row.match.sourceName,
       title: row.match.title,
-      detail: row.error
-        ? `تعذر الفحص: ${row.error}`
-        : row.chapter
-          ? `${row.chapter.name}${row.chapter.releaseDate ? ` — ${row.chapter.releaseDate}` : ""}`
-          : "لم ينزل بعد في هذا المصدر",
-      failed: Boolean(row.error),
+      detail: row.chapter!.name,
+      failed: false,
     }));
-    const anyAvailable = rows.some(row => row.chapter);
-    await target.show(
-      {
-        state: "availability",
-        query: request.query,
-        chapterNumber: request.chapterNumber,
-        availability,
-        anyAvailable,
-        failedCount: outcome.failed.length,
-        detail: anyAvailable
-          ? "اختر عملًا من القائمة لعرض فصوله وسحب الفصل مباشرة."
-          : "هذا الرقم غير متاح بعد في أي من المصادر المطابقة — جرّب لاحقًا أو اكتب رقمًا آخر.",
-      },
-      matchSelect
-    );
+    const view = buildSearchSessionView(session, searchId);
+    await target.show(view.notice, view.select, view.nav);
     return;
   }
 
-  await target.show(
-    {
-      state: "results",
-      query: request.query,
-      resultCount: outcome.matches.length,
-      failedCount: outcome.failed.length,
-      matches: matches
-        .slice(0, 10)
-        .map(match => ({
-          title: match.title,
-          sourceName: match.sourceName,
-          lang: match.lang,
-        })),
-    },
-    matchSelect
-  );
+  const view = buildSearchSessionView(session, searchId);
+  await target.show(view.notice, view.select, view.nav);
 }
 
 async function isSearchSessionAllowed(session: SearchSession, interaction: any): Promise<boolean> {
@@ -1650,7 +1813,7 @@ async function handleSearchPick(interaction: any) {
         interaction.message.id,
         searchCardPayload({
           state: "failed",
-          detail: "لم أعثر على فصول لهذا العمل في المصدر. جرّب عملًا آخر.",
+          detail: "لم أعثر على فصول لهذا العمل في هذا الموقع. جرّب عملًا آخر.",
         })
       );
       return;
@@ -1666,29 +1829,10 @@ async function handleSearchPick(interaction: any) {
     session.suwayomiSourceId = match.sourceId;
     session.matchUrl = match.url;
     session.matchRealUrl = match.realUrl;
-    const shown = session.chapters.slice(0, 25);
-    await editMessageContent(
-      interaction.channelId,
-      interaction.message.id,
-      searchCardPayload(
-        {
-          state: "chapters",
-          mangaTitle: match.title,
-          sourceName: match.sourceName,
-          totalChapters: session.chapters.length,
-          chaptersShown: shown.length,
-        },
-        {
-          customId: `search:chap:${searchId}`,
-          placeholder: "اختر فصلًا لسحبه ودمجه ورفعه…",
-          options: shown.map((chapter, chapterIndex) => ({
-            label: chapter.label,
-            description: "سحب هذا الفصل وتسليمه على Drive",
-            value: String(chapterIndex),
-          })),
-        }
-      )
-    );
+    session.view = "chapters";
+    session.chapterPage = 0;
+    // كل الفصول في الجلسة — القائمة تعرضها صفحة صفحة عبر أزرار التنقل.
+    await showSearchSessionView(interaction, session, searchId);
   } catch (error) {
     console.warn("[Discord] Search pick failed", error);
     await editMessageContent(
@@ -1696,7 +1840,7 @@ async function handleSearchPick(interaction: any) {
       interaction.message.id,
       searchCardPayload({
         state: "failed",
-        detail: "تعذر جلب فصول هذا العمل من المصدر. أعد المحاولة أو اختر عملًا آخر.",
+        detail: "تعذر جلب فصول هذا العمل من هذا الموقع. أعد المحاولة أو اختر عملًا آخر.",
       })
     ).catch(() => undefined);
   }
@@ -1725,7 +1869,7 @@ async function handleSearchChapterPick(interaction: any) {
       interaction.message.id,
       searchCardPayload({
         state: "failed",
-        detail: "تعذر بناء رابط الفصل من هذا المصدر — اختر مصدرًا آخر أو استخدم /فصل برابط مباشر.",
+        detail: "تعذر بناء رابط الفصل من هذا الموقع — اختر موقعًا آخر أو استخدم /فصل برابط مباشر.",
       })
     );
     return;
@@ -1783,6 +1927,30 @@ async function handleSearchSelectMenu(interaction: any) {
     return void handleSearchPick(interaction);
   if (interaction.customId.startsWith("search:chap:"))
     return void handleSearchChapterPick(interaction);
+}
+
+/**
+ * أزرار التنقل بين صفحات نتائج البحث أو صفحات قائمة الفصول:
+ * customId: search:page:{searchId}:prev|next أو search:cpage:{searchId}:prev|next
+ */
+async function handleSearchPageButton(interaction: any) {
+  const [, kind, searchId, direction] = interaction.customId.split(":");
+  const session = activeSearchSessions.get(searchId);
+  if (!session || !(await isSearchSessionAllowed(session, interaction))) {
+    await interaction
+      .reply({ content: "انتهت صلاحية هذه القائمة أو أنها لطالبها فقط — نفّذ /بحث من جديد.", flags: MessageFlags.Ephemeral })
+      .catch(() => undefined);
+    return;
+  }
+  await interaction.deferUpdate();
+  const delta = direction === "next" ? 1 : -1;
+  if (kind === "page") session.matchPage = Math.max(0, session.matchPage + delta);
+  else session.chapterPage = Math.max(0, session.chapterPage + delta);
+  try {
+    await showSearchSessionView(interaction, session, searchId);
+  } catch (error) {
+    console.warn("[Discord] Search page nav failed", error);
+  }
 }
 
 async function replyHelp(interaction: any) {
@@ -1845,6 +2013,11 @@ async function replyChapter(interaction: any) {
 }
 
 async function handleButton(interaction: any) {
+  if (
+    interaction.customId.startsWith("search:page:") ||
+    interaction.customId.startsWith("search:cpage:")
+  )
+    return void handleSearchPageButton(interaction);
   if (interaction.customId.startsWith("merge:cancel:"))
     return void handleMergeCancelButton(interaction);
   if (!interaction.customId.startsWith("job:cancel:")) return;
@@ -1963,7 +2136,7 @@ export async function startDiscordBot() {
         await replyChapter(interaction);
       else if (interaction.commandName === "دمج")
         await replyMerge(interaction);
-      else if (interaction.commandName === "مصادر")
+      else if (interaction.commandName === "مواقع")
         await replySources(interaction);
       else if (interaction.commandName === "بحث")
         await replySearch(interaction);
