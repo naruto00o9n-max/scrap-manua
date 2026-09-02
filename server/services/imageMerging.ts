@@ -111,10 +111,15 @@ async function downloadPagesToTemp(
 }
 
 /**
- * قواعد التجميع نفسها السابقة: لا تقسيم لأي صفحة ولا تصغير؛ الصفحة الأطول من
+ * قواعد التجميع: لا تقسيم لأي صفحة ولا تصغير؛ الصفحة الأطول من
  * 14000px تبقى مستقلة كاملة، والصفحة الأطول من 1000px تُضم فقط إلى مجموعة
  * مجاورة إذا كان الناتج المنظم بين 11000 و14000px، والبقية تتراكم في مجموعات
  * تصل إلى الحد الأدنى دون تجاوز الحد الأعلى. عدم القص هو الأولوية المطلقة.
+ *
+ * إصلاح ذيل الفصل: صفحات النهاية التي تعذر عليها بلوغ الحد الأدنى (11000px)
+ * كانت تُترك كل واحدة مستقلة رغم إمكانية دمجها معًا دون تجاوز الحد الأعلى —
+ * فبعد التجميع الأساسي تُدمج المجموعات الختامية المتتالية في صورة أخيرة واحدة
+ * كلما بقي مجموعها داخل سقف 14000px.
  */
 function groupPageIndexes(dimensions: Array<{ height?: number }>): number[][] {
   const groups: number[][] = [];
@@ -159,6 +164,21 @@ function groupPageIndexes(dimensions: Array<{ height?: number }>): number[][] {
     if (currentHeight >= MIN_OUTPUT_HEIGHT) flushCurrent();
   }
   flushCurrent();
+
+  // دمج الذيل الختامي: نمشي من آخر مجموعة نحو البداية ونضمّ المجموعات المتتالية
+  // في مجموعة أخيرة واحدة ما دام المجموع الكلي لا يتجاوز سقف 14000px.
+  // المجموعات المقبولة سابقًا في المتن لا تُلمس إلا إذا كانت ضمن هذا الذيل.
+  let tail = groups.pop() ?? [];
+  let tailHeight = tail.reduce((sum, index) => sum + (dimensions[index]?.height ?? 0), 0);
+  while (groups.length) {
+    const previous = groups[groups.length - 1]!;
+    const previousHeight = previous.reduce((sum, index) => sum + (dimensions[index]?.height ?? 0), 0);
+    if (tailHeight + previousHeight > MAX_OUTPUT_HEIGHT) break;
+    tail = [...previous, ...tail];
+    tailHeight += previousHeight;
+    groups.pop();
+  }
+  if (tail.length) groups.push(tail);
   return groups;
 }
 
