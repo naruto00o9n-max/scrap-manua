@@ -1,5 +1,5 @@
 import { createWriteStream } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Readable, Transform } from "node:stream";
@@ -111,10 +111,11 @@ async function downloadPagesToTemp(
 }
 
 /**
- * قواعد التجميع: لا تقسيم لأي صفحة ولا تصغير؛ الصفحة الأطول من
- * 14000px تبقى مستقلة كاملة، والصفحة الأطول من 1000px تُضم فقط إلى مجموعة
- * مجاورة إذا كان الناتج المنظم بين 11000 و14000px، والبقية تتراكم في مجموعات
- * تصل إلى الحد الأدنى دون تجاوز الحد الأعلى. عدم القص هو الأولوية المطلقة.
+ * قواعد التجميع: لا تقسيم لأي صفحة ولا حشو أبيض؛ العرض يُوحد بالتحجير قبل
+ * التجميع، والصفحة الأطول من 14000px تبقى مستقلة كاملة، والصفحة الأطول من
+ * 1000px تُضم فقط إلى مجموعة مجاورة إذا كان الناتج المنظم بين 11000 و14000px،
+ * والبقية تتراكم في مجموعات تصل إلى الحد الأدنى دون تجاوز الحد الأعلى.
+ * عدم القص هو الأولوية المطلقة.
  *
  * إصلاح ذيل الفصل: صفحات النهاية التي تعذر عليها بلوغ الحد الأدنى (11000px)
  * كانت تُترك كل واحدة مستقلة رغم إمكانية دمجها معًا دون تجاوز الحد الأعلى —
@@ -205,6 +206,60 @@ async function renderGroupToFile(
 }
 
 /**
+ * يختار العرض الموحد لصفحات الفصل: العرض الأكثر تكرارًا بين الصفحات هو العرض
+ * الحقيقي للعمل، وعند التعادل يُرجّح العرض الأكبر حفاظًا على أكبر قدر من التفاصيل.
+ * الصفحات الخالية من العرض (تعذر قراءتها) تُتجاهل في الاختيار.
+ */
+export function pickUniformWidth(widths: Array<number | null | undefined>): number {
+  const counts = new Map<number, number>();
+  for (const width of widths) {
+    if (!width || width <= 0) continue;
+    counts.set(width, (counts.get(width) ?? 0) + 1);
+  }
+  let best = 0;
+  let bestCount = 0;
+  for (const [width, count] of Array.from(counts)) {
+    if (count > bestCount || (count === bestCount && width > best)) {
+      best = width;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
+/**
+ * يوحدّ عرض صفحات الفصل بالتحجير لا بالحشو: كل صفحة عرضها غير العرض المشترك
+ * تُحجّم إليه مع الحفاظ على نسبتها (تُصغّر الأعرض وتُكبّر الأضيق قليلًا)، فلا
+ * تظهر خلفية بيضاء على جانبي الصفحات أبدًا — كانت تُفرش سابقًا فوق لوحة
+ * بعرض أكبر صفحة مع توسيطها فتبدو مبطنة بالأبيض.
+ * التسلسل مقصود: صفحة واحدة في الذاكرة في كل لحظة، والناتج يُكتب على القرص.
+ */
+async function scalePagesToUniformWidth(
+  pagePaths: string[],
+  dimensions: Array<{ width?: number; height?: number }>,
+  width: number,
+  scaledDir: string
+): Promise<{ paths: string[]; dimensions: Array<{ width?: number; height?: number }> }> {
+  await mkdir(scaledDir, { recursive: true });
+  const paths = [...pagePaths];
+  const nextDimensions = [...dimensions];
+  for (let index = 0; index < pagePaths.length; index += 1) {
+    const pageWidth = dimensions[index]?.width ?? 0;
+    // الصفحات المعطوبة بلا عرض مقروء تُترك كما هي — سلوك التعامل معها لا يتغير.
+    if (!pageWidth || pageWidth === width) continue;
+    const targetPath = path.join(scaledDir, `${path.basename(pagePaths[index]!)}.scaled.png`);
+    await sharp(pagePaths[index]!)
+      .resize({ width })
+      .png({ compressionLevel: 0, adaptiveFiltering: false, palette: false })
+      .toFile(targetPath);
+    paths[index] = targetPath;
+    // نقرأ الأبعاد الفعلية للملف المحجّم — القسمة والتقريب قد يفرقان بكسلًا عن الحساب.
+    nextDimensions[index] = await sharp(targetPath).metadata();
+  }
+  return { paths, dimensions: nextDimensions };
+}
+
+/**
  * يدمج ملفات صور موجودة مسبقًا على القرص في صور طويلة تُكتب إلى القرص فورًا،
  * مجموعة واحدة في كل مرة. نفس منطق الدمج المستخدم لصفحات الفصول المسحوبة،
  * لكن دون أي تنزيل — يُستخدم لأمر الدمج اليدوي (صور جاهزة من ZIP أو Drive).
@@ -219,16 +274,24 @@ export async function openLocalImageMergeSession(
   }
   const dir = await mkdtemp(path.join(tmpdir(), "manga-merge-"));
   try {
-    const dimensions = await Promise.all(pagePaths.map(pagePath => sharp(pagePath).metadata()));
-    const width = Math.max(...dimensions.map(item => item.width ?? 0));
-    if (!width) throw new Error("تعذر تحديد أكبر عرض لصفحات الفصل.");
+    const originalDimensions = await Promise.all(pagePaths.map(pagePath => sharp(pagePath).metadata()));
+    const width = pickUniformWidth(originalDimensions.map(item => item.width));
+    if (!width) throw new Error("تعذر تحديد عرض موحد لصفحات الفصل.");
+
+    // توحيد العرض بالتحجير: الصفحات التي عرضها يساوي العرض المشترك تبقى كما
+    // هي بلا إعادة ترميز، وما خالفه يُحجّم فقط.
+    const { paths: effectivePaths, dimensions } = originalDimensions.every(
+      item => !item.width || item.width === width
+    )
+      ? { paths: pagePaths, dimensions: originalDimensions }
+      : await scalePagesToUniformWidth(pagePaths, originalDimensions, width, path.join(dir, "scaled"));
 
     const groups = groupPageIndexes(dimensions);
     const images: MergedChapterFile[] = [];
     // التسلسل مقصود: تُرسم مجموعة واحدة في كل مرة وتُكتب إلى القرص فورًا.
     for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
       const outputPath = path.join(dir, `merged-${String(groupIndex + 1).padStart(3, "0")}.png`);
-      const height = await renderGroupToFile(groups[groupIndex]!, pagePaths, dimensions, width, outputPath);
+      const height = await renderGroupToFile(groups[groupIndex]!, effectivePaths, dimensions, width, outputPath);
       images.push({ filePath: outputPath, width, height, mimeType: OUTPUT_MIME });
       if (onProgress) {
         try { await onProgress({ phase: "merging", done: groupIndex + 1, total: groups.length }); } catch { /* فشل الإشعار لا يُفشل المعالجة */ }

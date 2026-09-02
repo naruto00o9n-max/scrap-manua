@@ -430,7 +430,7 @@ export function buildHelpComponents(
     text(
       [
         "### 🔹 /مواقع",
-        "يعرض كل المواقع المتاحة في البوت مرتبة في أقسام لغوية واضحة: المواقع العربية في قسم، والإنجليزية في قسم، وهكذا — أي موقع يُضاف للبوت يظهر هنا تلقائيًا ⚡.",
+        "يعرض المواقع التي يدعمها ZEUS مرتبة في أقسام لغوية: العربية قسم، والإنجليزية قسم، وهكذا.",
       ].join("\n")
     ),
     separator(),
@@ -439,7 +439,7 @@ export function buildHelpComponents(
         "### 🔹 /بحث",
         "يبحث عن أي عمل في كل المواقع دفعة واحدة، بدل الدخول لكل موقع والبحث فيه يدويًا.",
         "**1.** نفّذ `/بحث` واكتب اسم العمل (وكلمة واحدة تكفي) — يبحث في كل المواقع ويعرض المطابقات، ولو كثرت النتائج عن 25 تنقّل بين صفحاتها بأزرار «السابق/التالي».",
-        "**2.** اختر عملًا من القائمة فتفتح **صفحة العمل**: صورة الغلاف مكان صورة البوت، وملخصه ومؤلفه وحالته وتصنيفاته مرتبة، مع العدد الكلي لفصوله، وفي الأسفل قائمة الفصول (صفحة صفحة مهما كثرت) — اختر فصلًا ليُسحب ويُدمج ويُرفع Drive كأمر /فصل تمامًا، وزر «عودة» يعيدك إلى النتائج في أي وقت.",
+        "**2.** اختر عملًا من القائمة فتفتح **صفحة العمل**: صورة الغلاف مكان صورة البوت، وملخصه ومؤلفه وحالته وتصنيفاته مرتبة، مع العدد الكلي لفصوله، وفي الأسفل قائمة الفصول (صفحة صفحة مهما كثرت) — اختر فصلًا ليُسحب مثل /فصل تمامًا، وزر «عودة» يعيدك إلى النتائج في أي وقت.",
         "**3.** لو تريد معرفة هل الفصل نزل أو لا: ضع رقم الفصل في خانة «الفصل» — سيفحصه في كل المواقع ويعرض فقط المواقع التي وُجد فيه.",
       ].join("\n")
     ),
@@ -1621,6 +1621,8 @@ export type SearchNotice = {
   query?: string;
   progress?: { done: number; total: number };
   failedCount?: number;
+  /** أسماء المواقع التي تعذر الوصول إليها — تُعرض اختصارًا بجوار العدد. */
+  failedNames?: string[];
   resultCount?: number;
   matches?: Array<{ title: string; sourceName: string; lang: string }>;
   chapterNumber?: number;
@@ -1795,6 +1797,18 @@ export function chaptersCount(count: number): string {
   return `${count} فصلًا`;
 }
 
+/**
+ * لاحقة المواقع المتعثرة في سطر نتائج البحث: العدد ثم أسماء أبرزها
+ * (حتى 3 أسماء) — يعرف الطالب أي المواقع تعذر الوصول إليه بالتحديد.
+ */
+export function resultsFailureSuffix(notice: SearchNotice): string {
+  if (!notice.failedCount) return "";
+  const names = notice.failedNames ?? [];
+  const shown = names.slice(0, 3).join("، ");
+  const more = names.length > 3 ? " وغيرها" : "";
+  return ` (تعذر الوصول إلى ${sitesCount(notice.failedCount)}${shown ? `: ${shown}${more}` : ""})`;
+}
+
 /** يترجم قيمة MangaStatus من Suwayomi إلى نص عربي مختصر. */
 export function mangaStatusAr(status: string | null | undefined): string | null {
   switch ((status ?? "").toUpperCase()) {
@@ -1860,7 +1874,7 @@ export function buildSearchCardComponents(
     );
   } else if (notice.state === "results") {
     const lines: string[] = [
-      `نتائج البحث عن **«${notice.query ?? ""}»** — ${notice.resultCount ?? 0} نتيجة${notice.failedCount ? ` (تعذر الوصول إلى ${sitesCount(notice.failedCount)})` : ""}`,
+      `نتائج البحث عن **«${notice.query ?? ""}»** — ${notice.resultCount ?? 0} نتيجة${resultsFailureSuffix(notice)}`,
     ];
     const matches = notice.matches ?? [];
     for (let index = 0; index < matches.length; index += 1) {
@@ -1946,7 +1960,7 @@ function buildMangaPageComponents(
     text(
       [
         `📚 **عدد الفصول: ${chaptersCount(notice.totalChapters ?? 0)}**`,
-        `-# اختر فصلًا من القائمة ليُسحب ويُدمج ويُرفع إلى Drive مثل /فصل تمامًا${pageInfo}.`,
+        `-# اختر فصلًا لسحبه${pageInfo}.`,
       ].join("\n")
     )
   );
@@ -2032,10 +2046,7 @@ export function buildSourcesComponents(
     headerBlock("## 🗂️ مواقع ZEUS", [], avatar),
     separator(2),
     text(
-      [
-        `**${active.length}** ${active.length === 1 ? "موقع متاح" : "مواقع متاحة"} من إجمالي ${totalCount} مسجل.`,
-        "كل موقع يُضاف للبوت يظهر هنا تلقائيًا، مرتّبًا في قسم لغته، ويُستخدم عبر /بحث مباشرة.",
-      ].join("\n")
+      `**${active.length}** ${active.length === 1 ? "موقع متاح" : "مواقع متاحة"}.`
     ),
   ];
   for (const group of groups) {
@@ -2044,7 +2055,7 @@ export function buildSourcesComponents(
     const shown = group.sources.slice(0, SOURCES_GROUP_LIMIT);
     for (const source of shown) {
       lines.push(
-        `• **${source.name}** — ${source.hostname && !source.hostname.endsWith(".internal") ? source.hostname : "عبر /بحث"}${source.origin === "suwayomi" ? " ⚡" : ""}`
+        `• **${source.name}** — ${source.hostname && !source.hostname.endsWith(".internal") ? source.hostname : "عبر /بحث"}`
       );
     }
     if (group.sources.length > shown.length) {
@@ -2057,7 +2068,7 @@ export function buildSourcesComponents(
     body.push(text("لا توجد مواقع متاحة بعد — أضف إضافة على Suwayomi وستظهر هنا فورًا."));
   }
   body.push(separator());
-  body.push(text("-# ⚡ مُضاف تلقائيًا — ZEUS"));
+  body.push(text("-# ZEUS"));
   return [raw({ type: 17, accent_color: GOLD, components: body })];
 }
 
@@ -2110,7 +2121,7 @@ function createSearchProgressPoster(target: SearchCardTarget) {
 
 export type SearchSessionView = "results" | "availability" | "chapters";
 
-type SearchSession = {
+export type SearchSession = {
   requesterId: string;
   channelId: string;
   createdAt: number;
@@ -2128,6 +2139,7 @@ type SearchSession = {
   chapterPage: number;
   query: string;
   failedCount: number;
+  failedNames: string[];
   chapterNumber: number | null;
   availability?: SearchNotice["availability"];
   anyAvailable?: boolean;
@@ -2158,7 +2170,7 @@ function searchRequesterOf(interaction: any): Requester {
  * يبني حالة العرض (البطاقة + القائمة المنسدلة + أزرار الصفحات) من الجلسة
  * في حالتها الحالية — يستخدم في العرض الأول وفي التنقل وإعادة الرسم.
  */
-function buildSearchSessionView(
+export function buildSearchSessionView(
   session: SearchSession,
   searchId: string
 ): { notice: SearchNotice; select: SearchSelectSpec | null; nav: Raw | null } {
@@ -2182,10 +2194,10 @@ function buildSearchSessionView(
       },
       select: {
         customId: `search:chap:${searchId}`,
-        placeholder: "اختر فصلًا لسحبه ودمجه ورفعه…",
+        placeholder: "اختر فصلًا لسحبه…",
+        // بلا وصف مكرر تحت كل فصل — إما وصف حقيقي من المصدر أو لا شيء.
         options: pagination.slice.map((chapter, index) => ({
           label: chapter.label,
-          description: "سحب هذا الفصل وتسليمه على Drive",
           value: String(pagination.start + index),
         })),
       },
@@ -2242,6 +2254,7 @@ function buildSearchSessionView(
       query: session.query,
       resultCount: session.matches.length,
       failedCount: session.failedCount,
+      failedNames: session.failedNames,
       page: pagination.page + 1,
       totalPages: pagination.totalPages,
       matches: pagination.slice.slice(0, SEARCH_PREVIEW_LIMIT).map(match => ({
@@ -2391,7 +2404,11 @@ async function runSearchFlow(
 
   const outcome = await searchAllSources(searcher, sources, request.query, {
     concurrency: 6,
-    timeoutMs: 20_000,
+    timeoutMs: 15_000,
+    // الموجة الثانية: المصادر المتعثرة تُعاد مرة واحدة بتزامن أقل ومهلة أطول —
+    // كثير من المواقع تُقيّد الاندفاع المتوازي ثم تنجح من محاولة هادئة.
+    retryConcurrency: 2,
+    retryTimeoutMs: 30_000,
     onProgress: async (done, total) => {
       await post({
         state: "progress",
@@ -2400,6 +2417,7 @@ async function runSearchFlow(
       });
     },
   });
+  const failedNames = outcome.failed.map(item => item.sourceName);
 
   if (!outcome.matches.length) {
     await target.show(
@@ -2407,7 +2425,8 @@ async function runSearchFlow(
         state: "failed",
         query: request.query,
         failedCount: outcome.failed.length,
-        detail: `لم أعثر على عمل مطابق لـ «${request.query}» في ${sitesCount(outcome.searched)}.${outcome.failed.length ? `\n-# تعذر الوصول إلى ${sitesCount(outcome.failed.length)} أثناء البحث.` : ""} جرّب اسمًا آخر أو كتابة مختلفة.`,
+        failedNames,
+        detail: `لم أعثر على عمل مطابق لـ «${request.query}» في ${sitesCount(outcome.searched)}.${outcome.failed.length ? `\n-# تعذر الوصول إلى ${sitesCount(outcome.failed.length)}${failedNames.length ? `: ${failedNames.slice(0, 4).join("، ")}${failedNames.length > 4 ? " وغيرها" : ""}` : ""} أثناء البحث.` : ""} جرّب اسمًا آخر أو كتابة مختلفة.`,
       },
       null
     );
@@ -2421,6 +2440,7 @@ async function runSearchFlow(
     createdAt: Date.now(),
     query: request.query,
     failedCount: outcome.failed.length,
+    failedNames,
     chapterNumber: request.chapterNumber,
     matches: outcome.matches,
     matchPage: 0,
@@ -2494,9 +2514,11 @@ async function handleSearchPick(interaction: any) {
     );
     // صفحة العمل تحتاج التفاصيل (وصف/مؤلف/حالة/غلاف) والفصول معًا —
     // يُطلبان بالتوازي، وفشل التفاصيل وحده لا يمنع عرض الفصول أبدًا.
+    // جلب الفصول حي من الموقع غالبًا — مهلة أطول من الافتراضية حتى لا
+    // يفشل اختيار العمل البطيء بلا داعٍ.
     const [details, chapters] = await Promise.all([
       searcher.fetchMangaDetails(match.mangaId).catch(() => null),
-      searcher.fetchMangaAndChapters(match.mangaId),
+      searcher.fetchMangaAndChapters(match.mangaId, 30_000),
     ]);
     const sorted = chapters
       .filter(chapter => typeof chapter.chapterNumber === "number")

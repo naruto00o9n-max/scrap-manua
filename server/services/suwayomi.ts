@@ -201,18 +201,25 @@ export class SuwayomiClient {
     return result.mangas.nodes[0] ?? null;
   }
 
-  async searchSourceManga(sourceId: string, query: string): Promise<SuwayomiManga[]> {
+  /**
+   * بحث حي داخل الموقع عبر Suwayomi — mutation ينتظر اجابة الموقع نفسه،
+   * والمهلة الافتراضية 10s أضيق من اللازم لكثير من المواقع البطيئة؛
+   * مسار /بحث يمرر مهلة أطول صراحة ليتناسب مع مهلة السباق الخارجية.
+   */
+  async searchSourceManga(sourceId: string, query: string, timeoutMs = 10_000): Promise<SuwayomiManga[]> {
     const result = await this.request<{ fetchSourceManga: { mangas: SuwayomiManga[] } }>(
       "mutation FetchSourceManga($input: FetchSourceMangaInput!) { fetchSourceManga(input: $input) { mangas { id title url realUrl thumbnailUrl sourceId } } }",
       { input: { source: sourceId, type: "SEARCH", query, page: 1, filters: [] } },
+      timeoutMs,
     );
     return result.fetchSourceManga.mangas;
   }
 
-  async fetchMangaAndChapters(mangaId: number): Promise<SuwayomiChapter[]> {
+  async fetchMangaAndChapters(mangaId: number, timeoutMs = 10_000): Promise<SuwayomiChapter[]> {
     const result = await this.request<{ fetchMangaAndChapters: { chapters: SuwayomiChapter[] } }>(
       "mutation FetchMangaAndChapters($input: FetchMangaAndChaptersInput!) { fetchMangaAndChapters(input: $input) { chapters { id name url realUrl chapterNumber manga { id title sourceId } } } }",
       { input: { id: mangaId, fetchManga: true, fetchChapters: true } },
+      timeoutMs,
     );
     return result.fetchMangaAndChapters.chapters;
   }
