@@ -26,6 +26,7 @@ import {
   GoogleDriveClient,
   GoogleDriveError,
   mangaFolderTitle,
+  sharingPolicyFromMode,
 } from "./googleDrive";
 import { getUsableSuwayomiToken } from "./settings";
 import { SuwayomiClient } from "./suwayomi";
@@ -218,15 +219,10 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
       );
 
       const drive = new GoogleDriveClient();
-      const sharingMode =
-        (await getSetting("google_drive_sharing_mode")) ?? "link_reader";
-      const sharingDomain = await getSetting("google_drive_sharing_domain");
-      const sharing =
-        sharingMode === "private"
-          ? { mode: "private" as const }
-          : sharingMode === "domain_reader" && sharingDomain
-            ? { mode: "domain_reader" as const, domain: sharingDomain }
-            : { mode: "link_reader" as const };
+      const sharing = sharingPolicyFromMode(
+        await getSetting("google_drive_sharing_mode"),
+        await getSetting("google_drive_sharing_domain")
+      );
       const folder = await drive.createChapterFolder(
         // نطاق المصدر يُضاف لاسم العمل حتى لا يشارك مصدران مختلفان نفس المجلد
         // إذا تطابق اسم العمل واسم الفصل بينهما.

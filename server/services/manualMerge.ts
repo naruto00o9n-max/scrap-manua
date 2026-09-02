@@ -9,6 +9,7 @@ import { getSetting } from "../db";
 import {
   GoogleDriveClient,
   GoogleDriveError,
+  sharingPolicyFromMode,
   type DriveSharingPolicy,
 } from "./googleDrive";
 import { openLocalImageMergeSession } from "./imageMerging";
@@ -147,11 +148,11 @@ function assertNotCancelled(token?: ManualMergeCancelToken): void {
 }
 
 async function resolveSharing(): Promise<DriveSharingPolicy> {
-  const mode = (await getSetting("google_drive_sharing_mode")) ?? "link_reader";
-  const domain = await getSetting("google_drive_sharing_domain");
-  if (mode === "private") return { mode: "private" };
-  if (mode === "domain_reader" && domain) return { mode: "domain_reader", domain };
-  return { mode: "link_reader" };
+  // الافتراضي عند غياب الإعداد: «أي شخص لديه الرابط — محرر».
+  return sharingPolicyFromMode(
+    await getSetting("google_drive_sharing_mode"),
+    await getSetting("google_drive_sharing_domain")
+  );
 }
 
 function titleFromName(name: string): string {
