@@ -31,6 +31,7 @@ import {
 import type { ContentSource } from "../../shared/dbTypes";
 import { queueAuthorizedChapter } from "./jobs";
 import {
+  DriveFileMeta,
   GoogleDriveClient,
   GoogleDriveError,
 } from "./googleDrive";
@@ -192,7 +193,7 @@ const commandPayload = [
     .addStringOption(option =>
       option
         .setName("من")
-        .setDescription("رابط المجلد الذي يحتوي مجلدات الفصول")
+        .setDescription("رابط مجلد واحد أو عدة روابط مجلدات مفصولة بمسافات أو أسطر")
         .setRequired(true)
     )
     .addStringOption(option =>
@@ -446,10 +447,10 @@ export function buildHelpComponents(
     text(
       [
         "### 🔹 /نقل",
-        "يجمع مجلدات الفصول من مجلد Drive إلى مجلد آخر دفعة واحدة — بدون تحميل أو إعادة رفع، والمجلدات تنتقل بصورها كما هي.",
-        "**1.** انسخ رابط المجلد الذي يحتوي مجلدات الفصول (مثل مجلد العمل)، وارفع مجلدًا آخر تريد جمعها فيه وانسخ رابطه أيضًا.",
-        "**2.** نفّذ `/نقل` وضع الرابط الأول في خانة «من» ورابط المجلد الوجهة في خانة «إلى».",
-        "**3.** سينقل ZEUS كل المجلدات دفعة واحدة ويعطيك زر فتح المجلد الوجهة عند الانتهاء — وكل مجلد فصل يبقى بصوره داخله.",
+        "يجمع مجلدات الفصول في Drive إلى مجلد واحد — بدون تحميل أو إعادة رفع، والمجلدات تنتقل بصورها ومعرّفاتها كما هي.",
+        "**طريقة أ:** رابط مجلد يحتوي مجلدات الفصول (مثل مجلد العمل) في «من» ورابط الوجهة في «إلى» — يُنقل كل ما بداخله.",
+        "**طريقة ب:** الصق عدة روابط مجلدات (كل مجلد فصل في سطر) في «من» — تُنقل هذه المجلدات نفسها إلى الوجهة أينما كانت.",
+        "عند الانتهاء يظهر زر فتح المجلد الوجهة، وكل مجلد فصل يبقى بصوره داخله. وإن فشل الوصول لمجلد فتُظهر البطاقة حساب Drive الذي يستخدمه البوت لتشاركه معه.",
       ].join("\n")
     ),
     separator(),
@@ -710,6 +711,57 @@ export function foldersCount(count: number): string {
   if (count === 2) return "مجلدين";
   if (count <= 10) return `${count} مجلدات`;
   return `${count} مجلدًا`;
+}
+
+/** الحد الأقصى لعدد روابط المجلدات المقبولة في خانة «من» دفعة واحدة. */
+export const MAX_MOVE_LINKS = 50;
+
+/**
+ * يستخرج كل معرّفات مجلدات Drive من نص قد يحوي رابطًا واحدًا أو عدة روابط
+ * مفصولة بمسافات أو أسطر أو فواصل (عادية أو عربية)، ويحذف المكرر.
+ * يقبل الرابط الكامل أو المعرّف المجرد، ويتجاهل أي كلام آخر بين الروابط
+ * (مثل الترقيم «1-» أمام الروابط في رسالة منسوخة).
+ */
+export function parseDriveFolderLinks(value: string): string[] {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const token of value.split(/[\s,،]+/)) {
+    if (!token) continue;
+    const parsed = parseDriveLink(token);
+    const id =
+      parsed?.kind === "folder"
+        ? parsed.id
+        : /^[-\w]{10,}$/.test(token)
+          ? token
+          : null;
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      ids.push(id);
+    }
+  }
+  return ids;
+}
+
+/**
+ * نص فشل الوصول إلى أحد مجلدي النقل: يوضّح الخانة وسبب الرفض،
+ * ويعرض حساب Drive الذي يستخدمه البوت، ويعطي خطوتي الإصلاح:
+ * مشاركة المجلد مع هذا الحساب كمحرر، أو إعادة توثيق البوت بالحساب الصحيح.
+ */
+export function moveAccessFailureDetail(
+  slot: "من" | "إلى",
+  reason: string,
+  botEmail: string | null
+): string {
+  return [
+    `تعذر الوصول إلى المجلد في خانة «${slot}» من حساب Drive المصرّح للبوت.`,
+    `السبب: ${reason}`,
+    botEmail ? `**حساب Drive الذي يستخدمه البوت:** ${botEmail}` : null,
+    botEmail
+      ? `إن كان المجلد في حساب Google آخر: افتح المجلد ← مشاركة ← أضف ${botEmail} بصلاحية **محرر** ثم أعد /نقل.`
+      : "شارك المجلد مع حساب Drive الذي وثّق البوت به بصلاحية «محرر» ثم أعد /نقل، أو أعد التوثيق من الحساب صاحب المجلد (GDRIVE_REFRESH_TOKEN).",
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 export type MoveNotice = {
@@ -1241,124 +1293,85 @@ async function replyMove(interaction: any) {
   await interaction.deferReply();
   const options = { requesterId: interaction.user.id as string };
   const fail = async (title: string, detail: string) => {
-    await interaction.editReply(moveCardPayload({ status: "failed", title, detail }));
+    await interaction.editReply(
+      moveCardPayload({ status: "failed", title, detail }, options)
+    );
   };
   try {
     if (!(await hasRequestAccess(interaction))) {
       await fail("🔒 لا تملك صلاحية", "هذا الأمر متاح لأدوار محددة فقط.");
       return;
     }
-    const from = parseDriveLink(interaction.options.getString("من", true));
+    const from = parseDriveFolderLinks(
+      interaction.options.getString("من", true) ?? ""
+    );
     const to = parseDriveLink(interaction.options.getString("إلى", true));
-    if (!from || from.kind !== "folder" || !to || to.kind !== "folder") {
+    if (!to || to.kind !== "folder") {
       await fail(
-        "❌ روابط غير صالحة",
-        "أرسل رابطَي **مجلد** Google Drive: رابط المجلد الذي يحتوي مجلدات الفصول في خانة «من»، ورابط المجلد الوجهة في خانة «إلى»."
+        "❌ رابط الوجهة غير صالح",
+        "أرسل رابط **مجلد** Google Drive في خانة «إلى»: افتح المجلد ثم مشاركة ← نسخ الرابط."
       );
-      return;
-    }
-    if (from.id === to.id) {
-      await fail("❌ المجلدان متطابقان", "اختر مجلد وجهة مختلفًا عن المجلد المصدر.");
       return;
     }
 
     const drive = new GoogleDriveClient();
     await interaction.editReply(
-      moveCardPayload({
-        status: "pending",
-        title: "⏳ جاري فحص المجلدين",
-        label: "يقرأ المجلدين ثم ينقل كل المجلدات الفرعية إلى الوجهة.",
-      })
-    );
-
-    const [fromMeta, toMeta] = await Promise.all([
-      drive.getFileMeta(from.id),
-      drive.getFileMeta(to.id),
-    ]);
-    const wrongMime =
-      fromMeta.mimeType !== DRIVE_FOLDER_MIME
-        ? `الرابط في خانة «من» ليس مجلدًا («${fromMeta.name}»).`
-        : toMeta.mimeType !== DRIVE_FOLDER_MIME
-          ? `الرابط في خانة «إلى» ليس مجلدًا («${toMeta.name}»).`
-          : null;
-    if (wrongMime) {
-      await fail(
-        "❌ الرابط ليس مجلدًا",
-        `${wrongMime} انسخ رابط المجلد من Drive (افتح المجلد ثم مشاركة ← نسخ الرابط) وأعد المحاولة.`
-      );
-      return;
-    }
-
-    const subfolders = (await drive.listSubfolders(from.id)).filter(
-      folder => folder.id !== to.id
-    );
-    if (!subfolders.length) {
-      await fail(
-        "لا توجد مجلدات للنقل",
-        `المجلد «${fromMeta.name}» لا يحتوي أي مجلدات بداخله — لا شيء لنقله إلى «${toMeta.name}».`
-      );
-      return;
-    }
-
-    const moveLabel = `من «${fromMeta.name}» إلى «${toMeta.name}» — ${foldersCount(subfolders.length)}`;
-    await interaction.editReply(
-      moveCardPayload({
-        status: "downloading",
-        title: "⏳ جاري النقل",
-        label: moveLabel,
-        progress: { done: 0, total: subfolders.length },
-      })
-    );
-
-    const failures: Array<{ name: string; reason: string }> = [];
-    for (let index = 0; index < subfolders.length; index += 1) {
-      const folder = subfolders[index];
-      if (!folder) continue;
-      try {
-        await drive.moveFolder(folder.id, from.id, to.id);
-      } catch (error) {
-        failures.push({
-          name: folder.name,
-          reason: error instanceof Error ? error.message : "خطأ غير معروف",
-        });
-      }
-      const done = index + 1;
-      if (done % MOVE_EDIT_EVERY === 0 && done < subfolders.length) {
-        await interaction
-          .editReply(
-            moveCardPayload({
-              status: "downloading",
-              title: "⏳ جاري النقل",
-              label: moveLabel,
-              progress: { done, total: subfolders.length },
-            })
-          )
-          .catch(() => undefined);
-      }
-    }
-
-    const movedCount = subfolders.length - failures.length;
-    const summary = failures.length
-      ? `تم نقل ${foldersCount(movedCount)} من ${foldersCount(subfolders.length)} إلى «${toMeta.name}» — وتعذر نقل الباقي.`
-      : `تم نقل ${foldersCount(movedCount)} إلى «${toMeta.name}» — افتح المجلد وستجدها بداخله، وكل مجلد فصل بصوره.`;
-    const failureLines = failures
-      .slice(0, 15)
-      .map(item => `• ${item.name}: ${item.reason}`);
-    if (failures.length > failureLines.length) {
-      failureLines.push(`— و${failures.length - failureLines.length} مجلدات أخرى تعذر نقلها.`);
-    }
-    await interaction.editReply(
       moveCardPayload(
         {
-          status: "completed",
-          title: failures.length ? "⚠️ اكتمل النقل مع أخطاء" : "✅ تم النقل",
-          label: summary,
-          detail: failures.length ? failureLines.join("\n") : null,
-          driveUrl: `https://drive.google.com/drive/folders/${to.id}`,
+          status: "pending",
+          title: "⏳ جاري فحص المجلدات",
+          label: "يقرأ الوجهة والمصادر ثم ينقل المجلدات إلى الوجهة.",
         },
         options
       )
     );
+
+    // الوجهة أولًا: إن لم يصلها البوت فلا معنى لأي وضع نقل،
+    // والبطاقة تعرض حساب Drive الذي يستخدمه البوت ليعرف المالك مع من يشارك.
+    let toMeta: DriveFileMeta;
+    try {
+      toMeta = await drive.getFileMeta(to.id);
+    } catch (error) {
+      const botEmail = await drive.getDriveAccountEmail();
+      await fail(
+        "❌ تعذر الوصول إلى مجلد الوجهة",
+        moveAccessFailureDetail(
+          "إلى",
+          error instanceof Error ? error.message : "خطأ غير معروف",
+          botEmail
+        )
+      );
+      return;
+    }
+    if (toMeta.mimeType !== DRIVE_FOLDER_MIME) {
+      await fail(
+        "❌ الرابط ليس مجلدًا",
+        `الرابط في خانة «إلى» ليس مجلدًا («${toMeta.name}»). انسخ رابط المجلد من Drive (افتح المجلد ثم مشاركة ← نسخ الرابط) وأعد المحاولة.`
+      );
+      return;
+    }
+
+    const sourceIds = from.filter(id => id !== to.id);
+    if (!sourceIds.length) {
+      await fail(
+        "❌ روابط غير صالحة",
+        "ضع في خانة «من» رابط مجلد يحتوي مجلدات الفصول، أو عدة روابط مجلدات مفصولة بمسافات أو أسطر — ورابط الوجهة في خانة «إلى»."
+      );
+      return;
+    }
+    if (sourceIds.length > MAX_MOVE_LINKS) {
+      await fail(
+        "❌ روابط كثيرة جدًا",
+        `الحد ${MAX_MOVE_LINKS} رابطًا في المرة الواحدة — قسّم الروابط على دفعات ثم أعد المحاولة.`
+      );
+      return;
+    }
+
+    // رابط واحد → مجلد مصدر تُنقل كل مجلداته الفرعية.
+    // روابط متعددة → كل رابط مجلد فصل مستقل يُنقل نفسه من موضعه إلى الوجهة.
+    if (sourceIds.length === 1)
+      await moveAllSubfolders(interaction, drive, sourceIds[0]!, toMeta, options);
+    else await moveListedFolders(interaction, drive, sourceIds, toMeta, options);
   } catch (error) {
     const detail =
       error instanceof GoogleDriveError || error instanceof Error
@@ -1366,9 +1379,213 @@ async function replyMove(interaction: any) {
         : "تعذر تنفيذ النقل، تحقق من الروابط ثم أعد المحاولة.";
     console.warn("[Discord] /نقل failed", error);
     await interaction
-      .editReply(moveCardPayload({ status: "failed", title: "❌ فشل النقل", detail }))
+      .editReply(
+        moveCardPayload({ status: "failed", title: "❌ فشل النقل", detail }, options)
+      )
       .catch(() => undefined);
   }
+}
+
+/** وضع الرابط الواحد: ينقل كل المجلدات الفرعية لمجلد المصدر إلى الوجهة. */
+async function moveAllSubfolders(
+  interaction: any,
+  drive: GoogleDriveClient,
+  fromId: string,
+  toMeta: { id: string; name: string },
+  options: { requesterId: string }
+) {
+  let fromMeta: DriveFileMeta;
+  try {
+    fromMeta = await drive.getFileMeta(fromId);
+  } catch (error) {
+    const botEmail = await drive.getDriveAccountEmail();
+    await interaction.editReply(
+      moveCardPayload(
+        {
+          status: "failed",
+          title: "❌ تعذر الوصول إلى مجلد المصدر",
+          detail: moveAccessFailureDetail(
+            "من",
+            error instanceof Error ? error.message : "خطأ غير معروف",
+            botEmail
+          ),
+        },
+        options
+      )
+    );
+    return;
+  }
+  if (fromMeta.mimeType !== DRIVE_FOLDER_MIME) {
+    await interaction.editReply(
+      moveCardPayload(
+        {
+          status: "failed",
+          title: "❌ الرابط ليس مجلدًا",
+          detail: `الرابط في خانة «من» ليس مجلدًا («${fromMeta.name}»). انسخ رابط المجلد من Drive (افتح المجلد ثم مشاركة ← نسخ الرابط) وأعد المحاولة.`,
+        },
+        options
+      )
+    );
+    return;
+  }
+
+  const subfolders = (await drive.listSubfolders(fromMeta.id)).filter(
+    folder => folder.id !== toMeta.id
+  );
+  if (!subfolders.length) {
+    await interaction.editReply(
+      moveCardPayload(
+        {
+          status: "failed",
+          title: "لا توجد مجلدات للنقل",
+          detail: `المجلد «${fromMeta.name}» لا يحتوي أي مجلدات بداخله — لا شيء لنقله إلى «${toMeta.name}».`,
+        },
+        options
+      )
+    );
+    return;
+  }
+
+  const moveLabel = `من «${fromMeta.name}» إلى «${toMeta.name}» — ${foldersCount(subfolders.length)}`;
+  await interaction.editReply(
+    moveCardPayload({
+      status: "downloading",
+      title: "⏳ جاري النقل",
+      label: moveLabel,
+      progress: { done: 0, total: subfolders.length },
+    }, options)
+  );
+
+  const failures: Array<{ name: string; reason: string }> = [];
+  for (let index = 0; index < subfolders.length; index += 1) {
+    const folder = subfolders[index];
+    if (!folder) continue;
+    try {
+      await drive.moveFolder(folder.id, fromMeta.id, toMeta.id);
+    } catch (error) {
+      failures.push({
+        name: folder.name,
+        reason: error instanceof Error ? error.message : "خطأ غير معروف",
+      });
+    }
+    const done = index + 1;
+    if (done % MOVE_EDIT_EVERY === 0 && done < subfolders.length) {
+      await interaction
+        .editReply(
+          moveCardPayload({
+            status: "downloading",
+            title: "⏳ جاري النقل",
+            label: moveLabel,
+            progress: { done, total: subfolders.length },
+          }, options)
+        )
+        .catch(() => undefined);
+    }
+  }
+
+  const movedCount = subfolders.length - failures.length;
+  const summary = failures.length
+    ? `تم نقل ${foldersCount(movedCount)} من ${foldersCount(subfolders.length)} إلى «${toMeta.name}» — وتعذر نقل الباقي.`
+    : `تم نقل ${foldersCount(movedCount)} إلى «${toMeta.name}» — افتح المجلد وستجدها بداخله، وكل مجلد فصل بصوره.`;
+  const failureLines = failures
+    .slice(0, 15)
+    .map(item => `• ${item.name}: ${item.reason}`);
+  if (failures.length > failureLines.length) {
+    failureLines.push(`— و${failures.length - failureLines.length} مجلدات أخرى تعذر نقلها.`);
+  }
+  await interaction.editReply(
+    moveCardPayload(
+      {
+        status: "completed",
+        title: failures.length ? "⚠️ اكتمل النقل مع أخطاء" : "✅ تم النقل",
+        label: summary,
+        detail: failures.length ? failureLines.join("\n") : null,
+        driveUrl: `https://drive.google.com/drive/folders/${toMeta.id}`,
+      },
+      options
+    )
+  );
+}
+
+/**
+ * وضع الروابط المتعددة: كل رابط في «من» هو مجلد فصل مستقل في مكان مختلف —
+ * يُنقل كل مجلد من موضعه الحالي (أبّه الفعلي) إلى الوجهة، وإخفاق مجلد
+ * لا يوقف نقل الباقي بل يُسجَّل في قائمة الإخفاقات في بطاقة النتيجة.
+ * المجلد الموجود أصلًا داخل الوجهة يُتخطى بلا إخفاق.
+ */
+async function moveListedFolders(
+  interaction: any,
+  drive: GoogleDriveClient,
+  sourceIds: string[],
+  toMeta: { id: string; name: string },
+  options: { requesterId: string }
+) {
+  const moveLabel = `نقل ${foldersCount(sourceIds.length)} محددة بالروابط إلى «${toMeta.name}»`;
+  await interaction.editReply(
+    moveCardPayload({
+      status: "downloading",
+      title: "⏳ جاري النقل",
+      label: moveLabel,
+      progress: { done: 0, total: sourceIds.length },
+    }, options)
+  );
+
+  const failures: Array<{ name: string; reason: string }> = [];
+  for (let index = 0; index < sourceIds.length; index += 1) {
+    const folderId = sourceIds[index];
+    if (!folderId) continue;
+    try {
+      const meta = await drive.getFileMeta(folderId);
+      if (meta.mimeType !== DRIVE_FOLDER_MIME) {
+        failures.push({ name: meta.name, reason: "الرابط ليس مجلدًا" });
+      } else if (meta.parents?.includes(toMeta.id)) {
+        // موجود بالفعل داخل الوجهة — لا حاجة لأي نقل.
+      } else {
+        await drive.moveFolder(meta.id, meta.parents?.[0] ?? null, toMeta.id);
+      }
+    } catch (error) {
+      failures.push({
+        name: `الرابط ${index + 1}`,
+        reason: error instanceof Error ? error.message : "خطأ غير معروف",
+      });
+    }
+    const done = index + 1;
+    if (done % MOVE_EDIT_EVERY === 0 && done < sourceIds.length) {
+      await interaction
+        .editReply(
+          moveCardPayload({
+            status: "downloading",
+            title: "⏳ جاري النقل",
+            label: moveLabel,
+            progress: { done, total: sourceIds.length },
+          }, options)
+        )
+        .catch(() => undefined);
+    }
+  }
+
+  const movedCount = sourceIds.length - failures.length;
+  const summary = failures.length
+    ? `تم نقل ${foldersCount(movedCount)} من ${foldersCount(sourceIds.length)} إلى «${toMeta.name}» — وتعذر نقل الباقي.`
+    : `تم نقل ${foldersCount(movedCount)} إلى «${toMeta.name}» — افتح المجلد وستجدها بداخله، وكل مجلد فصل بصوره.`;
+  const failureLines = failures
+    .slice(0, 15)
+    .map(item => `• ${item.name}: ${item.reason}`);
+  if (failures.length > failureLines.length) {
+    failureLines.push(`— و${failures.length - failureLines.length} مجلدات أخرى تعذر نقلها.`);
+  }
+  await interaction.editReply(
+    moveCardPayload(
+      {
+        status: "completed",
+        title: failures.length ? "⚠️ اكتمل النقل مع أخطاء" : "✅ تم النقل",
+        label: summary,
+        detail: failures.length ? failureLines.join("\n") : null,
+        driveUrl: `https://drive.google.com/drive/folders/${toMeta.id}`,
+      },
+      options
+    )
+  );
 }
 
 async function handleMergeCancelButton(interaction: any) {

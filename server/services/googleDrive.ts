@@ -49,6 +49,15 @@ export function linkPermissionBody(policy: DriveSharingPolicy): {
   return { type: "anyone", role: "reader" };
 }
 
+/** بيانات عنصر Drive كما تعيدها getFileMeta (الاسم والنوع والحجم وموضعه). */
+export type DriveFileMeta = {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number | null;
+  parents: string[] | null;
+};
+
 export class GoogleDriveError extends Error {
   constructor(message: string) {
     super(message);
@@ -271,13 +280,15 @@ export class GoogleDriveClient {
   /**
    * ينقل عنصرًا من مجلد أب إلى آخر دون تغيير معرّفه، فتبقى روابطه القديمة
    * ومراجع البوت له تعمل كما هي (النقل في Drive يغيّر الأب فقط).
+   * الأب الحالي اختياري: عند إرسال null يُضاف الوجهة دون إزالة الأب القديم
+   * (يُستخدم لمجلد بلا أب معروف، مثل عنصر في جذر «Drive الخاص بي»).
    */
-  async moveFolder(fileId: string, fromParentId: string, toParentId: string): Promise<void> {
+  async moveFolder(fileId: string, fromParentId: string | null, toParentId: string): Promise<void> {
     try {
       await this.drive.files.update({
         fileId,
         addParents: toParentId,
-        removeParents: fromParentId,
+        removeParents: fromParentId ?? undefined,
         fields: "id,parents",
         supportsAllDrives: true,
       });
@@ -286,12 +297,15 @@ export class GoogleDriveClient {
     }
   }
 
-  /** يقرأ بيانات ملف أو مجلد Drive بالمعرّف (الاسم والنوع والحجم). */
-  async getFileMeta(fileId: string): Promise<{ id: string; name: string; mimeType: string; size: number | null }> {
+  /**
+   * يقرأ بيانات ملف أو مجلد Drive بالمعرّف (الاسم والنوع والحجم وموضعه).
+   * يُعاد parents أيضًا لأن أمر النقل المتعدد يحتاج الأب الفعلي لكل مجلد.
+   */
+  async getFileMeta(fileId: string): Promise<DriveFileMeta> {
     try {
       const meta = await this.drive.files.get({
         fileId,
-        fields: "id,name,mimeType,size",
+        fields: "id,name,mimeType,size,parents",
         supportsAllDrives: true,
       });
       return {
@@ -299,18 +313,40 @@ export class GoogleDriveClient {
         name: meta.data.name ?? "ملف",
         mimeType: meta.data.mimeType ?? "",
         size: meta.data.size ? Number(meta.data.size) : null,
+        parents: meta.data.parents ?? null,
       };
     } catch (error) {
       const status = (error as { code?: number; response?: { status?: number } })?.response?.status
         ?? (error as { code?: number }).code;
-      if (status === 404 || status === 403) {
+      if (status === 404) {
         throw new GoogleDriveError(
-          "تعذر الوصول إلى الملف أو المجلد على Google Drive. تأكد أن الرابط صحيح وأن المشاركة مضبوطة على «أي شخص لديه الرابط»."
+          "العنصر غير موجود على Google Drive أو لا يُرى من حساب Drive المصرّح للبوت — تأكد من صحة الرابط ومن أن المجلد في نفس الحساب الذي وثّق البوت به."
+        );
+      }
+      if (status === 403) {
+        throw new GoogleDriveError(
+          "لا تملك صلاحية الوصول إلى هذا العنصر من حساب Drive المصرّح للبوت — شارك المجلد مع حساب البوت بصلاحية «محرر» ثم أعد المحاولة."
         );
       }
       throw new GoogleDriveError(`تعذر قراءة بيانات العنصر من Google Drive: ${error instanceof Error ? error.message : "خطأ غير معروف"}`);
     }
   }
+
+  /**
+   * يعيد بريد حساب Google الذي وثّق البوت به (من about)،
+   * ليعرض في بطاقات الخطأ فيعرف المالك بدقة مع أي حساب يشارك مجلداته.
+   * لا يُرمى خطؤه أبدًا — إن تعذّر جلبه نُعيد null ونكمل.
+   */
+  async getDriveAccountEmail(): Promise<string | null> {
+    try {
+      const about = await this.drive.about.get({ fields: "user" });
+      return about.data.user?.emailAddress ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+
 
   /** يسرد ملفات مجلد Drive (غير المحذوفة وبلا مجلدات فرعية) مع ترقيم صفحات كامل. */
   async listFolderFiles(folderId: string): Promise<Array<{ id: string; name: string; mimeType: string; size: number | null }>> {

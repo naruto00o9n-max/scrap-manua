@@ -11,8 +11,11 @@ import {
   buildSourcesComponents,
   foldersCount,
   getRegisteredDiscordCommands,
+  MAX_MOVE_LINKS,
+  moveAccessFailureDetail,
   noticeFromJob,
   paginateForSelect,
+  parseDriveFolderLinks,
   sitesCount,
 } from "./discordBot";
 
@@ -181,6 +184,59 @@ describe("Discord ZEUS chapter experience", () => {
     const texts = collectTexts([partial]).join("\n");
     expect(texts).toContain("⚠️ اكتمل النقل مع أخطاء");
     expect(texts).toContain("• الفصل 5");
+  });
+
+  it("extracts every folder link from a numbered multi-link paste", () => {
+    const paste = [
+      "1- https://drive.google.com/drive/folders/aaaaaaaaaaaaaaaaaaaaaa",
+      "2- https://drive.google.com/drive/folders/bbbbbbbbbbbbbbbbbbbbbb",
+      "كلام عشوائي بين الروابط",
+      "3- https://drive.google.com/drive/folders/cccccccccccccccccccc",
+    ].join("\n");
+    expect(parseDriveFolderLinks(paste)).toEqual([
+      "aaaaaaaaaaaaaaaaaaaaaa",
+      "bbbbbbbbbbbbbbbbbbbbbb",
+      "cccccccccccccccccccc",
+    ]);
+  });
+
+  it("dedupes repeated folder links, accepts bare ids, and skips file links", () => {
+    const value = [
+      "https://drive.google.com/drive/folders/aaaaaaaaaaaaaaaaaaaaaa",
+      "aaaaaaaaaaaaaaaaaaaaaa", // نفس المجلد كمعرّف مجرد — يُحذف المكرر
+      "dddddddddddddddddddd",
+      "https://drive.google.com/file/d/eeeeeeeeeeeeeeeeeeee/view", // ملف لا مجلد
+    ].join(" ");
+    expect(parseDriveFolderLinks(value)).toEqual([
+      "aaaaaaaaaaaaaaaaaaaaaa",
+      "dddddddddddddddddddd",
+    ]);
+    expect(parseDriveFolderLinks("لا روابط هنا")).toEqual([]);
+    // الفاصلة العربية تفصل الروابط كذلك.
+    expect(
+      parseDriveFolderLinks(
+        "https://drive.google.com/drive/folders/ffffffffffffffffffff، https://drive.google.com/drive/folders/66666666666666666666"
+      )
+    ).toEqual(["ffffffffffffffffffff", "66666666666666666666"]);
+  });
+
+  it("explains access failure with the bot drive account and fix steps", () => {
+    const withEmail = moveAccessFailureDetail(
+      "إلى",
+      "العنصر غير موجود على Google Drive أو لا يُرى من حساب Drive المصرّح للبوت — تأكد من صحة الرابط ومن أن المجلد في نفس الحساب الذي وثّق البوت به.",
+      "bot@drive-account.iam.gserviceaccount.com"
+    );
+    expect(withEmail).toContain("خانة «إلى»");
+    expect(withEmail).toContain("**حساب Drive الذي يستخدمه البوت:** bot@drive-account.iam.gserviceaccount.com");
+    expect(withEmail).toContain("بصلاحية **محرر**");
+
+    const withoutEmail = moveAccessFailureDetail("من", "سبب ما", null);
+    expect(withoutEmail).toContain("خانة «من»");
+    expect(withoutEmail).toContain("GDRIVE_REFRESH_TOKEN");
+  });
+
+  it("caps the number of folder links accepted per move", () => {
+    expect(MAX_MOVE_LINKS).toBe(50);
   });
 
   it("renders pagination info and page nav buttons on the search results card", () => {
