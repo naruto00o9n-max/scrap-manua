@@ -22,7 +22,11 @@ import {
   type JobNotice,
   type JobStage,
 } from "./discordBot";
-import { GoogleDriveClient, GoogleDriveError } from "./googleDrive";
+import {
+  GoogleDriveClient,
+  GoogleDriveError,
+  mangaFolderTitle,
+} from "./googleDrive";
 import { getUsableSuwayomiToken } from "./settings";
 import { SuwayomiClient } from "./suwayomi";
 import { openChapterMergeSession } from "./imageMerging";
@@ -224,7 +228,9 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
             ? { mode: "domain_reader" as const, domain: sharingDomain }
             : { mode: "link_reader" as const };
       const folder = await drive.createChapterFolder(
-        fetched.chapter.manga.title,
+        // نطاق المصدر يُضاف لاسم العمل حتى لا يشارك مصدران مختلفان نفس المجلد
+        // إذا تطابق اسم العمل واسم الفصل بينهما.
+        mangaFolderTitle(fetched.chapter.manga.title, job.canonicalUrl),
         fetched.chapter.name,
         sharing
       );

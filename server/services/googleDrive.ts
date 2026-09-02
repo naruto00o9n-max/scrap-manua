@@ -34,6 +34,25 @@ function safeFolderName(value: string, fallback: string) {
   return (cleaned || fallback).slice(0, 120);
 }
 
+/**
+ * يضيف نطاق مصدر الفصل (من الرابط نفسه) إلى اسم مجلد العمل في Drive.
+ * سبب ذلك: كانت المجلدات تُطابق بالاسم فقط، فإذا سُحب نفس العمل ونفس الفصل
+ * من مصدرين مختلفين وجدا نفس المجلد، ثم كانت ملفات الصور تُسمى 001.png…
+ * فكانت ملفات السحبة الثانية تُتجاهل بصمت عند تصادم الأسماء.
+ * بس suffix النطاق يصبح لكل مصدر مجلده المستقل، وإعادة سحب نفس الفصل
+ * من نفس المصدر تعيد استخدام نفس المجلد كالمعتاد (استكمال الرفع بدل التكرار).
+ */
+export function mangaFolderTitle(mangaTitle: string, chapterUrl: string | null | undefined): string {
+  let host = "";
+  try {
+    host = chapterUrl ? new URL(chapterUrl).hostname.toLowerCase().replace(/^www\./, "") : "";
+  } catch {
+    host = "";
+  }
+  if (!host || mangaTitle.includes(`[${host}]`)) return mangaTitle;
+  return `${mangaTitle} [${host}]`;
+}
+
 function mediaExtension(contentType: string | null): string {
   const normalized = contentType?.split(";", 1)[0].toLowerCase();
   const map: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif", "image/avif": "avif" };
