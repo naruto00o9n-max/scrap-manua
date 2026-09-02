@@ -36,11 +36,12 @@ describe("Google Drive sharing policy", () => {
     });
   });
 
-  it("maps the link editor policy to an editor permission for anyone", () => {
-    expect(linkPermissionBody({ mode: "link_editor" })).toEqual({
-      type: "anyone",
-      role: "editor",
-    });
+  it("maps the link editor policy to the Drive API writer role for anyone", () => {
+    // Drive API لا يعرف دورًا اسمه editor — المحرر في واجهة Drive قيمته
+    // في API هي writer، وإرسال editor يرفضه Google بخطأ 400 ويسقط السحبة.
+    const body = linkPermissionBody({ mode: "link_editor" });
+    expect(body).toEqual({ type: "anyone", role: "writer" });
+    expect(body.role).not.toBe("editor");
     expect(linkPermissionBody({ mode: "link_reader" })).toEqual({
       type: "anyone",
       role: "reader",
