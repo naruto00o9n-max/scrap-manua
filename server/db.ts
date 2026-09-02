@@ -219,6 +219,8 @@ export type SaveSourceInput = {
   documentedIntegrationUrl?: string | null;
   allowDirectChapterLookup: boolean;
   notes?: string | null;
+  /** مصدر إضافة السجل: يدوي من اللوحة أو مزامنة تلقائية من Suwayomi. */
+  origin?: "manual" | "suwayomi" | null;
 };
 
 function normalizeSource(input: SaveSourceInput, existing?: ContentSource): ContentSource {
@@ -237,6 +239,7 @@ function normalizeSource(input: SaveSourceInput, existing?: ContentSource): Cont
     rejectLoginRequired: existing?.rejectLoginRequired ?? true,
     rejectCaptchaRequired: existing?.rejectCaptchaRequired ?? true,
     notes: input.notes ?? null,
+    origin: input.origin ?? existing?.origin ?? "manual",
     createdAt: existing?.createdAt ?? timestamp,
     updatedAt: timestamp,
   };
@@ -255,6 +258,12 @@ export async function getActiveSources(): Promise<ContentSource[]> {
 export async function getSourceById(id: number): Promise<ContentSource | undefined> {
   const db = await requireDb();
   const row = await collections(db).contentSources.findOne({ id });
+  return row ? stripMongoId(row) as ContentSource : undefined;
+}
+
+export async function getSourceBySuwayomiId(suwayomiSourceId: string): Promise<ContentSource | undefined> {
+  const db = await requireDb();
+  const row = await collections(db).contentSources.findOne({ suwayomiSourceId });
   return row ? stripMongoId(row) as ContentSource : undefined;
 }
 

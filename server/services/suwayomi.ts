@@ -17,6 +17,8 @@ export type SuwayomiChapter = {
   name: string;
   url: string;
   realUrl: string | null;
+  chapterNumber?: number;
+  releaseDate?: string | null;
   manga: { id: number; title: string; sourceId: string };
 };
 
@@ -25,6 +27,7 @@ export type SuwayomiManga = {
   title: string;
   url: string;
   realUrl: string | null;
+  thumbnailUrl?: string | null;
   sourceId: string;
 };
 
@@ -181,17 +184,17 @@ export class SuwayomiClient {
     return result.mangas.nodes[0] ?? null;
   }
 
-  private async searchSourceManga(sourceId: string, query: string): Promise<SuwayomiManga[]> {
+  async searchSourceManga(sourceId: string, query: string): Promise<SuwayomiManga[]> {
     const result = await this.request<{ fetchSourceManga: { mangas: SuwayomiManga[] } }>(
-      "mutation FetchSourceManga($input: FetchSourceMangaInput!) { fetchSourceManga(input: $input) { mangas { id title url realUrl sourceId } } }",
+      "mutation FetchSourceManga($input: FetchSourceMangaInput!) { fetchSourceManga(input: $input) { mangas { id title url realUrl thumbnailUrl sourceId } } }",
       { input: { source: sourceId, type: "SEARCH", query, page: 1, filters: [] } },
     );
     return result.fetchSourceManga.mangas;
   }
 
-  private async fetchMangaAndChapters(mangaId: number): Promise<SuwayomiChapter[]> {
+  async fetchMangaAndChapters(mangaId: number): Promise<SuwayomiChapter[]> {
     const result = await this.request<{ fetchMangaAndChapters: { chapters: SuwayomiChapter[] } }>(
-      "mutation FetchMangaAndChapters($input: FetchMangaAndChaptersInput!) { fetchMangaAndChapters(input: $input) { chapters { id name url realUrl manga { id title sourceId } } } }",
+      "mutation FetchMangaAndChapters($input: FetchMangaAndChaptersInput!) { fetchMangaAndChapters(input: $input) { chapters { id name url realUrl chapterNumber releaseDate manga { id title sourceId } } } }",
       { input: { id: mangaId, fetchManga: true, fetchChapters: true } },
     );
     return result.fetchMangaAndChapters.chapters;

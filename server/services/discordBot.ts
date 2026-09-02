@@ -20,11 +20,15 @@ import {
   cancelChapterJob,
   getChapterJob,
   getSetting,
+  getSourceBySuwayomiId,
   listActiveDiscordRoleIds,
+  listSources,
+  saveSource,
   saveIntegrationHealth,
   setDiscordProgressMessage,
   setSetting,
 } from "../db";
+import type { ContentSource } from "../../shared/dbTypes";
 import { queueAuthorizedChapter } from "./jobs";
 import {
   GoogleDriveError,
@@ -37,7 +41,17 @@ import {
   parseDriveLink,
   runManualMerge,
 } from "./manualMerge";
+import {
+  checkChapterAvailability,
+  chapterUrlFromParts,
+  parseChapterNumber,
+  searchAllSources,
+  type SearchMatch,
+} from "./sourceSearch";
+import { hostnameFromHomeUrl, syncSourcesFromSuwayomi } from "./sourceSync";
+import { SuwayomiClient } from "./suwayomi";
 import { UrlPolicyError } from "./urlPolicy";
+import { getUsableSuwayomiToken } from "./settings";
 
 let client: Client | null = null;
 let started = false;
@@ -151,6 +165,24 @@ const commandPayload = [
       option
         .setName("الملف")
         .setDescription("ملف ZIP أو CBZ يحتوي صور الفصل - اختياري")
+        .setRequired(false)
+    ),
+  new SlashCommandBuilder()
+    .setName("مصادر")
+    .setDescription("عرض مصادر البوت المُزامنة تلقائيًا من Suwayomi"),
+  new SlashCommandBuilder()
+    .setName("بحث")
+    .setDescription("البحث عن مانها في كل مصادر Suwayomi وفحص توفر الفصول")
+    .addStringOption(option =>
+      option
+        .setName("الاسم")
+        .setDescription("اسم المانها أو كلمة من اسمها")
+        .setRequired(true)
+    )
+    .addStringOption(option =>
+      option
+        .setName("الفصل")
+        .setDescription("رقم فصل لفحص توفره في كل المصادر — اختياري")
         .setRequired(false)
     ),
   new SlashCommandBuilder()
@@ -375,6 +407,23 @@ export function buildHelpComponents(
         "**1.** نفّذ `/دمج` وأرفق ملف **ZIP** أو **CBZ** يحتوي صور الفصل في خانة الملف، أو ضع رابط مجلد Google Drive في خانة الرابط.",
         "**2.** أو نفّذ `/دمج` بدون شيء ثم أرسل الملف أو الرابط هنا كرسالة عادية خلال دقيقتين.",
         "**3.** بطاقة التقدم تتحدث مع كل خطوة: فحص المدخلات ← جلب الصور ← دمج الصفحات ← الرفع إلى Drive، وعند الاكتمال تجد زر فتح الفصل.",
+      ].join("\n")
+    ),
+    separator(),
+    text(
+      [
+        "### 🔹 /مصادر",
+        "يعرض كل المصادر المتاحة في البوت — أي مصدر تثبته في Suwayomi يُضاف هنا تلقائيًا ⚡.",
+      ].join("\n")
+    ),
+    separator(),
+    text(
+      [
+        "### 🔹 /بحث",
+        "يبحث عن أي مانها في كل مصادر Suwayomi دفعة واحدة، بدل الدخول للسيرفر والبحث يدويًا.",
+        "**1.** نفّذ `/بحث` واكتب اسم المانها (وكلمة واحدة تكفي) — يبحث في كل المصادر ويعرض المطابقات مصدرًا بمصدر.",
+        "**2.** اختر عملًا من القائمة المنسدلة لتعرض فصوله، ثم اختر فصلًا ليُسحب ويُدمج ويُرفع Drive كأمر /فصل تمامًا.",
+        "**3.** لو تريد معرفة هل الفصل نزل أو لا: ضع رقم الفصل في خانة «الفصل» — سيفحصه في كل المصادر ويوضح أين هو متاح بتاريخه.",
       ].join("\n")
     ),
     separator(),
@@ -1083,6 +1132,659 @@ async function handleMergeCancelButton(interaction: any) {
   entry.token.cancelled = true;
 }
 
+// ============================================================
+// تدفق الأوامر الجديدة: /مصادر و /بحث — مسار مستقل كليًا عن
+// /فصل و /دمج، ولا يعدّل أي سلوك قائم. الطلب النهائي للسحب
+// يُسلَّم لنفس خط /فصل الموجود عبر startChapterFromUrl.
+// ============================================================
+
+export type SearchNoticeState =
+  | "progress"
+  | "results"
+  | "availability"
+  | "chapters"
+  | "failed";
+
+export type SearchNotice = {
+  state: SearchNoticeState;
+  query?: string;
+  progress?: { done: number; total: number };
+  failedCount?: number;
+  resultCount?: number;
+  matches?: Array<{ title: string; sourceName: string; lang: string }>;
+  chapterNumber?: number;
+  availability?: Array<{
+    ok: boolean;
+    sourceName: string;
+    title: string;
+    detail: string | null;
+    /** فشل فحص المصدر نفسه (مثلاً مهلة) — يعرض بعلامة تحذير بدل الخطأ. */
+    failed?: boolean;
+  }>;
+  anyAvailable?: boolean;
+  mangaTitle?: string;
+  sourceName?: string;
+  totalChapters?: number;
+  chaptersShown?: number;
+  detail?: string | null;
+};
+
+export type SearchSelectSpec = {
+  customId: string;
+  placeholder: string;
+  options: Array<{ label: string; description?: string; value: string }>;
+};
+
+const SEARCH_SELECT_TYPES = { ROW: 1, STRING_SELECT: 3 } as const;
+
+/** صف قائمة منسدلة — النوع 3 مسموح داخل الصف (1) في رسائل Components V2. */
+export function buildSearchSelectRow(spec: SearchSelectSpec): Raw {
+  return {
+    type: SEARCH_SELECT_TYPES.ROW,
+    components: [
+      {
+        type: SEARCH_SELECT_TYPES.STRING_SELECT,
+        custom_id: spec.customId,
+        placeholder: spec.placeholder.slice(0, 150),
+        options: spec.options.slice(0, 25).map(option => ({
+          label: option.label.slice(0, 100) || "—",
+          description: option.description?.slice(0, 100),
+          value: option.value.slice(0, 100),
+        })),
+      },
+    ],
+  };
+}
+
+function searchStateTitle(state: SearchNoticeState): string {
+  switch (state) {
+    case "progress":
+      return "🔍 جاري البحث في كل المصادر";
+    case "results":
+      return "🔎 نتائج البحث";
+    case "availability":
+      return "🔢 فحص توفر الفصل في كل المصادر";
+    case "chapters":
+      return "📚 فصول العمل";
+    case "failed":
+      return "❌ البحث";
+  }
+}
+
+export function buildSearchCardComponents(
+  notice: SearchNotice,
+  select?: SearchSelectSpec | null,
+  avatar: string | null = avatarUrl()
+): APIMessageTopLevelComponent[] {
+  const body: Raw[] = [
+    headerBlock(`## ${searchStateTitle(notice.state)}`, [], avatar),
+    separator(2),
+  ];
+
+  if (notice.state === "progress") {
+    const progress = notice.progress ?? { done: 0, total: 0 };
+    body.push(
+      text(
+        [
+          `**«${notice.query ?? ""}»**`,
+          progressBar(progress.done, progress.total),
+          `-# ${progress.done}/${progress.total} مصدر${notice.failedCount ? ` — ${notice.failedCount} مصدر لم يستجب` : ""}`,
+        ].join("\n")
+      )
+    );
+  } else if (notice.state === "results") {
+    const lines: string[] = [`نتائج البحث عن **«${notice.query ?? ""}»** — ${notice.resultCount ?? 0} نتيجة${notice.failedCount ? ` (${notice.failedCount} مصدر لم يستجب)` : ""}`];
+    const matches = notice.matches ?? [];
+    for (let index = 0; index < matches.length; index += 1) {
+      const match = matches[index]!;
+      lines.push(`**${index + 1}. ${match.title}**\n-# ${match.sourceName} (${match.lang})`);
+    }
+    if ((notice.resultCount ?? 0) > matches.length) {
+      lines.push(`-# القائمة المنسدلة أدناه تحوي ${Math.min(notice.resultCount ?? 0, 25)} نتيجة.`);
+    }
+    body.push(text(lines.join("\n")));
+  } else if (notice.state === "availability") {
+    const lines: string[] = [
+      `**«${notice.query ?? ""}»** — الفصل ${notice.chapterNumber ?? "?"}`,
+      "",
+    ];
+    for (const row of notice.availability ?? []) {
+      lines.push(
+        `${row.ok ? "✅" : row.failed ? "⚠️" : "❌"} **${row.sourceName}** — ${row.title}${row.detail ? `\n-# ${row.detail}` : ""}`
+      );
+    }
+    if (notice.detail) lines.push("", notice.detail);
+    body.push(text(lines.join("\n")));
+  } else if (notice.state === "chapters") {
+    body.push(
+      text(
+        [
+          `**${notice.mangaTitle ?? ""}**`,
+          `-# المصدر: ${notice.sourceName ?? "—"} — ${notice.totalChapters ?? 0} فصلًا — القائمة تعرض أحدث ${notice.chaptersShown ?? 0}. اختر فصلًا ليُسحب ويُدمج ويُرفع إلى Drive.`,
+        ].join("\n")
+      )
+    );
+  } else {
+    body.push(
+      text(
+        notice.detail ??
+          "لم يتم العثور على نتائج. جرّب اسمًا آخر أو كتابة مختلفة."
+      )
+    );
+  }
+
+  body.push(separator());
+  if (select && select.options.length) {
+    body.push(buildSearchSelectRow(select));
+    body.push(separator());
+  }
+  body.push(text("-# ZEUS"));
+  return [raw({ type: 17, accent_color: GOLD, components: body })];
+}
+
+export function buildSourcesComponents(
+  active: ContentSource[],
+  totalCount: number,
+  avatar: string | null = avatarUrl()
+): APIMessageTopLevelComponent[] {
+  const lines: string[] = [
+    `**${active.length}** مصدرًا متاحًا من إجمالي ${totalCount} مسجل.`,
+    "كل مصدر مثبت في Suwayomi يظهر هنا تلقائيًا، ويستخدم عبر /بحث مباشرة.",
+    "",
+  ];
+  const shown = active.slice(0, 40);
+  for (const source of shown) {
+    lines.push(
+      `• **${source.name}** — ${source.hostname && !source.hostname.endsWith(".internal") ? source.hostname : "عبر /بحث"}${source.origin === "suwayomi" ? " ⚡" : ""}`
+    );
+  }
+  if (active.length > shown.length) {
+    lines.push(`-# و${active.length - shown.length} مصدرًا آخر…`);
+  }
+  const body: Raw[] = [
+    headerBlock("## 🗂️ مصادر ZEUS", [], avatar),
+    separator(2),
+    text(lines.join("\n")),
+    separator(),
+    text("-# ⚡ مُضاف تلقائيًا من Suwayomi — ZEUS"),
+  ];
+  return [raw({ type: 17, accent_color: GOLD, components: body })];
+}
+
+function searchCardPayload(notice: SearchNotice, select?: SearchSelectSpec | null) {
+  return {
+    flags: MessageFlags.IsComponentsV2 as MessageFlags.IsComponentsV2,
+    components: buildSearchCardComponents(notice, select),
+  };
+}
+
+type SearchCardTarget = {
+  show: (notice: SearchNotice, select?: SearchSelectSpec | null) => Promise<string>;
+};
+
+function searchInteractionCard(interaction: any): SearchCardTarget {
+  let messageId: string | null = null;
+  const channelId = interaction.channelId as string;
+  return {
+    show: async (notice, select) => {
+      if (!messageId) {
+        const sent = await interaction.editReply(searchCardPayload(notice, select));
+        messageId = String(sent.id);
+        return messageId;
+      }
+      await editMessageContent(channelId, messageId, searchCardPayload(notice, select));
+      return messageId;
+    },
+  };
+}
+
+function createSearchProgressPoster(target: SearchCardTarget) {
+  let lastKey = "";
+  let lastAt = 0;
+  return async (notice: SearchNotice, select?: SearchSelectSpec | null, force = false) => {
+    const key = `${notice.state}|${notice.progress ? `${notice.progress.done}/${notice.progress.total}` : ""}`;
+    const isPhaseEnd = notice.progress
+      ? notice.progress.done >= notice.progress.total
+      : notice.state !== "progress";
+    const nowMs = Date.now();
+    if (!force && !isPhaseEnd && (key === lastKey || nowMs - lastAt < 2500)) return;
+    lastKey = key;
+    lastAt = nowMs;
+    try {
+      await target.show(notice, select);
+    } catch {
+      /* فشل تحديث البطاقة لا يُفشل البحث */
+    }
+  };
+}
+
+type SearchSession = {
+  requesterId: string;
+  channelId: string;
+  createdAt: number;
+  matches: SearchMatch[];
+  chapters: Array<{
+    label: string;
+    url: string;
+    realUrl: string | null;
+    number: number | null;
+  }>;
+  mangaTitle?: string;
+  sourceName?: string;
+  suwayomiSourceId?: string;
+  matchUrl?: string;
+  matchRealUrl?: string | null;
+};
+
+const SEARCH_SESSION_TTL_MS = 30 * 60 * 1000;
+const activeSearchSessions = new Map<string, SearchSession>();
+
+function scheduleSearchSessionCleanup(searchId: string) {
+  setTimeout(() => activeSearchSessions.delete(searchId), SEARCH_SESSION_TTL_MS).unref?.();
+}
+
+function searchRequesterOf(interaction: any): Requester {
+  return {
+    id: interaction.user.id,
+    username: interaction.user.username,
+    channelId: interaction.channelId,
+  };
+}
+
+async function replySources(interaction: any) {
+  await interaction.deferReply();
+  try {
+    // مزامنة فورية حتى يظهر أي مصدر أُضيف حديثًا في Suwayomi بلا انتظار الدورة.
+    await syncSourcesFromSuwayomi();
+    const sources = await listSources();
+    const active = sources.filter(source => source.status === "active");
+    await interaction.editReply(
+      panelPayload(buildSourcesComponents(active, sources.length))
+    );
+  } catch (error) {
+    console.warn("[Discord] /مصادر failed", error);
+    await interaction
+      .editReply(
+        panelPayload(
+          buildSearchCardComponents({
+            state: "failed",
+            detail: "تعذر قراءة المصادر الآن. تأكد أن Suwayomi يعمل ثم أعد المحاولة.",
+          })
+        )
+      )
+      .catch(() => undefined);
+  }
+}
+
+async function replySearch(interaction: any) {
+  await interaction.deferReply();
+  try {
+    if (!(await hasRequestAccess(interaction))) {
+      await interaction.editReply(
+        searchCardPayload({
+          state: "failed",
+          detail: "🔒 هذا الأمر متاح لأدوار محددة فقط.",
+        })
+      );
+      return;
+    }
+    const query = (interaction.options.getString("الاسم", false) ?? "").trim();
+    const chapterInput = interaction.options.getString("الفصل", false);
+    const chapterNumber = parseChapterNumber(chapterInput);
+    if (!query) {
+      await interaction.editReply(
+        searchCardPayload({
+          state: "failed",
+          detail: "اكتب اسم المانها في خانة «الاسم» ثم أعد المحاولة.",
+        })
+      );
+      return;
+    }
+    if (chapterInput && chapterNumber === null) {
+      await interaction.editReply(
+        searchCardPayload({
+          state: "failed",
+          detail: `«${chapterInput}» ليس رقم فصل صالحًا. اكتبه أرقامًا مثل: 38`,
+        })
+      );
+      return;
+    }
+
+    await syncSourcesFromSuwayomi().catch(() => null);
+    const suwayomi = new SuwayomiClient(
+      ENV.suwayomiBaseUrl,
+      getUsableSuwayomiToken()
+    );
+    const installed = await suwayomi.listInstalledSources();
+    if (!installed.length) {
+      await interaction.editReply(
+        searchCardPayload({
+          state: "failed",
+          detail: "لا توجد مصادر مثبتة في Suwayomi بعد. ثبّت إضافة مصدر واحد على الأقل.",
+        })
+      );
+      return;
+    }
+
+    await runSearchFlow(
+      searchInteractionCard(interaction),
+      suwayomi,
+      installed.map(source => ({
+        suwayomiSourceId: source.id,
+        name: source.displayName || source.name,
+        lang: source.lang,
+      })),
+      { query, chapterNumber },
+      searchRequesterOf(interaction)
+    );
+  } catch (error) {
+    console.warn("[Discord] /بحث failed", error);
+    await interaction
+      .editReply(
+        searchCardPayload({
+          state: "failed",
+          detail: "تعذر تنفيذ البحث الآن. تأكد أن Suwayomi يعمل ثم أعد المحاولة.",
+        })
+      )
+      .catch(() => undefined);
+  }
+}
+
+async function runSearchFlow(
+  target: SearchCardTarget,
+  searcher: SuwayomiClient,
+  sources: Array<{ suwayomiSourceId: string; name: string; lang: string }>,
+  request: { query: string; chapterNumber: number | null },
+  requester: Requester
+) {
+  const searchId = randomUUID();
+  const post = createSearchProgressPoster(target);
+  await target.show(
+    {
+      state: "progress",
+      query: request.query,
+      progress: { done: 0, total: sources.length },
+    },
+    null
+  );
+
+  const outcome = await searchAllSources(searcher, sources, request.query, {
+    concurrency: 6,
+    timeoutMs: 20_000,
+    onProgress: async (done, total) => {
+      await post({
+        state: "progress",
+        query: request.query,
+        progress: { done, total },
+      });
+    },
+  });
+
+  if (!outcome.matches.length) {
+    await target.show(
+      {
+        state: "failed",
+        query: request.query,
+        failedCount: outcome.failed.length,
+        detail: `لم أعثر على عمل مطابق لـ «${request.query}» في ${outcome.searched} مصدرًا.${outcome.failed.length ? `\n-# ${outcome.failed.length} مصدرًا لم يستجب وأُثيل عنه.` : ""} جرّب اسمًا آخر أو كتابة مختلفة.`,
+      },
+      null
+    );
+    return;
+  }
+
+  const matches = outcome.matches.slice(0, 25);
+  activeSearchSessions.set(searchId, {
+    requesterId: requester.id,
+    channelId: requester.channelId,
+    createdAt: Date.now(),
+    matches,
+    chapters: [],
+  });
+  scheduleSearchSessionCleanup(searchId);
+
+  const matchSelect: SearchSelectSpec = {
+    customId: `search:pick:${searchId}`,
+    placeholder: "اختر عملًا لعرض فصوله أو سحبه…",
+    options: matches.map((match, index) => ({
+      label: match.title,
+      description: `${match.sourceName} (${match.lang})`,
+      value: String(index),
+    })),
+  };
+
+  if (request.chapterNumber !== null) {
+    await post(
+      {
+        state: "progress",
+        query: request.query,
+        progress: { done: sources.length, total: sources.length },
+        failedCount: outcome.failed.length,
+      },
+      null,
+      true
+    );
+    const rows = await checkChapterAvailability(
+      searcher,
+      matches,
+      request.chapterNumber,
+      { concurrency: 5, timeoutMs: 25_000, limit: 12 }
+    );
+    const availability = rows.map(row => ({
+      ok: Boolean(row.chapter),
+      sourceName: row.match.sourceName,
+      title: row.match.title,
+      detail: row.error
+        ? `تعذر الفحص: ${row.error}`
+        : row.chapter
+          ? `${row.chapter.name}${row.chapter.releaseDate ? ` — ${row.chapter.releaseDate}` : ""}`
+          : "لم ينزل بعد في هذا المصدر",
+      failed: Boolean(row.error),
+    }));
+    const anyAvailable = rows.some(row => row.chapter);
+    await target.show(
+      {
+        state: "availability",
+        query: request.query,
+        chapterNumber: request.chapterNumber,
+        availability,
+        anyAvailable,
+        failedCount: outcome.failed.length,
+        detail: anyAvailable
+          ? "اختر عملًا من القائمة لعرض فصوله وسحب الفصل مباشرة."
+          : "هذا الرقم غير متاح بعد في أي من المصادر المطابقة — جرّب لاحقًا أو اكتب رقمًا آخر.",
+      },
+      matchSelect
+    );
+    return;
+  }
+
+  await target.show(
+    {
+      state: "results",
+      query: request.query,
+      resultCount: outcome.matches.length,
+      failedCount: outcome.failed.length,
+      matches: matches
+        .slice(0, 10)
+        .map(match => ({
+          title: match.title,
+          sourceName: match.sourceName,
+          lang: match.lang,
+        })),
+    },
+    matchSelect
+  );
+}
+
+async function isSearchSessionAllowed(session: SearchSession, interaction: any): Promise<boolean> {
+  if (!session) return false;
+  return isOwner(interaction.user.id) || session.requesterId === interaction.user.id;
+}
+
+async function handleSearchPick(interaction: any) {
+  const searchId = interaction.customId.split(":")[2];
+  const session = activeSearchSessions.get(searchId);
+  if (!session || !(await isSearchSessionAllowed(session, interaction))) {
+    await interaction
+      .reply({ content: "انتهت صلاحية هذه النتائج أو أنها لطالبها فقط — نفّذ /بحث من جديد.", flags: MessageFlags.Ephemeral })
+      .catch(() => undefined);
+    return;
+  }
+  await interaction.deferUpdate();
+  const index = Number(interaction.values?.[0]);
+  const match = Number.isInteger(index) ? session.matches[index] : undefined;
+  if (!match) return;
+  try {
+    const searcher = new SuwayomiClient(
+      ENV.suwayomiBaseUrl,
+      getUsableSuwayomiToken()
+    );
+    const chapters = await searcher.fetchMangaAndChapters(match.mangaId);
+    const sorted = chapters
+      .filter(chapter => typeof chapter.chapterNumber === "number")
+      .sort((a, b) => (b.chapterNumber ?? 0) - (a.chapterNumber ?? 0));
+    if (!sorted.length) {
+      await editMessageContent(
+        interaction.channelId,
+        interaction.message.id,
+        searchCardPayload({
+          state: "failed",
+          detail: "لم أعثر على فصول لهذا العمل في المصدر. جرّب عملًا آخر.",
+        })
+      );
+      return;
+    }
+    session.chapters = sorted.map(chapter => ({
+      label: `فصل ${chapter.chapterNumber}${chapter.name && chapter.name !== String(chapter.chapterNumber) ? ` — ${chapter.name}` : ""}`,
+      url: chapter.url,
+      realUrl: chapter.realUrl ?? null,
+      number: chapter.chapterNumber ?? null,
+    }));
+    session.mangaTitle = match.title;
+    session.sourceName = match.sourceName;
+    session.suwayomiSourceId = match.sourceId;
+    session.matchUrl = match.url;
+    session.matchRealUrl = match.realUrl;
+    const shown = session.chapters.slice(0, 25);
+    await editMessageContent(
+      interaction.channelId,
+      interaction.message.id,
+      searchCardPayload(
+        {
+          state: "chapters",
+          mangaTitle: match.title,
+          sourceName: match.sourceName,
+          totalChapters: session.chapters.length,
+          chaptersShown: shown.length,
+        },
+        {
+          customId: `search:chap:${searchId}`,
+          placeholder: "اختر فصلًا لسحبه ودمجه ورفعه…",
+          options: shown.map((chapter, chapterIndex) => ({
+            label: chapter.label,
+            description: "سحب هذا الفصل وتسليمه على Drive",
+            value: String(chapterIndex),
+          })),
+        }
+      )
+    );
+  } catch (error) {
+    console.warn("[Discord] Search pick failed", error);
+    await editMessageContent(
+      interaction.channelId,
+      interaction.message.id,
+      searchCardPayload({
+        state: "failed",
+        detail: "تعذر جلب فصول هذا العمل من المصدر. أعد المحاولة أو اختر عملًا آخر.",
+      })
+    ).catch(() => undefined);
+  }
+}
+
+async function handleSearchChapterPick(interaction: any) {
+  const searchId = interaction.customId.split(":")[2];
+  const session = activeSearchSessions.get(searchId);
+  if (!session || !(await isSearchSessionAllowed(session, interaction))) {
+    await interaction
+      .reply({ content: "انتهت صلاحية هذه القائمة أو أنها لطالبها فقط — نفّذ /بحث من جديد.", flags: MessageFlags.Ephemeral })
+      .catch(() => undefined);
+    return;
+  }
+  await interaction.deferUpdate();
+  const index = Number(interaction.values?.[0]);
+  const chapter = session.chapters[index];
+  if (!chapter) return;
+  const chapterUrl = chapterUrlFromParts(
+    { url: session.matchUrl ?? "", realUrl: session.matchRealUrl ?? null },
+    chapter
+  );
+  if (!chapterUrl) {
+    await editMessageContent(
+      interaction.channelId,
+      interaction.message.id,
+      searchCardPayload({
+        state: "failed",
+        detail: "تعذر بناء رابط الفصل من هذا المصدر — اختر مصدرًا آخر أو استخدم /فصل برابط مباشر.",
+      })
+    );
+    return;
+  }
+  // استكمال بيانات مصدر مزامن بلا نطاق: يُشتق النطاق من رابط العمل ويُفعّل السحب المباشر.
+  if (session.suwayomiSourceId) {
+    try {
+      const row = await getSourceBySuwayomiId(session.suwayomiSourceId);
+      if (row && row.origin === "suwayomi" && !row.allowDirectChapterLookup) {
+        const derived = hostnameFromHomeUrl(chapterUrl);
+        if (derived && derived !== row.hostname) {
+          await saveSource({
+            id: row.id,
+            name: row.name,
+            hostname: derived,
+            baseUrl: new URL(chapterUrl).origin,
+            suwayomiSourceId: row.suwayomiSourceId,
+            extensionPackage: row.extensionPackage,
+            extensionName: row.extensionName,
+            status: "active",
+            allowDirectChapterLookup: true,
+            notes: row.notes,
+            origin: "suwayomi",
+          });
+        }
+      }
+    } catch (error) {
+      console.warn("[Discord] Source hostname backfill skipped:", error);
+    }
+  }
+  activeSearchSessions.delete(searchId);
+  // التسليم لخط /فصل الحرفي: نفس التحقق، نفس البطاقة، نفس الصلاحيات — بلا أي فرع جديد.
+  await startChapterFromUrl(interactionCard(interaction), chapterUrl, {
+    id: interaction.user.id,
+    username: interaction.user.username,
+    channelId: interaction.channelId,
+  }).catch(async error => {
+    console.warn("[Discord] Search grab failed", error);
+    await editMessageContent(
+      interaction.channelId,
+      interaction.message.id,
+      searchCardPayload({
+        state: "failed",
+        detail:
+          error instanceof UrlPolicyError
+            ? error.message
+            : "تعذر بدء سحب هذا الفصل. حاول من جديد أو استخدم /فصل برابط مباشر.",
+      })
+    ).catch(() => undefined);
+  });
+}
+
+async function handleSearchSelectMenu(interaction: any) {
+  if (interaction.customId.startsWith("search:pick:"))
+    return void handleSearchPick(interaction);
+  if (interaction.customId.startsWith("search:chap:"))
+    return void handleSearchChapterPick(interaction);
+}
+
 async function replyHelp(interaction: any) {
   await interaction.deferReply();
   await interaction.editReply(panelPayload(buildHelpComponents()));
@@ -1253,12 +1955,18 @@ export async function startDiscordBot() {
   client.on(Events.InteractionCreate, async interaction => {
     try {
       if (interaction.isButton()) return void handleButton(interaction);
+      if (interaction.isStringSelectMenu())
+        return void handleSearchSelectMenu(interaction);
       if (!interaction.isChatInputCommand()) return;
       if (interaction.commandName === "مساعدة") await replyHelp(interaction);
       else if (interaction.commandName === "فصل")
         await replyChapter(interaction);
       else if (interaction.commandName === "دمج")
         await replyMerge(interaction);
+      else if (interaction.commandName === "مصادر")
+        await replySources(interaction);
+      else if (interaction.commandName === "بحث")
+        await replySearch(interaction);
     } catch (error) {
       console.error("[Discord] Interaction handler failed", error);
       if (interaction.isRepliable()) {
