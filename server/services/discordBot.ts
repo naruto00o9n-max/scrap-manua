@@ -159,7 +159,9 @@ const raw = (value: Raw): APIMessageTopLevelComponent =>
 const text = (content: string): Raw => ({ type: 10, content });
 
 const separator = (spacing: 1 | 2 = 1): Raw => ({
-  type: 18,
+  // نوع مكوّن الفاصل في Discord API هو 14 حصريًا؛ أي قيمة أخرى (مثل 18)
+  // ترفضها المنصة بخطأ 50035 Invalid Form Body.
+  type: 14,
   divider: true,
   spacing,
 });

@@ -238,4 +238,96 @@ describe("Discord ZEUS chapter experience", () => {
     expect(stale.detail).toBe("توقفت المعالجة");
     expect(stale.stage).toBe("validate");
   });
+
+  it("uses only component types the Discord API accepts (50035 regression guard)", () => {
+    // الأنواع الحقيقية المعروفة في Discord API:
+    // 1 ActionRow، 2 Button، 9 Section، 10 TextDisplay، 11 Thumbnail،
+    // 12 MediaGallery، 14 Separator، 17 Container. أي نوع آخر (كـ 18) يرفضه الـ API.
+    const KNOWN_TYPES = new Set([1, 2, 9, 10, 11, 12, 14, 17]);
+    // الأبناء المسموح بهم داخل الحاوية (17) كما يحددهم الـ API حرفيًا.
+    const CONTAINER_CHILD_TYPES = new Set([1, 9, 10, 12, 13, 14]);
+    // أنواع المكونات العليا المسموح بها في الرسالة.
+    const TOP_LEVEL_TYPES = new Set([1, 9, 10, 12, 13, 14, 17]);
+
+    const problems: string[] = [];
+
+    const walk = (
+      component: ComponentShape,
+      parentType: number | null,
+      path: string
+    ) => {
+      if (!KNOWN_TYPES.has(component.type)) {
+        problems.push(
+          `${path}: نوع المكوّن ${component.type} غير موجود في Discord API`
+        );
+        return;
+      }
+      if (parentType === null && !TOP_LEVEL_TYPES.has(component.type)) {
+        problems.push(
+          `${path}: النوع ${component.type} غير مسموح كمكوّن علوي في الرسالة`
+        );
+      }
+      if (parentType === 17 && !CONTAINER_CHILD_TYPES.has(component.type)) {
+        problems.push(
+          `${path}: النوع ${component.type} غير مسموح داخل الحاوية (المسموح: 1, 9, 10, 12, 13, 14)`
+        );
+      }
+      if (parentType === 9 && component.type !== 10) {
+        problems.push(`${path}: داخل القسم (9) يُسمح فقط بالنص (10)`);
+      }
+      if (parentType === 1 && component.type !== 2) {
+        problems.push(`${path}: داخل الصف (1) يُسمح فقط بالأزرار (2)`);
+      }
+      if (Array.isArray(component.components)) {
+        for (const [index, child] of (
+          component.components as ComponentShape[]
+        ).entries()) {
+          walk(child, component.type, `${path}.components[${index}]`);
+        }
+      }
+    };
+
+    const samples: unknown[][] = [
+      ...[
+        { status: "pending" as const, stage: "validate" as const, jobId: "g1" },
+        {
+          status: "downloading" as const,
+          stage: "download" as const,
+          progress: { done: 3, total: 20 },
+        },
+        {
+          status: "downloading" as const,
+          stage: "merge" as const,
+          progress: { done: 5, total: 20 },
+        },
+        {
+          status: "uploading" as const,
+          stage: "upload" as const,
+          progress: { done: 7, total: 20 },
+        },
+        {
+          status: "completed" as const,
+          stage: "upload" as const,
+          driveUrl: "https://drive.google.com/x",
+          mergedCount: 4,
+        },
+        { status: "failed" as const, stage: "chapter" as const, detail: "خطأ" },
+        { status: "cancelled" as const, stage: "download" as const },
+        { status: "info" as const, title: "عنوان", detail: "تفصيل" },
+      ].map(notice => buildJobCard(notice)),
+      buildHelpComponents("https://cdn.discordapp.com/avatars/1/x.png"),
+      buildHelpComponents(null),
+      buildPromptComponents(null),
+    ];
+
+    for (const components of samples) {
+      for (const [index, component] of (
+        components as ComponentShape[]
+      ).entries()) {
+        walk(component, null, `top[${index}]`);
+      }
+    }
+
+    expect(problems).toEqual([]);
+  });
 });
