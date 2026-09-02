@@ -45,6 +45,7 @@ export type SyncableExistingSource = {
   status: string;
   origin?: string | null;
   hostname: string;
+  lang?: string | null;
 };
 
 export function planSourceChanges(installed: SuwayomiSource[], existing: SyncableExistingSource[]): SyncPlan {
@@ -89,6 +90,30 @@ export function planSourceChanges(installed: SuwayomiSource[], existing: Syncabl
   return plan;
 }
 
+/**
+ * صفوف مصادر مزامنتها سابقًا بلا لغة (قبل إدخال حقل lang) ووُجدت لغتها الآن
+ * من إضافة Suwayomi — تُستكمل لغتها في كل دورة مزامنة حتى تكتمل كلها،
+ * لتجميع /مواقع حسب اللغة. عامة على نوع الصف حتى تمر صفوف ContentSource
+ * الكاملة وتعود كما هي مع اللغة. دالة نقية قابلة للاختبار.
+ */
+export type SourceLangBackfill<Row> = { row: Row; lang: string };
+
+export function sourceLangBackfills<Row extends SyncableExistingSource>(
+  existing: Row[],
+  installed: SuwayomiSource[]
+): SourceLangBackfill<Row>[] {
+  const langBySuwayomiId = new Map(
+    installed.filter(source => source.lang).map(source => [source.id, source.lang])
+  );
+  const backfills: SourceLangBackfill<Row>[] = [];
+  for (const row of existing) {
+    if (row.origin !== "suwayomi" || !row.suwayomiSourceId || row.lang) continue;
+    const lang = langBySuwayomiId.get(row.suwayomiSourceId);
+    if (lang) backfills.push({ row, lang });
+  }
+  return backfills;
+}
+
 let inFlight: Promise<{ added: number; activated: number; disabled: number } | null> | null = null;
 
 /** يشغّل مزامنة واحدة (مع منع التداخل لو نُفّذت من أكثر من مكان في نفس اللحظة). */
@@ -120,6 +145,7 @@ export async function syncSourcesFromSuwayomi(): Promise<{ added: number; activa
             allowDirectChapterLookup: Boolean(action.hostname),
             notes: AUTO_NOTE,
             origin: "suwayomi",
+            lang: source.lang,
           });
           added += 1;
         } catch (error) {
@@ -171,9 +197,35 @@ export async function syncSourcesFromSuwayomi(): Promise<{ added: number; activa
         }
       }
 
-      if (added || plan.activate.length || plan.disable.length) {
+      // استكمال لغة الصفوف القديمة المُزامنة قبل إدخال حقل lang —
+      // تشغيل رخيص: لا يكتب إلا الصفوف الناقصة فقط، ويشفي نفسه كل دورة.
+      let backfilled = 0;
+      for (const backfill of sourceLangBackfills(existing, installed)) {
+        try {
+          const row = backfill.row;
+          await saveSource({
+            id: row.id,
+            name: row.name,
+            hostname: row.hostname,
+            baseUrl: row.baseUrl,
+            suwayomiSourceId: row.suwayomiSourceId,
+            extensionPackage: row.extensionPackage,
+            extensionName: row.extensionName,
+            status: "active",
+            allowDirectChapterLookup: row.allowDirectChapterLookup,
+            notes: row.notes,
+            origin: "suwayomi",
+            lang: backfill.lang,
+          });
+          backfilled += 1;
+        } catch (error) {
+          console.warn(`[SourceSync] تعذر استكمال لغة المصدر ${backfill.row.id}:`, error);
+        }
+      }
+
+      if (added || plan.activate.length || plan.disable.length || backfilled) {
         console.info(
-          `[SourceSync] أُضيف ${added}، فُعّل ${plan.activate.length}، عُطّل ${plan.disable.length}.`
+          `[SourceSync] أُضيف ${added}، فُعّل ${plan.activate.length}، عُطّل ${plan.disable.length}، استُكملت لغة ${backfilled}.`
         );
       }
       return { added, activated: plan.activate.length, disabled: plan.disable.length };

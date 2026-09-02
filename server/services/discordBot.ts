@@ -430,7 +430,7 @@ export function buildHelpComponents(
     text(
       [
         "### 🔹 /مواقع",
-        "يعرض كل المواقع المتاحة في البوت — أي موقع يُضاف للبوت يظهر هنا تلقائيًا ⚡.",
+        "يعرض كل المواقع المتاحة في البوت مرتبة في أقسام لغوية واضحة: المواقع العربية في قسم، والإنجليزية في قسم، وهكذا — أي موقع يُضاف للبوت يظهر هنا تلقائيًا ⚡.",
       ].join("\n")
     ),
     separator(),
@@ -438,8 +438,8 @@ export function buildHelpComponents(
       [
         "### 🔹 /بحث",
         "يبحث عن أي عمل في كل المواقع دفعة واحدة، بدل الدخول لكل موقع والبحث فيه يدويًا.",
-        "**1.** نفّذ `/بحث` واكتب اسم العمل (وكلمة واحدة تكفي) — يبحث في كل المواقع ويعرض المطابقات موقعًا بموقع، ولو كثرت النتائج تنقّل بين الصفحات بالأزرار.",
-        "**2.** اختر عملًا من القائمة المنسدلة لتعرض فصوله (صفحة صفحة مهما كثرت)، ثم اختر فصلًا ليُسحب ويُدمج ويُرفع Drive كأمر /فصل تمامًا.",
+        "**1.** نفّذ `/بحث` واكتب اسم العمل (وكلمة واحدة تكفي) — يبحث في كل المواقع ويعرض المطابقات، ولو كثرت النتائج عن 25 تنقّل بين صفحاتها بأزرار «السابق/التالي».",
+        "**2.** اختر عملًا من القائمة فتفتح **صفحة العمل**: صورة الغلاف مكان صورة البوت، وملخصه ومؤلفه وحالته وتصنيفاته مرتبة، مع العدد الكلي لفصوله، وفي الأسفل قائمة الفصول (صفحة صفحة مهما كثرت) — اختر فصلًا ليُسحب ويُدمج ويُرفع Drive كأمر /فصل تمامًا، وزر «عودة» يعيدك إلى النتائج في أي وقت.",
         "**3.** لو تريد معرفة هل الفصل نزل أو لا: ضع رقم الفصل في خانة «الفصل» — سيفحصه في كل المواقع ويعرض فقط المواقع التي وُجد فيه.",
       ].join("\n")
     ),
@@ -1637,10 +1637,28 @@ export type SearchNotice = {
   sourceName?: string;
   totalChapters?: number;
   chaptersShown?: number;
+  /** غلاف العمل — يُستخدم بدل صورة البوت في رأس صفحة العمل. */
+  thumbnailUrl?: string | null;
+  /** سطور صفحة العمل: المؤلف/الرسام/الحالة/التصنيفات/الوصف — كلها اختيارية برفق. */
+  author?: string | null;
+  artist?: string | null;
+  statusText?: string | null;
+  genres?: string[];
+  description?: string | null;
   /** ترقيم صفحات القائمة المعروضة (نتائج البحث أو الفصول) — 1-based للعرض. */
   page?: number;
   totalPages?: number;
   detail?: string | null;
+};
+
+/** بيانات صفحة العمل المخزنة في الجلسة بعد اختيار نتيجة — كل الحقول برفق. */
+export type MangaPageInfo = {
+  author: string | null;
+  artist: string | null;
+  statusText: string | null;
+  genres: string[];
+  description: string | null;
+  thumbnailUrl: string | null;
 };
 
 export type SearchSelectSpec = {
@@ -1673,19 +1691,22 @@ export function paginateForSelect<T>(items: T[], page: number) {
 }
 
 /**
- * صف أزرار التنقل بين الصفحات: السابق / مؤشر الصفحة / التالي.
- * زر المؤشر معطّل دائمًا — عرض فقط. يُرجع null لو لا توجد إلا صفحة واحدة.
+ * صف أزرار التنقل بين الصفحات: السابق / مؤشر الصفحة / التالي (+ زر عودة اختياري).
+ * ملاحظة حرجة: زر المؤشر معطّل دائمًا لكن Discord يُلزم **كل** زر بـ custom_id
+ * حتى المعطّل — إرسال زر بلا custom_id يرفض الرسالة كلها بخطأ 50035
+ * BUTTON_COMPONENT_CUSTOM_ID_REQUIRED (حدث فعلًا وأفسد الترقيم كله).
+ * يُرجع null لو لا توجد إلا صفحة واحدة ولا يوجد زر عودة.
  */
 export function buildSearchPageNavRow(
   kind: "page" | "cpage",
   searchId: string,
   page: number,
-  totalPages: number
+  totalPages: number,
+  back?: { label: string; customId: string }
 ): Raw | null {
-  if (totalPages <= 1) return null;
-  return {
-    type: 1,
-    components: [
+  const buttons: Raw[] = [];
+  if (totalPages > 1) {
+    buttons.push(
       {
         type: 2,
         style: 2,
@@ -1698,6 +1719,7 @@ export function buildSearchPageNavRow(
         type: 2,
         style: 2,
         label: `صفحة ${page + 1} من ${totalPages}`,
+        custom_id: `search:${kind}:${searchId}:stay`,
         disabled: true,
       },
       {
@@ -1707,9 +1729,20 @@ export function buildSearchPageNavRow(
         emoji: { name: "▶" },
         custom_id: `search:${kind}:${searchId}:next`,
         disabled: page >= totalPages - 1,
-      },
-    ],
-  };
+      }
+    );
+  }
+  if (back) {
+    buttons.push({
+      type: 2,
+      style: 2,
+      label: back.label,
+      emoji: { name: "↩" },
+      custom_id: back.customId,
+    });
+  }
+  if (!buttons.length) return null;
+  return { type: 1, components: buttons };
 }
 
 /** صف قائمة منسدلة — النوع 3 مسموح داخل الصف (1) في رسائل Components V2. */
@@ -1740,7 +1773,7 @@ function searchStateTitle(state: SearchNoticeState): string {
     case "availability":
       return "🔢 فحص توفر الفصل في كل المواقع";
     case "chapters":
-      return "📚 فصول العمل";
+      return "📚 صفحة العمل";
     case "failed":
       return "❌ البحث";
   }
@@ -1754,12 +1787,61 @@ export function sitesCount(count: number): string {
   return `${count} موقعًا`;
 }
 
+/** صياغة عدد الفصول عربيًا: فصل واحد، فصلان، 6 فصول، 25 فصلًا. */
+export function chaptersCount(count: number): string {
+  if (count === 1) return "فصل واحد";
+  if (count === 2) return "فصلان";
+  if (count <= 10) return `${count} فصول`;
+  return `${count} فصلًا`;
+}
+
+/** يترجم قيمة MangaStatus من Suwayomi إلى نص عربي مختصر. */
+export function mangaStatusAr(status: string | null | undefined): string | null {
+  switch ((status ?? "").toUpperCase()) {
+    case "ONGOING":
+      return "مستمرة";
+    case "COMPLETED":
+      return "مكتملة";
+    case "CANCELLED":
+      return "ملغاة";
+    case "HIATUS":
+      return "متوقفة مؤقتًا";
+    default:
+      return null;
+  }
+}
+
+/** ينزّع وسوم HTML من وصف العمل ويطوي الفراغات — أوصاف المواقع مليئة بـ <br>. */
+export function stripHtmlTags(value: string): string {
+  return value
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/**
+ * يُمرّر فقط روابط https للصور في رأس البطاقة — Discord يرفض غير الآمن،
+ * وتُستبدل الصورة غير الصالحة بصورة البوت بدل إفشال البطاقة كلها.
+ */
+export function safeMediaUrl(value: string | null | undefined): string | null {
+  if (!value || !/^https:\/\//i.test(value)) return null;
+  return value;
+}
+
 export function buildSearchCardComponents(
   notice: SearchNotice,
   select?: SearchSelectSpec | null,
   avatar: string | null = avatarUrl(),
   nav?: Raw | null
 ): APIMessageTopLevelComponent[] {
+  // صفحة العمل تبني رأسها الخاص (عنوان العمل وغلافه بدل صورة البوت) — تعيد مبكرًا
+  // لتجنب رأس مكرر لعنوان الحالة العام.
+  if (notice.state === "chapters") {
+    return buildMangaPageComponents(notice, select, avatar, nav);
+  }
+
   const body: Raw[] = [
     headerBlock(`## ${searchStateTitle(notice.state)}`, [], avatar),
     separator(2),
@@ -1804,16 +1886,6 @@ export function buildSearchCardComponents(
     }
     if (notice.detail) lines.push("", notice.detail);
     body.push(text(lines.join("\n")));
-  } else if (notice.state === "chapters") {
-    const pageInfo = (notice.totalPages ?? 1) > 1 ? ` — الصفحة ${notice.page ?? 1} من ${notice.totalPages}` : "";
-    body.push(
-      text(
-        [
-          `**${notice.mangaTitle ?? ""}**`,
-          `-# الموقع: ${notice.sourceName ?? "—"} — ${notice.totalChapters ?? 0} فصلًا${pageInfo}. اختر فصلًا ليُسحب ويُدمج ويُرفع إلى Drive.`,
-        ].join("\n")
-      )
-    );
   } else {
     body.push(
       text(
@@ -1831,32 +1903,161 @@ export function buildSearchCardComponents(
   return [raw({ type: 17, accent_color: GOLD, components: body })];
 }
 
+/**
+ * صفحة العمل (حالة chapters): رأس بعنوان العمل وغلافه بدل صورة البوت،
+ * ثم ملخص مرتب (القصة/المؤلف/الحالة/التصنيفات)، ثم الفصول ملخصًا
+ * بالعدد الكلي فقط، ثم قائمة اختيار الفصل وأزرار الصفحات والعودة.
+ */
+function buildMangaPageComponents(
+  notice: SearchNotice,
+  select: SearchSelectSpec | null | undefined,
+  avatar: string | null,
+  nav: Raw | null | undefined
+): APIMessageTopLevelComponent[] {
+  const body: Raw[] = [];
+  const title = notice.mangaTitle?.trim() || searchStateTitle("chapters");
+  const headerLines: string[] = [];
+  if (notice.sourceName) headerLines.push(`الموقع: **${notice.sourceName}**`);
+  const cover = safeMediaUrl(notice.thumbnailUrl);
+
+  const detailLines: string[] = [];
+  const description = notice.description?.trim();
+  if (description) {
+    detailLines.push(`📖 **القصة:** ${description.slice(0, 400)}${description.length > 400 ? "…" : ""}`);
+  }
+  const author = notice.author?.trim();
+  const artist = notice.artist?.trim();
+  if (author) {
+    detailLines.push(`✍️ **المؤلف:** ${author}${artist && artist !== author ? `\n🎨 **الرسام:** ${artist}` : ""}`);
+  }
+  const statusText = notice.statusText?.trim();
+  if (statusText) detailLines.push(`📊 **الحالة:** ${statusText}`);
+  if (notice.genres?.length) {
+    detailLines.push(`🏷️ **التصنيفات:** ${notice.genres.slice(0, 8).join("، ").slice(0, 200)}`);
+  }
+
+  body.push(headerBlock(`## ${title}`, headerLines, cover ?? avatar));
+  body.push(separator(2));
+  if (detailLines.length) body.push(text(detailLines.join("\n")));
+
+  const pageInfo = (notice.totalPages ?? 1) > 1 ? ` — الصفحة ${notice.page ?? 1} من ${notice.totalPages}` : "";
+  if (detailLines.length) body.push(separator());
+  body.push(
+    text(
+      [
+        `📚 **عدد الفصول: ${chaptersCount(notice.totalChapters ?? 0)}**`,
+        `-# اختر فصلًا من القائمة ليُسحب ويُدمج ويُرفع إلى Drive مثل /فصل تمامًا${pageInfo}.`,
+      ].join("\n")
+    )
+  );
+  body.push(separator());
+  if (select && select.options.length) body.push(buildSearchSelectRow(select));
+  if (nav) body.push(nav);
+  body.push(text("-# ZEUS"));
+  return [raw({ type: 17, accent_color: GOLD, components: body })];
+}
+
+// ============================================================
+// /مواقع: تجميع المصادر حسب اللغة — عربية، إنجليزية، ثم البقية.
+// ============================================================
+
+export type LanguageSourceGroup = {
+  /** رمز اللغة كما تبلّغ عنه إضافة Suwayomi، أو other للبلا لغة. */
+  key: string;
+  /** عنوان القسم بالعربية. */
+  label: string;
+  sources: ContentSource[];
+};
+
+const LANG_GROUP_ORDER = ["ar", "en", "multi"];
+
+/** عنوان قسم اللغة بالعربية — Intl.DisplayNames للغات غير الشهيرة. */
+export function languageGroupLabel(lang: string | null | undefined): string {
+  if (!lang) return "مواقع أخرى";
+  const code = lang.toLowerCase();
+  if (code === "ar") return "المواقع العربية";
+  if (code === "en") return "المواقع الإنجليزية";
+  if (code === "multi") return "مواقع متعددة اللغات";
+  try {
+    const name = new Intl.DisplayNames(["ar"], { type: "language" }).of(code);
+    if (name && name.toLowerCase() !== code) return `مواقع ${name}`;
+  } catch {
+    /* Intl غير متاح — نعود إلى الرمز الخام */
+  }
+  return `مواقع (${code})`;
+}
+
+/** يجمع المصادر النشطة في أقسام لغوية مرتبة: العربية أولًا ثم الإنجليزية ثم البقية. */
+export function groupSourcesByLang(sources: ContentSource[]): LanguageSourceGroup[] {
+  const groups = new Map<string, ContentSource[]>();
+  for (const source of sources) {
+    const key = source.lang?.toLowerCase() || "other";
+    const list = groups.get(key);
+    if (list) list.push(source);
+    else groups.set(key, [source]);
+  }
+  const rank = (key: string) => {
+    const index = LANG_GROUP_ORDER.indexOf(key);
+    if (index >= 0) return index;
+    return key === "other" ? 999 : LANG_GROUP_ORDER.length;
+  };
+  return Array.from(groups.keys())
+    .sort(
+      (a, b) =>
+        rank(a) - rank(b) ||
+        languageGroupLabel(a === "other" ? null : a).localeCompare(
+          languageGroupLabel(b === "other" ? null : b),
+          "ar"
+        )
+    )
+    .map(key => ({
+      key,
+      label: languageGroupLabel(key === "other" ? null : key),
+      sources: (groups.get(key) ?? []).sort((a, b) =>
+        a.name.localeCompare(b.name, "ar")
+      ),
+    }));
+}
+
+/** أقصى عدد مواقع يُعرض في القسم الواحد — البقية تُختصر بسطر. */
+export const SOURCES_GROUP_LIMIT = 25;
+
 export function buildSourcesComponents(
   active: ContentSource[],
   totalCount: number,
   avatar: string | null = avatarUrl()
 ): APIMessageTopLevelComponent[] {
-  const lines: string[] = [
-    `**${active.length}** ${active.length === 1 ? "موقع متاح" : "مواقع متاحة"} من إجمالي ${totalCount} مسجل.`,
-    "كل موقع يُضاف للبوت يظهر هنا تلقائيًا، ويُستخدم عبر /بحث مباشرة.",
-    "",
-  ];
-  const shown = active.slice(0, 40);
-  for (const source of shown) {
-    lines.push(
-      `• **${source.name}** — ${source.hostname && !source.hostname.endsWith(".internal") ? source.hostname : "عبر /بحث"}${source.origin === "suwayomi" ? " ⚡" : ""}`
-    );
-  }
-  if (active.length > shown.length) {
-    lines.push(`-# و${active.length - shown.length} موقعًا آخر…`);
-  }
+  const groups = groupSourcesByLang(active);
   const body: Raw[] = [
     headerBlock("## 🗂️ مواقع ZEUS", [], avatar),
     separator(2),
-    text(lines.join("\n")),
-    separator(),
-    text("-# ⚡ مُضاف تلقائيًا — ZEUS"),
+    text(
+      [
+        `**${active.length}** ${active.length === 1 ? "موقع متاح" : "مواقع متاحة"} من إجمالي ${totalCount} مسجل.`,
+        "كل موقع يُضاف للبوت يظهر هنا تلقائيًا، مرتّبًا في قسم لغته، ويُستخدم عبر /بحث مباشرة.",
+      ].join("\n")
+    ),
   ];
+  for (const group of groups) {
+    body.push(separator(2));
+    const lines: string[] = [`🌐 **${group.label} — ${group.sources.length}**`];
+    const shown = group.sources.slice(0, SOURCES_GROUP_LIMIT);
+    for (const source of shown) {
+      lines.push(
+        `• **${source.name}** — ${source.hostname && !source.hostname.endsWith(".internal") ? source.hostname : "عبر /بحث"}${source.origin === "suwayomi" ? " ⚡" : ""}`
+      );
+    }
+    if (group.sources.length > shown.length) {
+      lines.push(`-# و${group.sources.length - shown.length} موقعًا آخر في هذا القسم…`);
+    }
+    body.push(text(lines.join("\n")));
+  }
+  if (!groups.length) {
+    body.push(separator());
+    body.push(text("لا توجد مواقع متاحة بعد — أضف إضافة على Suwayomi وستظهر هنا فورًا."));
+  }
+  body.push(separator());
+  body.push(text("-# ⚡ مُضاف تلقائيًا — ZEUS"));
   return [raw({ type: 17, accent_color: GOLD, components: body })];
 }
 
@@ -1931,6 +2132,7 @@ type SearchSession = {
   availability?: SearchNotice["availability"];
   anyAvailable?: boolean;
   mangaTitle?: string;
+  manga?: MangaPageInfo;
   sourceName?: string;
   suwayomiSourceId?: string;
   matchUrl?: string;
@@ -1971,6 +2173,12 @@ function buildSearchSessionView(
         chaptersShown: pagination.slice.length,
         page: pagination.page + 1,
         totalPages: pagination.totalPages,
+        thumbnailUrl: session.manga?.thumbnailUrl ?? null,
+        author: session.manga?.author ?? null,
+        artist: session.manga?.artist ?? null,
+        statusText: session.manga?.statusText ?? null,
+        genres: session.manga?.genres ?? [],
+        description: session.manga?.description ?? null,
       },
       select: {
         customId: `search:chap:${searchId}`,
@@ -1981,7 +2189,17 @@ function buildSearchSessionView(
           value: String(pagination.start + index),
         })),
       },
-      nav: buildSearchPageNavRow("cpage", searchId, pagination.page, pagination.totalPages),
+      nav: buildSearchPageNavRow(
+        "cpage",
+        searchId,
+        pagination.page,
+        pagination.totalPages,
+        // زر العودة إلى العرض السابق — موجود دائمًا حتى لو كانت الفصول صفحة واحدة.
+        {
+          label: session.chapterNumber !== null ? "عودة إلى الفحص" : "عودة إلى النتائج",
+          customId: `search:back:${searchId}`,
+        }
+      ),
     };
   }
 
@@ -2274,19 +2492,23 @@ async function handleSearchPick(interaction: any) {
       ENV.suwayomiBaseUrl,
       getUsableSuwayomiToken()
     );
-    const chapters = await searcher.fetchMangaAndChapters(match.mangaId);
+    // صفحة العمل تحتاج التفاصيل (وصف/مؤلف/حالة/غلاف) والفصول معًا —
+    // يُطلبان بالتوازي، وفشل التفاصيل وحده لا يمنع عرض الفصول أبدًا.
+    const [details, chapters] = await Promise.all([
+      searcher.fetchMangaDetails(match.mangaId).catch(() => null),
+      searcher.fetchMangaAndChapters(match.mangaId),
+    ]);
     const sorted = chapters
       .filter(chapter => typeof chapter.chapterNumber === "number")
       .sort((a, b) => (b.chapterNumber ?? 0) - (a.chapterNumber ?? 0));
     if (!sorted.length) {
-      await editMessageContent(
-        interaction.channelId,
-        interaction.message.id,
-        searchCardPayload({
-          state: "failed",
-          detail: "لم أعثر على فصول لهذا العمل في هذا الموقع. جرّب عملًا آخر.",
+      // لا نُهدم بطاقة النتائج — إشعار مؤقت يكفي ويبقى الاختيار متاحًا.
+      await interaction
+        .followUp({
+          content: "📚 **" + match.title + "** — لم أعثر على فصول لهذا العمل في هذا الموقع. جرّب عملًا آخر.",
+          flags: MessageFlags.Ephemeral,
         })
-      );
+        .catch(() => undefined);
       return;
     }
     session.chapters = sorted.map(chapter => ({
@@ -2296,6 +2518,16 @@ async function handleSearchPick(interaction: any) {
       number: chapter.chapterNumber ?? null,
     }));
     session.mangaTitle = match.title;
+    session.manga = {
+      author: details?.author?.trim() || null,
+      artist: details?.artist?.trim() || null,
+      statusText: mangaStatusAr(details?.status),
+      genres: Array.isArray(details?.genre) ? details.genre.filter(Boolean) : [],
+      description: details?.description ? stripHtmlTags(details.description) : null,
+      // الغلاف: من تفاصيل العمل وإلا غلاف نتيجة البحث — https فقط، وإلا صورة البوت.
+      thumbnailUrl:
+        safeMediaUrl(details?.thumbnailUrl) ?? safeMediaUrl(match.thumbnailUrl),
+    };
     session.sourceName = match.sourceName;
     session.suwayomiSourceId = match.sourceId;
     session.matchUrl = match.url;
@@ -2306,14 +2538,35 @@ async function handleSearchPick(interaction: any) {
     await showSearchSessionView(interaction, session, searchId);
   } catch (error) {
     console.warn("[Discord] Search pick failed", error);
-    await editMessageContent(
-      interaction.channelId,
-      interaction.message.id,
-      searchCardPayload({
-        state: "failed",
-        detail: "تعذر جلب فصول هذا العمل من هذا الموقع. أعد المحاولة أو اختر عملًا آخر.",
+    // تفشل الجلب دون هدم بطاقة النتائج — المستخدم يختار عملًا آخر من نفس القائمة.
+    await interaction
+      .followUp({
+        content: "⚠️ تعذر جلب فصول هذا العمل من هذا الموقع. أعد المحاولة أو اختر عملًا آخر.",
+        flags: MessageFlags.Ephemeral,
       })
-    ).catch(() => undefined);
+      .catch(() => undefined);
+  }
+}
+
+/**
+ * زر «عودة» في صفحة العمل: يرجع إلى عرض النتائج أو عرض فحص الفصل
+ * بحسب ما بدأت منه الجلسة — دون إعادة بحث ولا فقدان الصفحات.
+ */
+async function handleSearchBackButton(interaction: any) {
+  const searchId = interaction.customId.split(":")[2];
+  const session = activeSearchSessions.get(searchId);
+  if (!session || !(await isSearchSessionAllowed(session, interaction))) {
+    await interaction
+      .reply({ content: "انتهت صلاحية هذه القائمة أو أنها لطالبها فقط — نفّذ /بحث من جديد.", flags: MessageFlags.Ephemeral })
+      .catch(() => undefined);
+    return;
+  }
+  await interaction.deferUpdate();
+  session.view = session.chapterNumber !== null ? "availability" : "results";
+  try {
+    await showSearchSessionView(interaction, session, searchId);
+  } catch (error) {
+    console.warn("[Discord] Search back failed", error);
   }
 }
 
@@ -2414,6 +2667,8 @@ async function handleSearchPageButton(interaction: any) {
     return;
   }
   await interaction.deferUpdate();
+  // زر المؤشر المعطّل (stay) لا ينبغي أن يُرسل تفاعلًا أصلًا — الحذر لا يضر.
+  if (direction !== "prev" && direction !== "next") return;
   const delta = direction === "next" ? 1 : -1;
   if (kind === "page") session.matchPage = Math.max(0, session.matchPage + delta);
   else session.chapterPage = Math.max(0, session.chapterPage + delta);
@@ -2489,6 +2744,8 @@ async function handleButton(interaction: any) {
     interaction.customId.startsWith("search:cpage:")
   )
     return void handleSearchPageButton(interaction);
+  if (interaction.customId.startsWith("search:back:"))
+    return void handleSearchBackButton(interaction);
   if (interaction.customId.startsWith("merge:cancel:"))
     return void handleMergeCancelButton(interaction);
   if (!interaction.customId.startsWith("job:cancel:")) return;

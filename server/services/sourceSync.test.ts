@@ -3,16 +3,17 @@ import type { SuwayomiSource } from "./suwayomi";
 import {
   hostnameFromHomeUrl,
   planSourceChanges,
+  sourceLangBackfills,
   type SyncPlan,
 } from "./sourceSync";
 
-function installed(id: string, name: string, homeUrl: string | null = null): SuwayomiSource {
+function installed(id: string, name: string, homeUrl: string | null = null, lang = "en"): SuwayomiSource {
   return {
     id,
     name,
     displayName: name,
     homeUrl,
-    lang: "en",
+    lang,
     extension: { name: name, pkgName: id, isInstalled: true },
   };
 }
@@ -110,5 +111,42 @@ describe("planSourceChanges", () => {
     expect(plan.create).toHaveLength(2);
     expect(plan.skippedHostname).toBe(0);
     expect(plan.create.every(action => action.hostname === null)).toBe(true);
+  });
+});
+
+describe("sourceLangBackfills", () => {
+  it("proposes language backfill only for auto-synced rows missing lang", () => {
+    const existing = [
+      { id: 1, suwayomiSourceId: "src-ar", status: "active", origin: "suwayomi", hostname: "a.com" },
+      { id: 2, suwayomiSourceId: "src-en", status: "active", origin: "suwayomi", hostname: "b.com", lang: "en" },
+      { id: 3, suwayomiSourceId: "src-manual", status: "active", origin: "manual", hostname: "c.com" },
+      { id: 4, suwayomiSourceId: "src-gone", status: "active", origin: "suwayomi", hostname: "d.com" },
+    ];
+    const backfills = sourceLangBackfills(existing, [
+      installed("src-ar", "ArabicSite", "https://a.com", "ar"),
+      installed("src-en", "EnglishSite", "https://b.com", "en"),
+    ]);
+    expect(backfills).toEqual([{ row: existing[0], lang: "ar" }]);
+  });
+
+  it("passes the full row through untouched so saveSource keeps its fields", () => {
+    const fullRow = {
+      id: 9,
+      suwayomiSourceId: "src-x",
+      status: "active",
+      origin: "suwayomi" as const,
+      hostname: "x.com",
+      name: "XSite",
+      baseUrl: "https://x.com",
+      extensionPackage: null,
+      extensionName: null,
+      allowDirectChapterLookup: true,
+      notes: null,
+    };
+    const backfills = sourceLangBackfills([fullRow], [installed("src-x", "XSite", "https://x.com", "ja")]);
+    expect(backfills).toHaveLength(1);
+    expect(backfills[0]!.row).toBe(fullRow);
+    expect(backfills[0]!.row.name).toBe("XSite");
+    expect(backfills[0]!.lang).toBe("ja");
   });
 });

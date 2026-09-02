@@ -39,6 +39,8 @@ export type ContentSource = {
   notes: string | null;
   /** مصدر إضافة السجل: يدوي من اللوحة أو مزامنة تلقائية من Suwayomi. */
   origin?: "manual" | "suwayomi";
+  /** لغة المصدر كما تُبلّغ عنها إضافة Suwayomi (ar/en/…) — لتجميع /مواقع. */
+  lang?: string | null;
   createdAt: Date;
   updatedAt: Date;
 };
