@@ -185,22 +185,20 @@ async function renderGroupToFile(
 }
 
 /**
- * ينزّل الصفحات إلى ملفات مؤقتة على القرص ثم يدمجها في صور طويلة تُكتب إلى
- * القرص فورًا، مجموعة واحدة في كل مرة. هذا يبقي ذروة استهلاك الذاكرة قريبة
- * من حجم مجموعة واحدة مهما كان عدد صفحات الفصل، بدل تحميل كل الصفحات وكل
- * الصور المدمجة في الذاكرة معًا (سبب قتل الحاوية بخطأ 137 على Railway).
+ * يدمج ملفات صور موجودة مسبقًا على القرص في صور طويلة تُكتب إلى القرص فورًا،
+ * مجموعة واحدة في كل مرة. نفس منطق الدمج المستخدم لصفحات الفصول المسحوبة،
+ * لكن دون أي تنزيل — يُستخدم لأمر الدمج اليدوي (صور جاهزة من ZIP أو Drive).
  * تنظيف الملفات المؤقتة يتم عبر cleanup() في كل الحالات.
  */
-export async function openChapterMergeSession(
-  pageUrls: string[],
-  onProgress?: MergeProgressListener,
+export async function openLocalImageMergeSession(
+  pagePaths: string[],
+  onProgress?: MergeProgressListener
 ): Promise<ChapterMergeSession> {
-  if (!pageUrls.length) {
+  if (!pagePaths.length) {
     return { images: [], cleanup: async () => {} };
   }
   const dir = await mkdtemp(path.join(tmpdir(), "manga-merge-"));
   try {
-    const pagePaths = await downloadPagesToTemp(pageUrls, dir, onProgress);
     const dimensions = await Promise.all(pagePaths.map(pagePath => sharp(pagePath).metadata()));
     const width = Math.max(...dimensions.map(item => item.width ?? 0));
     if (!width) throw new Error("تعذر تحديد أكبر عرض لصفحات الفصل.");
@@ -219,6 +217,36 @@ export async function openChapterMergeSession(
     return { images, cleanup: () => rm(dir, { recursive: true, force: true }) };
   } catch (error) {
     await rm(dir, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+/**
+ * ينزّل الصفحات إلى ملفات مؤقتة على القرص ثم يدمجها في صور طويلة تُكتب إلى
+ * القرص فورًا، مجموعة واحدة في كل مرة. هذا يبقي ذروة استهلاك الذاكرة قريبة
+ * من حجم مجموعة واحدة مهما كان عدد صفحات الفصل، بدل تحميل كل الصفحات وكل
+ * الصور المدمجة في الذاكرة معًا (سبب قتل الحاوية بخطأ 137 على Railway).
+ * تنظيف الملفات المؤقتة يتم عبر cleanup() في كل الحالات.
+ */
+export async function openChapterMergeSession(
+  pageUrls: string[],
+  onProgress?: MergeProgressListener
+): Promise<ChapterMergeSession> {
+  if (!pageUrls.length) {
+    return { images: [], cleanup: async () => {} };
+  }
+  const downloadDir = await mkdtemp(path.join(tmpdir(), "manga-pages-"));
+  try {
+    const pagePaths = await downloadPagesToTemp(pageUrls, downloadDir, onProgress);
+    const session = await openLocalImageMergeSession(pagePaths, onProgress);
+    const sessionCleanup = session.cleanup;
+    session.cleanup = async () => {
+      await sessionCleanup();
+      await rm(downloadDir, { recursive: true, force: true });
+    };
+    return session;
+  } catch (error) {
+    await rm(downloadDir, { recursive: true, force: true });
     throw error;
   }
 }

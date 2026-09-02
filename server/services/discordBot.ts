@@ -1,3 +1,7 @@
+import { randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import {
   ActivityType,
   Client,
@@ -22,6 +26,17 @@ import {
   setSetting,
 } from "../db";
 import { queueAuthorizedChapter } from "./jobs";
+import {
+  GoogleDriveError,
+} from "./googleDrive";
+import {
+  ManualMergeCancelled,
+  ManualMergeCancelToken,
+  downloadHttpsToPath,
+  isSupportedArchiveName,
+  parseDriveLink,
+  runManualMerge,
+} from "./manualMerge";
 import { UrlPolicyError } from "./urlPolicy";
 
 let client: Client | null = null;
@@ -121,6 +136,21 @@ const commandPayload = [
       option
         .setName("الرابط")
         .setDescription("رابط الفصل - اختياري")
+        .setRequired(false)
+    ),
+  new SlashCommandBuilder()
+    .setName("دمج")
+    .setDescription("دمج صور جاهزة في صور طويلة بدون سحب - ZIP/CBZ أو رابط Drive")
+    .addStringOption(option =>
+      option
+        .setName("الرابط")
+        .setDescription("رابط مجلد Google Drive الذي يحتوي الصور - اختياري")
+        .setRequired(false)
+    )
+    .addAttachmentOption(option =>
+      option
+        .setName("الملف")
+        .setDescription("ملف ZIP أو CBZ يحتوي صور الفصل - اختياري")
         .setRequired(false)
     ),
   new SlashCommandBuilder()
@@ -338,6 +368,16 @@ export function buildHelpComponents(
       ].join("\n")
     ),
     separator(),
+    text(
+      [
+        "### 🔹 /دمج",
+        "يدمج صورًا جاهزة في صور طويلة بدون أي سحب — مفيد إذا سحبت الفصل بنفسك من مكان آخر.",
+        "**1.** نفّذ `/دمج` وأرفق ملف **ZIP** أو **CBZ** يحتوي صور الفصل في خانة الملف، أو ضع رابط مجلد Google Drive في خانة الرابط.",
+        "**2.** أو نفّذ `/دمج` بدون شيء ثم أرسل الملف أو الرابط هنا كرسالة عادية خلال دقيقتين.",
+        "**3.** بطاقة التقدم تتحدث مع كل خطوة: فحص المدخلات ← جلب الصور ← دمج الصفحات ← الرفع إلى Drive، وعند الاكتمال تجد زر فتح الفصل.",
+      ].join("\n")
+    ),
+    separator(),
     text(["### 🔹 /مساعدة", "يشرح طريقة الاستخدام — هذه الرسالة."].join("\n")),
     separator(),
     text("-# ZEUS"),
@@ -372,6 +412,201 @@ function cardPayload(notice: JobNotice, options?: JobCardOptions) {
       ? { users: [options.requesterId] }
       : undefined,
     components: buildJobCard(notice, options),
+  };
+}
+
+// ============================================================
+// أمر الدمج اليدوي: صور جاهزة (ZIP/CBZ أو مجلد Drive) تُدمج بلا سحب.
+// بطاقة مستقلة تمامًا عن بطاقة الفصول — لا تمس منطق /فصل إطلاقًا.
+// ============================================================
+
+export type MergeStage = "validate" | "fetch" | "merge" | "upload";
+
+export type MergeNotice = {
+  mergeId?: string;
+  status: JobStatus;
+  stage?: MergeStage;
+  /** تجاوز عنوان البطاقة الافتراضي المشتق من المرحلة الحالية. */
+  title?: string;
+  /** سطر تعريف المصدر (اسم الأرشيف أو المجلد وحصيلته). */
+  label?: string | null;
+  /** سطر سياقي إضافي (رسالة خطأ أو ملاحظة) يظهر أسفل البطاقة. */
+  detail?: string | null;
+  /** تقدم رقمي حي للمرحلة الجارية. */
+  progress?: { done: number; total: number };
+  /** عدد صور المصدر قبل الدمج. */
+  imageCount?: number;
+  /** عدد الصور الطويلة الناتجة بعد الدمج. */
+  mergedCount?: number;
+  driveUrl?: string | null;
+};
+
+type MergeCardOptions = { requesterId?: string };
+
+const MERGE_STAGE_ORDER: MergeStage[] = ["validate", "fetch", "merge", "upload"];
+
+const MERGE_STAGE_LABELS: Record<MergeStage, string> = {
+  validate: "فحص المدخلات",
+  fetch: "جلب الصور",
+  merge: "دمج الصفحات",
+  upload: "رفع الصور إلى Drive",
+};
+
+const MERGE_STAGE_TITLES: Record<MergeStage, string> = {
+  validate: "⏳ جاري فحص المدخلات",
+  fetch: "⬇️ جاري جلب الصور",
+  merge: "🧩 جاري دمج الصفحات",
+  upload: "☁️ جاري رفع الصور",
+};
+
+const MERGE_STATUS_TITLES: Record<"completed" | "failed" | "cancelled", string> = {
+  completed: "✅ اكتمل الدمج — الفصل جاهز",
+  failed: "❌ فشل الدمج",
+  cancelled: "🚫 أُلغي الدمج",
+};
+
+function mergeStageSuffix(notice: MergeNotice, stage: MergeStage): string {
+  if (stage === "fetch") {
+    return notice.imageCount ? ` — ${notice.imageCount} صورة` : "";
+  }
+  if (stage === "merge" || stage === "upload") {
+    return notice.mergedCount ? ` — ${notice.mergedCount} صورة` : "";
+  }
+  return "";
+}
+
+function mergeChecklistLines(notice: MergeNotice): string[] {
+  const current = notice.stage ? MERGE_STAGE_ORDER.indexOf(notice.stage) : -1;
+  return MERGE_STAGE_ORDER.map((stage, index) => {
+    const label = MERGE_STAGE_LABELS[stage];
+    if (notice.status === "completed" || index < current) {
+      return `✓ ${label}${mergeStageSuffix(notice, stage)}`;
+    }
+    if (index === current) {
+      if (notice.status === "failed") return `✗ ${label}`;
+      if (notice.status === "cancelled") return `⊘ ${label}`;
+      const live = notice.progress
+        ? ` — ${notice.progress.done}/${notice.progress.total}`
+        : "";
+      return `▸ ${label}${live}`;
+    }
+    return `· ${label}`;
+  });
+}
+
+function mergeCardTitle(notice: MergeNotice): string {
+  if (notice.title) return notice.title;
+  if (
+    notice.status === "completed" ||
+    notice.status === "failed" ||
+    notice.status === "cancelled"
+  ) {
+    return MERGE_STATUS_TITLES[notice.status];
+  }
+  if (notice.stage) return MERGE_STAGE_TITLES[notice.stage];
+  return "⏳ جاري العمل على الدمج";
+}
+
+function mergeActionRows(notice: MergeNotice): Raw[] {
+  const buttons: Raw[] = [];
+  if (notice.status === "completed" && notice.driveUrl) {
+    buttons.push({
+      type: 2,
+      style: 5,
+      label: "فتح الفصل",
+      url: notice.driveUrl,
+    });
+  } else if (ACTIVE_STATUSES.includes(notice.status) && notice.mergeId) {
+    buttons.push({
+      type: 2,
+      style: 4,
+      label: "إلغاء",
+      custom_id: `merge:cancel:${notice.mergeId}`,
+    });
+  }
+  if (!buttons.length) return [];
+  return [{ type: 1, components: buttons }];
+}
+
+/** بطاقة الدمج اليدوي: رأس + شريط تقدم + قائمة تحقق المراحل + أزرار سياقية. */
+export function buildMergeCard(
+  notice: MergeNotice,
+  options?: MergeCardOptions
+): APIMessageTopLevelComponent[] {
+  const title = mergeCardTitle(notice);
+  const labelLines: string[] = [];
+  if (TERMINAL_STATUSES.includes(notice.status) && options?.requesterId) {
+    labelLines.push(`<@${options.requesterId}>`);
+  }
+  if (notice.label) labelLines.push(notice.label);
+
+  const body: Raw[] = [
+    headerBlock(title, labelLines, avatarUrl()),
+    separator(2),
+  ];
+
+  if (notice.progress && ACTIVE_STATUSES.includes(notice.status)) {
+    body.push(
+      text(
+        `${progressBar(notice.progress.done, notice.progress.total)} **${notice.progress.done} / ${notice.progress.total}**`
+      )
+    );
+    body.push(separator());
+  }
+
+  if (notice.stage) {
+    body.push(text(mergeChecklistLines(notice).join("\n")));
+  }
+
+  const detail = notice.detail?.trim();
+  if (detail) {
+    body.push(separator());
+    body.push(text(detail.slice(0, 1000)));
+  }
+
+  if (notice.status === "completed" && notice.driveUrl) {
+    body.push(separator());
+    body.push(text(`**رابط الفصل:** ${notice.driveUrl}`));
+  }
+
+  const rows = mergeActionRows(notice);
+  if (rows.length) {
+    body.push(separator());
+    body.push(...rows);
+  }
+
+  return [
+    raw({ type: 17, accent_color: ACCENTS[notice.status], components: body }),
+  ];
+}
+
+/** لوحة طلب مدخلات الدمج حين يُنفَّذ /دمج بدون ملف ولا رابط. */
+export function buildMergePromptComponents(
+  avatar: string | null = avatarUrl()
+): APIMessageTopLevelComponent[] {
+  const body: Raw[] = [
+    headerBlock("## 🧩 أرسل صور الفصل للدمج", [], avatar),
+    separator(2),
+    text(
+      [
+        "**1.** أرفق ملف **ZIP** أو **CBZ** يحتوي صور الفصل، أو انسخ رابط مجلد Google Drive الذي يحتويها.",
+        "**2.** أرسلها هنا كرسالة عادية خلال دقيقتين.",
+        "**3.** سيبدأ ZEUS الدمج فورًا وستتابع كل خطوة في بطاقة حية حتى رابط الفصل الجاهز.",
+      ].join("\n")
+    ),
+    separator(),
+    text("-# ZEUS"),
+  ];
+  return [raw({ type: 17, accent_color: GOLD, components: body })];
+}
+
+function mergeCardPayload(notice: MergeNotice, options?: MergeCardOptions) {
+  return {
+    flags: MessageFlags.IsComponentsV2 as MessageFlags.IsComponentsV2,
+    allowedMentions: options?.requesterId
+      ? { users: [options.requesterId] }
+      : undefined,
+    components: buildMergeCard(notice, options),
   };
 }
 
@@ -519,6 +754,21 @@ function clearPrompt(key: string) {
   pendingChapterPrompts.delete(key);
 }
 
+/** طلبات مدخلات الدمج المعلقة — مستقلة تمامًا عن طلبات روابط الفصول. */
+const pendingMergePrompts = new Map<string, PendingPrompt>();
+
+function clearMergePrompt(key: string) {
+  const pending = pendingMergePrompts.get(key);
+  if (pending) clearTimeout(pending.timer);
+  pendingMergePrompts.delete(key);
+}
+
+/** عمليات الدمج الجارية في هذه العملية — لزر الإلغاء في البطاقة. */
+const activeMergeJobs = new Map<
+  string,
+  { requesterId: string; token: ManualMergeCancelToken }
+>();
+
 async function editMessageContent(
   channelId: string,
   messageId: string,
@@ -528,6 +778,309 @@ async function editMessageContent(
   const found = await client.channels.fetch(channelId);
   if (!found?.isTextBased() || !("messages" in found)) return;
   await found.messages.edit(messageId, body as never);
+}
+
+// ============================================================
+// تدفق أمر الدمج اليدوي /دمج
+// ============================================================
+
+/**
+ * هدف بطاقة الدمج: كل استدعاء show يرسم في نفس الرسالة دائمًا.
+ * الرسم الأول عبر ردّ التفاعل ثم كل التحديثات عبر رسالة القناة نفسها،
+ * حتى لا يتوقف التحديث بانتهاء صلاحية توكن التفاعل (15 دقيقة) في العمليات الطويلة.
+ */
+type MergeCardTarget = {
+  show: (notice: MergeNotice, options?: MergeCardOptions) => Promise<string>;
+};
+
+function mergeInteractionCard(interaction: any): MergeCardTarget {
+  let messageId: string | null = null;
+  const channelId = interaction.channelId as string;
+  return {
+    show: async (notice, options) => {
+      if (!messageId) {
+        const sent = await interaction.editReply(mergeCardPayload(notice, options));
+        messageId = String(sent.id);
+        return messageId;
+      }
+      await editMessageContent(channelId, messageId, mergeCardPayload(notice, options));
+      return messageId;
+    },
+  };
+}
+
+function mergeMessageCard(message: any): MergeCardTarget {
+  let sent: any = null;
+  return {
+    show: async (notice, options) => {
+      if (!sent) sent = await message.reply(mergeCardPayload(notice, options));
+      else await sent.edit(mergeCardPayload(notice, options));
+      return sent.id;
+    },
+  };
+}
+
+/**
+ * تحديث مخنوق (كل 2.5 ثانية) احترامًا لحدود معدل Discord، مع إجبار التحديث
+ * عند نهاية كل مرحلة أو تغيّرها — نفس أسلوب بطاقة الفصول.
+ */
+function createMergeProgressPoster(target: MergeCardTarget) {
+  let lastKey = "";
+  let lastAt = 0;
+  return async (notice: MergeNotice, force = false) => {
+    const key = `${notice.status}|${notice.stage ?? ""}|${
+      notice.progress ? `${notice.progress.done}/${notice.progress.total}` : ""
+    }`;
+    const isPhaseEnd = notice.progress
+      ? notice.progress.done >= notice.progress.total
+      : false;
+    const nowMs = Date.now();
+    if (!force && !isPhaseEnd && (key === lastKey || nowMs - lastAt < 2500)) return;
+    lastKey = key;
+    lastAt = nowMs;
+    try {
+      await target.show(notice);
+    } catch {
+      /* فشل تحديث البطاقة لا يُفشل الدمج */
+    }
+  };
+}
+
+type MergeRequest =
+  | { type: "zip"; url: string; name: string; zipPath?: string }
+  | { type: "drive"; id: string };
+
+/** يشغّل عملية دمج كاملة أمام بطاقة حية واحدة من أول فحص إلى رابط النتيجة. */
+async function startManualMerge(
+  target: MergeCardTarget,
+  request: MergeRequest,
+  requester: Requester
+) {
+  const mergeId = randomUUID();
+  const token: ManualMergeCancelToken = { cancelled: false };
+  let stage: MergeStage = "validate";
+  let label: string | null = null;
+  let imageCount: number | undefined;
+  let mergedCount: number | undefined;
+  activeMergeJobs.set(mergeId, { requesterId: requester.id, token });
+  const post = createMergeProgressPoster(target);
+  let attachDir: string | null = null;
+  try {
+    await target.show({ mergeId, status: "pending", stage });
+
+    let effectiveRequest: MergeRequest = request;
+    if (request.type === "zip") {
+      // تنزيل مرفق Discord إلى القرص عبر بث مباشر (لا شيء في الذاكرة).
+      stage = "fetch";
+      await post(
+        { mergeId, status: "downloading", stage, progress: { done: 0, total: 1 } },
+        true
+      );
+      attachDir = await mkdtemp(path.join(tmpdir(), "merge-attach-"));
+      const zipPath = path.join(attachDir, "attachment-archive");
+      await downloadHttpsToPath(request.url, zipPath, 250 * 1024 * 1024);
+      await post(
+        { mergeId, status: "downloading", stage, progress: { done: 1, total: 1 } },
+        true
+      );
+      effectiveRequest = { type: "zip", url: "", name: request.name, zipPath };
+    }
+
+    const result = await runManualMerge(
+      effectiveRequest.type === "zip"
+        ? { kind: "zip", zipPath: effectiveRequest.zipPath!, title: effectiveRequest.name }
+        : { kind: "drive", id: effectiveRequest.id },
+      {
+        onEvent: async event => {
+          if (event.phase === "fetch") {
+            stage = "fetch";
+            await post({
+              mergeId,
+              status: "downloading",
+              stage,
+              progress: { done: event.done, total: event.total },
+            });
+          } else if (event.phase === "merge") {
+            stage = "merge";
+            await post({
+              mergeId,
+              status: "downloading",
+              stage,
+              progress: { done: event.done, total: event.total },
+            });
+          } else {
+            stage = "upload";
+            await post({
+              mergeId,
+              status: "uploading",
+              stage,
+              progress: { done: event.done, total: event.total },
+            });
+          }
+        },
+        isCancelled: () => token.cancelled,
+      }
+    );
+    imageCount = result.imageCount;
+    mergedCount = result.mergedCount;
+    label = `**${result.title}** — ${result.mergedCount} صورة طويلة من ${result.imageCount} صورة`;
+    await target.show(
+      {
+        mergeId,
+        status: "completed",
+        stage: "upload",
+        mergedCount: result.mergedCount,
+        imageCount: result.imageCount,
+        label,
+        driveUrl: result.driveUrl,
+      },
+      { requesterId: requester.id }
+    );
+  } catch (error) {
+    if (error instanceof ManualMergeCancelled) {
+      await target
+        .show(
+          {
+            mergeId,
+            status: "cancelled",
+            stage,
+            label,
+            imageCount,
+            mergedCount,
+            detail: "أوقفتَ هذه العملية من زر الإلغاء.",
+          },
+          { requesterId: requester.id }
+        )
+        .catch(() => undefined);
+      return;
+    }
+    const detail =
+      error instanceof GoogleDriveError || error instanceof Error
+        ? error.message
+        : "حدث خطأ غير معروف أثناء الدمج.";
+    console.warn("[Discord] Manual merge failed", error);
+    await target
+      .show(
+        { mergeId, status: "failed", stage, label, imageCount, mergedCount, detail },
+        { requesterId: requester.id }
+      )
+      .catch(() => undefined);
+  } finally {
+    if (attachDir) {
+      await rm(attachDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+    activeMergeJobs.delete(mergeId);
+  }
+}
+
+async function replyMerge(interaction: any) {
+  await interaction.deferReply();
+  try {
+    if (!(await hasRequestAccess(interaction))) {
+      await interaction.editReply(
+        mergeCardPayload({
+          status: "failed",
+          title: "🔒 لا تملك صلاحية",
+          detail: "هذا الأمر متاح لأدوار محددة فقط.",
+        })
+      );
+      return;
+    }
+    const attachment = interaction.options.getAttachment("الملف", false);
+    const rawUrl = interaction.options.getString("الرابط", false)?.trim();
+    const requester: Requester = {
+      id: interaction.user.id,
+      username: interaction.user.username,
+      channelId: interaction.channelId,
+    };
+
+    // بلا ملف ولا رابط: لوحة طلب المدخلات بنفس نمط /فصل التفاعلي.
+    if (!attachment && !rawUrl) {
+      const key = `${interaction.channelId}:${interaction.user.id}`;
+      clearMergePrompt(key);
+      const promptMessage = await interaction.editReply(
+        panelPayload(buildMergePromptComponents())
+      );
+      const timer = setTimeout(() => {
+        pendingMergePrompts.delete(key);
+        void editMessageContent(
+          interaction.channelId,
+          promptMessage.id,
+          mergeCardPayload({
+            status: "info",
+            title: "⏳ انتهت مهلة الإرسال",
+            detail: "نفّذ /دمج مرة أخرى ثم أرفق ملف ZIP/CBZ أو أرسل رابط مجلد Drive.",
+          })
+        ).catch(() => undefined);
+      }, PROMPT_TIMEOUT_MS);
+      timer.unref?.();
+      pendingMergePrompts.set(key, { timer });
+      return;
+    }
+
+    if (attachment) {
+      if (!isSupportedArchiveName(attachment.name)) {
+        await interaction.editReply(
+          mergeCardPayload({
+            status: "failed",
+            title: "❌ الملف المرفق غير مدعوم",
+            detail: "المدعوم: ملف ZIP أو CBZ يحتوي صور الفصل، أو رابط مجلد Google Drive.",
+          })
+        );
+        return;
+      }
+      await startManualMerge(
+        mergeInteractionCard(interaction),
+        { type: "zip", url: attachment.url, name: attachment.name ?? "أرشيف" },
+        requester
+      );
+      return;
+    }
+
+    const link = parseDriveLink(rawUrl!);
+    if (!link) {
+      await interaction.editReply(
+        mergeCardPayload({
+          status: "failed",
+          title: "❌ الرابط غير مدعوم",
+          detail:
+            "أرسل رابط مجلد Google Drive يحتوي صور الفصل (المشاركة: أي شخص لديه الرابط)، أو أعد المحاولة مع إرفاق ملف ZIP/CBZ.",
+        })
+      );
+      return;
+    }
+    await startManualMerge(
+      mergeInteractionCard(interaction),
+      { type: "drive", id: link.id },
+      requester
+    );
+  } catch (error) {
+    const detail =
+      error instanceof GoogleDriveError
+        ? error.message
+        : "تعذر بدء الدمج، تحقق من المدخلات ثم أعد المحاولة.";
+    console.warn("[Discord] /دمج failed", error);
+    await interaction
+      .editReply(
+        mergeCardPayload({ status: "failed", title: "❌ تعذر بدء الدمج", detail })
+      )
+      .catch(() => undefined);
+  }
+}
+
+async function handleMergeCancelButton(interaction: any) {
+  await interaction.deferUpdate();
+  const mergeId = interaction.customId.split(":")[2];
+  const entry = activeMergeJobs.get(mergeId);
+  if (!entry) return;
+  if (
+    !isOwner(interaction.user.id) &&
+    entry.requesterId !== interaction.user.id
+  )
+    return;
+  // يوقف خط الدمج عند أقرب نقطة فحص، والبطاقة تُحدَّث إلى الحالة النهائية
+  // من مسار الدمج نفسه — بلا رسالة ثانية ولا تعارض كتابة.
+  entry.token.cancelled = true;
 }
 
 async function replyHelp(interaction: any) {
@@ -590,6 +1143,8 @@ async function replyChapter(interaction: any) {
 }
 
 async function handleButton(interaction: any) {
+  if (interaction.customId.startsWith("merge:cancel:"))
+    return void handleMergeCancelButton(interaction);
   if (!interaction.customId.startsWith("job:cancel:")) return;
   await interaction.deferUpdate();
   const job = await getChapterJob(interaction.customId.split(":")[2]);
@@ -702,6 +1257,8 @@ export async function startDiscordBot() {
       if (interaction.commandName === "مساعدة") await replyHelp(interaction);
       else if (interaction.commandName === "فصل")
         await replyChapter(interaction);
+      else if (interaction.commandName === "دمج")
+        await replyMerge(interaction);
     } catch (error) {
       console.error("[Discord] Interaction handler failed", error);
       if (interaction.isRepliable()) {
@@ -720,6 +1277,49 @@ export async function startDiscordBot() {
   client.on(Events.MessageCreate, async message => {
     if (message.author.bot || !message.guild) return;
     const key = `${message.channelId}:${message.author.id}`;
+    // أولاً: طلبات الدمج المعلقة — مرفق ZIP/CBZ أو رابط Drive في رسالة عادية.
+    if (pendingMergePrompts.has(key)) {
+      const archive = Array.from(message.attachments.values()).find(item =>
+        isSupportedArchiveName(item.name)
+      );
+      const driveLink = message.content.trim()
+        ? parseDriveLink(message.content.trim())
+        : null;
+      if (archive || driveLink) {
+        clearMergePrompt(key);
+        const card = mergeMessageCard(message);
+        const requester: Requester = {
+          id: message.author.id,
+          username: message.author.username,
+          channelId: message.channelId,
+        };
+        try {
+          if (archive) {
+            await startManualMerge(
+              card,
+              { type: "zip", url: archive.url, name: archive.name ?? "أرشيف" },
+              requester
+            );
+          } else {
+            await startManualMerge(
+              card,
+              { type: "drive", id: driveLink!.id },
+              requester
+            );
+          }
+        } catch (error) {
+          const detail =
+            error instanceof GoogleDriveError || error instanceof Error
+              ? error.message
+              : "تعذر بدء الدمج.";
+          await card
+            .show({ status: "failed", title: "❌ تعذر بدء الدمج", detail })
+            .catch(() => undefined);
+        }
+        return; // الرسالة استُهلكت لعملية الدمج.
+      }
+      // ليست مدخل دمج صالحًا — يبقى منطق طلب الفصل العادي يعمل إن وُجد.
+    }
     if (!pendingChapterPrompts.has(key)) return;
     const content = message.content.trim();
     if (!/^https:\/\//i.test(content)) return;

@@ -1,6 +1,7 @@
-import { createReadStream } from "node:fs";
+import { createReadStream, createWriteStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { isIP } from "node:net";
 import { google } from "googleapis";
 import { ENV } from "../_core/env";
@@ -181,5 +182,98 @@ export class GoogleDriveClient {
       media: { mimeType: contentType, body: stream },
       fields: "id",
     });
+  }
+
+  /** يقرأ بيانات ملف أو مجلد Drive بالمعرّف (الاسم والنوع والحجم). */
+  async getFileMeta(fileId: string): Promise<{ id: string; name: string; mimeType: string; size: number | null }> {
+    try {
+      const meta = await this.drive.files.get({
+        fileId,
+        fields: "id,name,mimeType,size",
+        supportsAllDrives: true,
+      });
+      return {
+        id: meta.data.id ?? fileId,
+        name: meta.data.name ?? "ملف",
+        mimeType: meta.data.mimeType ?? "",
+        size: meta.data.size ? Number(meta.data.size) : null,
+      };
+    } catch (error) {
+      const status = (error as { code?: number; response?: { status?: number } })?.response?.status
+        ?? (error as { code?: number }).code;
+      if (status === 404 || status === 403) {
+        throw new GoogleDriveError(
+          "تعذر الوصول إلى الملف أو المجلد على Google Drive. تأكد أن الرابط صحيح وأن المشاركة مضبوطة على «أي شخص لديه الرابط»."
+        );
+      }
+      throw new GoogleDriveError(`تعذر قراءة بيانات العنصر من Google Drive: ${error instanceof Error ? error.message : "خطأ غير معروف"}`);
+    }
+  }
+
+  /** يسرد ملفات مجلد Drive (غير المحذوفة وبلا مجلدات فرعية) مع ترقيم صفحات كامل. */
+  async listFolderFiles(folderId: string): Promise<Array<{ id: string; name: string; mimeType: string; size: number | null }>> {
+    const files: Array<{ id: string; name: string; mimeType: string; size: number | null }> = [];
+    let pageToken: string | undefined;
+    try {
+      do {
+        const page = await this.drive.files.list({
+          q: `'${escapeDriveQuery(folderId)}' in parents and trashed = false and mimeType != '${FOLDER_MIME_TYPE}'`,
+          fields: "nextPageToken,files(id,name,mimeType,size)",
+          pageSize: 1000,
+          pageToken,
+          supportsAllDrives: true,
+          includeItemsFromAllDrives: true,
+        });
+        for (const file of page.data.files ?? []) {
+          if (!file.id) continue;
+          files.push({
+            id: file.id,
+            name: file.name ?? "ملف",
+            mimeType: file.mimeType ?? "",
+            size: file.size ? Number(file.size) : null,
+          });
+        }
+        pageToken = page.data.nextPageToken ?? undefined;
+      } while (pageToken);
+    } catch (error) {
+      const status = (error as { code?: number; response?: { status?: number } })?.response?.status
+        ?? (error as { code?: number }).code;
+      if (status === 404 || status === 403) {
+        throw new GoogleDriveError(
+          "تعذر الوصول إلى المجلد على Google Drive. تأكد أن الرابط صحيح وأن مشاركة المجلد مضبوطة على «أي شخص لديه الرابط»."
+        );
+      }
+      throw new GoogleDriveError(`تعذر قراءة محتويات المجلد من Google Drive: ${error instanceof Error ? error.message : "خطأ غير معروف"}`);
+    }
+    return files;
+  }
+
+  /**
+   * ينزّل ملفًا من Drive إلى ملف على القرص عبر بث مباشر دون تحميله في الذاكرة،
+   * مع سقف حجم صريح لكل ملف.
+   */
+  async downloadFileToPath(fileId: string, targetPath: string, maxBytes: number): Promise<void> {
+    let responseStream: Readable;
+    try {
+      const response = await this.drive.files.get(
+        { fileId, alt: "media", supportsAllDrives: true },
+        { responseType: "stream" }
+      );
+      responseStream = response.data as Readable;
+    } catch (error) {
+      const status = (error as { code?: number; response?: { status?: number } })?.response?.status
+        ?? (error as { code?: number }).code;
+      if (status === 404 || status === 403) {
+        throw new GoogleDriveError(
+          "تعذر تنزيل الملف من Google Drive. تأكد أن المشاركة مضبوطة على «أي شخص لديه الرابط»."
+        );
+      }
+      throw new GoogleDriveError(`تعذر تنزيل الملف من Google Drive: ${error instanceof Error ? error.message : "خطأ غير معروف"}`);
+    }
+    await pipeline(
+      responseStream,
+      countBytes(maxBytes),
+      createWriteStream(targetPath)
+    );
   }
 }

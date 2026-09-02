@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   buildHelpComponents,
   buildJobCard,
+  buildMergeCard,
+  buildMergePromptComponents,
   buildPromptComponents,
   getRegisteredDiscordCommands,
   noticeFromJob,
@@ -54,7 +56,7 @@ function collectThumbnails(components: unknown[]): ComponentShape[] {
 describe("Discord ZEUS chapter experience", () => {
   it("registers Arabic-only commands", () => {
     const names = getRegisteredDiscordCommands().map(command => command.name);
-    expect(names).toEqual(["فصل", "مساعدة"]);
+    expect(names).toEqual(["فصل", "دمج", "مساعدة"]);
   });
 
   it("builds a gold Components V2 card with a live progress bar and pipeline checklist", () => {
@@ -163,7 +165,7 @@ describe("Discord ZEUS chapter experience", () => {
     expect(texts).not.toContain("▸");
   });
 
-  it("help panel explains the bot and both commands with the ZEUS signature", () => {
+  it("help panel explains the bot and all commands with the ZEUS signature", () => {
     const texts = collectTexts(
       buildHelpComponents(
         "https://cdn.discordapp.com/avatars/1/x.png"
@@ -171,6 +173,8 @@ describe("Discord ZEUS chapter experience", () => {
     ).join("\n");
     expect(texts).toContain("## 📖 ZEUS");
     expect(texts).toContain("### 🔹 /فصل");
+    expect(texts).toContain("### 🔹 /دمج");
+    expect(texts).toContain("ZIP");
     expect(texts).toContain("### 🔹 /مساعدة");
     expect(texts).toContain("-# ZEUS");
     expect(
@@ -190,6 +194,91 @@ describe("Discord ZEUS chapter experience", () => {
     expect(texts).toContain("خلال دقيقتين");
   });
 
+  it("merge prompt panel asks for a ZIP/CBZ or Drive folder link", () => {
+    const texts = collectTexts(
+      buildMergePromptComponents(null) as unknown as unknown[]
+    ).join("\n");
+    expect(texts).toContain("## 🧩 أرسل صور الفصل للدمج");
+    expect(texts).toContain("ZIP");
+    expect(texts).toContain("Google Drive");
+    expect(texts).toContain("خلال دقيقتين");
+  });
+
+  it("merge card shows the four-stage checklist with live progress and a cancel button", () => {
+    const [container] = buildMergeCard({
+      mergeId: "merge-1",
+      status: "downloading",
+      stage: "merge",
+      label: "**الفصل 12**",
+      progress: { done: 2, total: 5 },
+    }) as unknown as [ComponentShape];
+
+    expect(container.type).toBe(17);
+    expect(container.accent_color).toBe(0xd4af37);
+    const texts = collectTexts([container]).join("\n");
+    expect(texts).toContain("✓ فحص المدخلات");
+    expect(texts).toContain("✓ جلب الصور");
+    expect(texts).toContain("▸ دمج الصفحات — 2/5");
+    expect(texts).toContain("· رفع الصور إلى Drive");
+    const cancelButtons = collectButtons([container]).filter(
+      button => button.custom_id === "merge:cancel:merge-1"
+    );
+    expect(cancelButtons).toHaveLength(1);
+  });
+
+  it("finalizes the merge with one green card: link, open button, and no cancel", () => {
+    const driveUrl = "https://drive.google.com/drive/folders/merge-test";
+    const [container] = buildMergeCard(
+      {
+        mergeId: "merge-2",
+        status: "completed",
+        stage: "upload",
+        label: "**الفصل 12** — 3 صورة طويلة من 40 صورة",
+        mergedCount: 3,
+        imageCount: 40,
+        driveUrl,
+      },
+      { requesterId: "656783724662226963" }
+    ) as unknown as [ComponentShape];
+
+    expect(container.accent_color).toBe(0x57f287);
+    const texts = collectTexts([container]).join("\n");
+    expect(texts).toContain("✅ اكتمل الدمج");
+    expect(texts).toContain("✓ رفع الصور إلى Drive");
+    expect(texts).toContain(`<@656783724662226963>`);
+    expect(texts).toContain(`**رابط الفصل:** ${driveUrl}`);
+    const linkButtons = collectButtons([container]).filter(
+      button => button.style === 5 && button.url === driveUrl
+    );
+    expect(linkButtons).toHaveLength(1);
+    expect(
+      collectButtons([container]).some(button =>
+        button.custom_id?.startsWith("merge:cancel:")
+      )
+    ).toBe(false);
+  });
+
+  it("renders merge failure and cancellation without leading the user on", () => {
+    const [failed] = buildMergeCard({
+      status: "failed",
+      stage: "fetch",
+      detail: "لم يُعثر على صور داخل الأرشيف.",
+    }) as unknown as [ComponentShape];
+    expect(failed.accent_color).toBe(0xed4245);
+    const failedTexts = collectTexts([failed]).join("\n");
+    expect(failedTexts).toContain("❌ فشل الدمج");
+    expect(failedTexts).toContain("✗ جلب الصور");
+
+    const [cancelled] = buildMergeCard({
+      status: "cancelled",
+      stage: "upload",
+    }) as unknown as [ComponentShape];
+    expect(cancelled.accent_color).toBe(0x95a5a6);
+    const cancelledTexts = collectTexts([cancelled]).join("\n");
+    expect(cancelledTexts).toContain("🚫 أُلغي الدمج");
+    expect(cancelledTexts).toContain("⊘ رفع الصور إلى Drive");
+  });
+
   it("keeps every card free of the removed boilerplate and old branding", () => {
     const samples: unknown[] = [
       ...buildJobCard({ status: "pending", stage: "validate", jobId: "j" }),
@@ -202,6 +291,20 @@ describe("Discord ZEUS chapter experience", () => {
       ...buildJobCard({ status: "failed", stage: "chapter", detail: "خطأ" }),
       ...buildHelpComponents(null),
       ...buildPromptComponents(null),
+      ...buildMergeCard({
+        status: "downloading",
+        stage: "merge",
+        mergeId: "m",
+        progress: { done: 1, total: 4 },
+      }),
+      ...buildMergeCard({
+        status: "completed",
+        driveUrl: "https://drive.google.com/x",
+        mergedCount: 2,
+        imageCount: 10,
+      }),
+      ...buildMergeCard({ status: "failed", stage: "fetch", detail: "خطأ" }),
+      ...buildMergePromptComponents(null),
     ];
     const texts = collectTexts(samples).join("\n");
     expect(texts).not.toContain("الخطوة التالية");
@@ -315,9 +418,44 @@ describe("Discord ZEUS chapter experience", () => {
         { status: "cancelled" as const, stage: "download" as const },
         { status: "info" as const, title: "عنوان", detail: "تفصيل" },
       ].map(notice => buildJobCard(notice)),
+      ...[
+        {
+          status: "pending" as const,
+          stage: "validate" as const,
+          mergeId: "m1",
+        },
+        {
+          status: "downloading" as const,
+          stage: "fetch" as const,
+          mergeId: "m1",
+          progress: { done: 2, total: 9 },
+        },
+        {
+          status: "downloading" as const,
+          stage: "merge" as const,
+          mergeId: "m1",
+          progress: { done: 1, total: 3 },
+        },
+        {
+          status: "uploading" as const,
+          stage: "upload" as const,
+          mergeId: "m1",
+          progress: { done: 2, total: 3 },
+        },
+        {
+          status: "completed" as const,
+          driveUrl: "https://drive.google.com/y",
+          mergedCount: 3,
+          imageCount: 22,
+        },
+        { status: "failed" as const, stage: "merge" as const, detail: "خطأ" },
+        { status: "cancelled" as const, stage: "upload" as const },
+        { status: "info" as const, title: "مهلة الإرسال" },
+      ].map(notice => buildMergeCard(notice)),
       buildHelpComponents("https://cdn.discordapp.com/avatars/1/x.png"),
       buildHelpComponents(null),
       buildPromptComponents(null),
+      buildMergePromptComponents(null),
     ];
 
     for (const components of samples) {
