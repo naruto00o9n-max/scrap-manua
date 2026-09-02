@@ -4,10 +4,12 @@ import {
   buildJobCard,
   buildMergeCard,
   buildMergePromptComponents,
+  buildMoveCard,
   buildPromptComponents,
   buildSearchCardComponents,
   buildSearchPageNavRow,
   buildSourcesComponents,
+  foldersCount,
   getRegisteredDiscordCommands,
   noticeFromJob,
   paginateForSelect,
@@ -61,7 +63,19 @@ function collectThumbnails(components: unknown[]): ComponentShape[] {
 describe("Discord ZEUS chapter experience", () => {
   it("registers Arabic-only commands", () => {
     const names = getRegisteredDiscordCommands().map(command => command.name);
-    expect(names).toEqual(["فصل", "دمج", "مواقع", "بحث", "مساعدة"]);
+    expect(names).toEqual(["فصل", "دمج", "مواقع", "بحث", "نقل", "مساعدة"]);
+  });
+
+  it("registers the move command with both folder link options required", () => {
+    const move = getRegisteredDiscordCommands().find(
+      command => command.name === "نقل"
+    );
+    expect(move).toBeTruthy();
+    const options = (move?.options ?? []).map(option => option.name);
+    expect(options).toEqual(["من", "إلى"]);
+    for (const option of move?.options ?? []) {
+      expect(option.required).toBe(true);
+    }
   });
 
   it("never mentions Suwayomi in the registered command descriptions", () => {
@@ -112,6 +126,61 @@ describe("Discord ZEUS chapter experience", () => {
     expect(sitesCount(2)).toBe("موقعين");
     expect(sitesCount(5)).toBe("5 مواقع");
     expect(sitesCount(12)).toBe("12 موقعًا");
+  });
+
+  it("phrases folder counts in Arabic", () => {
+    expect(foldersCount(1)).toBe("مجلد واحد");
+    expect(foldersCount(2)).toBe("مجلدين");
+    expect(foldersCount(7)).toBe("7 مجلدات");
+    expect(foldersCount(25)).toBe("25 مجلدًا");
+  });
+
+  it("builds the move card with live progress and a final open-folder button", () => {
+    const [running] = buildMoveCard({
+      status: "downloading",
+      title: "⏳ جاري النقل",
+      label: "من «One Piece [site.com]» إلى «One Piece» — 5 مجلدات",
+      progress: { done: 3, total: 5 },
+    }) as unknown as [ComponentShape];
+    expect(running.type).toBe(17);
+    expect(running.accent_color).toBe(0xd4af37);
+    const runningTexts = collectTexts([running]).join("\n");
+    expect(runningTexts).toContain("3 / 5");
+    expect(runningTexts).toContain("من «One Piece [site.com]» إلى «One Piece»");
+
+    const driveUrl = "https://drive.google.com/drive/folders/dest";
+    const [done] = buildMoveCard(
+      {
+        status: "completed",
+        title: "✅ تم النقل",
+        label: "تم نقل 5 مجلدات إلى «One Piece» — كل مجلد فصل بصوره.",
+        driveUrl,
+      },
+      { requesterId: "656783724662226963" }
+    ) as unknown as [ComponentShape];
+    expect(done.accent_color).toBe(0x57f287);
+    const doneTexts = collectTexts([done]).join("\n");
+    expect(doneTexts).toContain("✅ تم النقل");
+    expect(doneTexts).toContain(`**رابط المجلد:** ${driveUrl}`);
+    expect(doneTexts).toContain("<@656783724662226963>");
+    const openButtons = collectButtons([done]).filter(
+      button => button.style === 5 && button.url === driveUrl
+    );
+    expect(openButtons).toHaveLength(1);
+    expect(collectButtons([done]).some(button => button.custom_id)).toBe(false);
+  });
+
+  it("lists failed folders on the move card when some transfers error", () => {
+    const [partial] = buildMoveCard({
+      status: "completed",
+      title: "⚠️ اكتمل النقل مع أخطاء",
+      label: "تم نقل 2 من 3 مجلدات إلى «X» — وتعذر نقل الباقي.",
+      detail: "• الفصل 5: تعذر نقل المجلد على Google Drive: خطأ",
+    }) as unknown as [ComponentShape];
+    expect(partial.accent_color).toBe(0x57f287);
+    const texts = collectTexts([partial]).join("\n");
+    expect(texts).toContain("⚠️ اكتمل النقل مع أخطاء");
+    expect(texts).toContain("• الفصل 5");
   });
 
   it("renders pagination info and page nav buttons on the search results card", () => {
@@ -283,6 +352,7 @@ describe("Discord ZEUS chapter experience", () => {
     expect(texts).toContain("### 🔹 /فصل");
     expect(texts).toContain("### 🔹 /دمج");
     expect(texts).toContain("ZIP");
+    expect(texts).toContain("### 🔹 /نقل");
     expect(texts).toContain("### 🔹 /مساعدة");
     expect(texts).toContain("-# ZEUS");
     expect(
@@ -413,6 +483,29 @@ describe("Discord ZEUS chapter experience", () => {
       }),
       ...buildMergeCard({ status: "failed", stage: "fetch", detail: "خطأ" }),
       ...buildMergePromptComponents(null),
+      ...[
+        {
+          status: "pending" as const,
+          title: "⏳ جاري فحص المجلدين",
+        },
+        {
+          status: "downloading" as const,
+          title: "⏳ جاري النقل",
+          label: "من «A» إلى «B» — 5 مجلدات",
+          progress: { done: 2, total: 5 },
+        },
+        {
+          status: "completed" as const,
+          title: "✅ تم النقل",
+          label: "تم نقل 5 مجلدات إلى «B».",
+          driveUrl: "https://drive.google.com/drive/folders/dest",
+        },
+        {
+          status: "failed" as const,
+          title: "❌ روابط غير صالحة",
+          detail: "أرسل رابطَي مجلد Google Drive.",
+        },
+      ].map(notice => buildMoveCard(notice)),
     ];
     const texts = collectTexts(samples).join("\n");
     expect(texts).not.toContain("الخطوة التالية");

@@ -74,13 +74,13 @@ export const appRouter = router({
   }),
   settings: router({
     get: adminProcedure.query(async () => ({
-      googleDriveSharingMode: await getSetting("google_drive_sharing_mode") ?? "link_reader",
+      googleDriveSharingMode: await getSetting("google_drive_sharing_mode") ?? "link_editor",
       googleDriveSharingDomain: await getSetting("google_drive_sharing_domain") ?? "",
       configuration: getIntegrationConfiguration(),
     })),
     setDriveSharing: adminProcedure
       .input(z.object({
-        mode: z.enum(["private", "link_reader", "domain_reader"]),
+        mode: z.enum(["private", "link_reader", "link_editor", "domain_reader"]),
         domain: z.string().trim().max(255).optional(),
       }).superRefine((input, ctx) => {
         if (input.mode === "domain_reader" && !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i.test(input.domain ?? "")) {

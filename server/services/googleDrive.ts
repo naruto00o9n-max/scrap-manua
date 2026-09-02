@@ -16,7 +16,38 @@ const PLATFORM_FOLDER_NAME = "Manga Drive Discord Bot";
 export type DriveSharingPolicy =
   | { mode: "private" }
   | { mode: "link_reader" }
+  | { mode: "link_editor" }
   | { mode: "domain_reader"; domain: string };
+
+/**
+ * يحوّل قيمة إعداد سياسة المشاركة المخزّنة إلى سياسة فعلية.
+ * الافتراضي عند غياب الإعداد هو «أي شخص لديه الرابط — محرر» (طلب المالك:
+ * كل مجلد فصل يُنشأ بصلاحية محرر ليتمكن من تنظيم المجلدات ونقلها)،
+ * بينما تُحترم القيم المخزّنة صراحةً كما هي.
+ */
+export function sharingPolicyFromMode(
+  mode: string | null | undefined,
+  domain: string | null | undefined
+): DriveSharingPolicy {
+  if (mode === "private") return { mode: "private" };
+  if (mode === "domain_reader" && domain)
+    return { mode: "domain_reader", domain };
+  if (mode === "link_editor") return { mode: "link_editor" };
+  if (mode === "link_reader") return { mode: "link_reader" };
+  return { mode: "link_editor" };
+}
+
+/** جسم صلاحية Drive المقابل لسياسة المشاركة (دالة نقية قابلة للاختبار). */
+export function linkPermissionBody(policy: DriveSharingPolicy): {
+  type: "anyone" | "domain";
+  role: "reader" | "editor";
+  domain?: string;
+} {
+  if (policy.mode === "domain_reader")
+    return { type: "domain", role: "reader", domain: policy.domain };
+  if (policy.mode === "link_editor") return { type: "anyone", role: "editor" };
+  return { type: "anyone", role: "reader" };
+}
 
 export class GoogleDriveError extends Error {
   constructor(message: string) {
@@ -126,17 +157,15 @@ export class GoogleDriveClient {
     try {
       await this.drive.permissions.create({
         fileId: folderId,
-        requestBody: policy.mode === "domain_reader"
-          ? { type: "domain", role: "reader", domain: policy.domain }
-          : { type: "anyone", role: "reader" },
+        requestBody: linkPermissionBody(policy),
         fields: "id",
       });
     } catch (error) {
-      throw new GoogleDriveError(`تعذر ضبط مشاركة رابط المجلد للقراءة. تحقق من سياسة Google Drive: ${error instanceof Error ? error.message : "خطأ غير معروف"}`);
+      throw new GoogleDriveError(`تعذر ضبط مشاركة رابط المجلد. تحقق من سياسة Google Drive: ${error instanceof Error ? error.message : "خطأ غير معروف"}`);
     }
   }
 
-  async createChapterFolder(mangaTitle: string, chapterTitle: string, sharing: DriveSharingPolicy = { mode: "link_reader" }) {
+  async createChapterFolder(mangaTitle: string, chapterTitle: string, sharing: DriveSharingPolicy = { mode: "link_editor" }) {
     const platformFolder = await this.ensureFolder("root", PLATFORM_FOLDER_NAME);
     const mangaFolder = await this.ensureFolder(platformFolder.id, mangaTitle);
     const chapterFolder = await this.ensureFolder(mangaFolder.id, chapterTitle);
@@ -201,6 +230,60 @@ export class GoogleDriveClient {
       media: { mimeType: contentType, body: stream },
       fields: "id",
     });
+  }
+
+  /**
+   * يسرد المجلدات الفرعية المباشرة لمجلد Drive (غير المحذوفة) مع ترقيم صفحات كامل.
+   * يُستخدم في أمر النقل لجمع مجلدات الفصول.
+   */
+  async listSubfolders(folderId: string): Promise<Array<{ id: string; name: string }>> {
+    const folders: Array<{ id: string; name: string }> = [];
+    let pageToken: string | undefined;
+    try {
+      do {
+        const page = await this.drive.files.list({
+          q: `'${escapeDriveQuery(folderId)}' in parents and trashed = false and mimeType = '${FOLDER_MIME_TYPE}'`,
+          fields: "nextPageToken,files(id,name)",
+          pageSize: 1000,
+          pageToken,
+          supportsAllDrives: true,
+          includeItemsFromAllDrives: true,
+        });
+        for (const folder of page.data.files ?? []) {
+          if (!folder.id) continue;
+          folders.push({ id: folder.id, name: folder.name ?? "مجلد" });
+        }
+        pageToken = page.data.nextPageToken ?? undefined;
+      } while (pageToken);
+    } catch (error) {
+      const status = (error as { code?: number; response?: { status?: number } })?.response?.status
+        ?? (error as { code?: number }).code;
+      if (status === 404 || status === 403) {
+        throw new GoogleDriveError(
+          "تعذر الوصول إلى المجلد على Google Drive. تأكد أن الرابط صحيح وأن مشاركة المجلد مضبوطة على «أي شخص لديه الرابط»."
+        );
+      }
+      throw new GoogleDriveError(`تعذر قراءة محتويات المجلد من Google Drive: ${error instanceof Error ? error.message : "خطأ غير معروف"}`);
+    }
+    return folders;
+  }
+
+  /**
+   * ينقل عنصرًا من مجلد أب إلى آخر دون تغيير معرّفه، فتبقى روابطه القديمة
+   * ومراجع البوت له تعمل كما هي (النقل في Drive يغيّر الأب فقط).
+   */
+  async moveFolder(fileId: string, fromParentId: string, toParentId: string): Promise<void> {
+    try {
+      await this.drive.files.update({
+        fileId,
+        addParents: toParentId,
+        removeParents: fromParentId,
+        fields: "id,parents",
+        supportsAllDrives: true,
+      });
+    } catch (error) {
+      throw new GoogleDriveError(`تعذر نقل المجلد على Google Drive: ${error instanceof Error ? error.message : "خطأ غير معروف"}`);
+    }
   }
 
   /** يقرأ بيانات ملف أو مجلد Drive بالمعرّف (الاسم والنوع والحجم). */
