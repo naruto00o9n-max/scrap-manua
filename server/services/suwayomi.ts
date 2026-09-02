@@ -32,6 +32,22 @@ export type SuwayomiManga = {
   sourceId: string;
 };
 
+/** تفاصيل العمل الكاملة كما تعيده صفحة العمل في Suwayomi (وصف/مؤلف/حالة/تصنيفات). */
+export type SuwayomiMangaDetails = {
+  id: number;
+  title: string;
+  url: string;
+  realUrl: string | null;
+  thumbnailUrl: string | null;
+  author: string | null;
+  artist: string | null;
+  description: string | null;
+  /** قيمة MangaStatus النصية مثل ONGOING/COMPLETED — قد تكون UNKNOWN. */
+  status: string | null;
+  genre: string[];
+  sourceId: string;
+};
+
 function normalizedUrl(value: string): string {
   const parsed = new URL(value);
   parsed.hash = "";
@@ -199,6 +215,20 @@ export class SuwayomiClient {
       { input: { id: mangaId, fetchManga: true, fetchChapters: true } },
     );
     return result.fetchMangaAndChapters.chapters;
+  }
+
+  /**
+   * يجلب تفاصيل العمل الكاملة (وصف/مؤلف/حالة/تصنيفات/غلاف) من Suwayomi —
+   * نفس طلب صفحة العمل الذي تستخدمه واجهة الويب. فشل هذا الطلب لا يقتل
+   * عرض الفصول أبديًا، لذا يتوقع المستدعي أن يعالج null/الاستثناء برفق.
+   */
+  async fetchMangaDetails(mangaId: number): Promise<SuwayomiMangaDetails> {
+    const result = await this.request<{ fetchMangaDetails: { manga: SuwayomiMangaDetails } }>(
+      `mutation FetchMangaDetails($input: FetchMangaDetailsInput!) { fetchMangaDetails(input: $input) { manga { id title url realUrl thumbnailUrl author artist description status genre sourceId } } }`,
+      { input: { id: mangaId } },
+      20_000,
+    );
+    return result.fetchMangaDetails.manga;
   }
 
   async findOrFetchChapterFromSource(sourceId: string, chapterUrl: string): Promise<SuwayomiChapter | null> {

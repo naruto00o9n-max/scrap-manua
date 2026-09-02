@@ -221,6 +221,8 @@ export type SaveSourceInput = {
   notes?: string | null;
   /** مصدر إضافة السجل: يدوي من اللوحة أو مزامنة تلقائية من Suwayomi. */
   origin?: "manual" | "suwayomi" | null;
+  /** لغة المصدر من إضافة Suwayomi — تُستخدم لتجميع /مواقع حسب اللغة. */
+  lang?: string | null;
 };
 
 function normalizeSource(input: SaveSourceInput, existing?: ContentSource): ContentSource {
@@ -240,6 +242,7 @@ function normalizeSource(input: SaveSourceInput, existing?: ContentSource): Cont
     rejectCaptchaRequired: existing?.rejectCaptchaRequired ?? true,
     notes: input.notes ?? null,
     origin: input.origin ?? existing?.origin ?? "manual",
+    lang: input.lang ?? existing?.lang ?? null,
     createdAt: existing?.createdAt ?? timestamp,
     updatedAt: timestamp,
   };

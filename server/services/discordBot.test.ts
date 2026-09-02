@@ -9,14 +9,21 @@ import {
   buildSearchCardComponents,
   buildSearchPageNavRow,
   buildSourcesComponents,
+  chaptersCount,
   foldersCount,
   getRegisteredDiscordCommands,
+  groupSourcesByLang,
+  languageGroupLabel,
+  mangaStatusAr,
   MAX_MOVE_LINKS,
   moveAccessFailureDetail,
   noticeFromJob,
   paginateForSelect,
   parseDriveFolderLinks,
+  safeMediaUrl,
   sitesCount,
+  SOURCES_GROUP_LIMIT,
+  stripHtmlTags,
 } from "./discordBot";
 
 type ComponentShape = {
@@ -115,13 +122,35 @@ describe("Discord ZEUS chapter experience", () => {
       custom_id: "search:page:s1:prev",
       disabled: true,
     });
-    expect(buttons[1]).toMatchObject({ disabled: true });
+    // زر المؤشر المعطّل يحمل custom_id أيضًا — Discord يرفض أي زر بلا custom_id
+    // بخطأ 50035 BUTTON_COMPONENT_CUSTOM_ID_REQUIRED حتى لو كان معطّلًا.
+    expect(buttons[1]).toMatchObject({
+      type: 2,
+      custom_id: "search:page:s1:stay",
+      disabled: true,
+    });
     expect(buttons[2]).toMatchObject({
       type: 2,
       custom_id: "search:page:s1:next",
       disabled: false,
     });
     expect(buildSearchPageNavRow("cpage", "s2", 0, 1)).toBeNull();
+  });
+
+  it("appends a back button to the nav row even when there is a single page", () => {
+    const nav = buildSearchPageNavRow("cpage", "s3", 0, 1, {
+      label: "عودة إلى النتائج",
+      customId: "search:back:s3",
+    });
+    expect(nav).not.toBeNull();
+    const buttons = (nav as { components: Array<Record<string, unknown>> }).components;
+    // صفحة واحدة بلا أزرار تنقل — زر العودة وحده، ودائمًا بمعرّف.
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0]).toMatchObject({
+      type: 2,
+      label: "عودة إلى النتائج",
+      custom_id: "search:back:s3",
+    });
   });
 
   it("phrases site counts in Arabic", () => {
@@ -805,5 +834,247 @@ describe("Discord ZEUS chapter experience", () => {
     }
 
     expect(problems).toEqual([]);
+  });
+
+  it("gives every button a custom_id or a url (50035 BUTTON_COMPONENT_CUSTOM_ID_REQUIRED guard)", () => {
+    // زر مؤشر الصفحات المعطّل شُيّد ذات مرة بلا custom_id فرُفضت الرسالة
+    // كلها على Discord بخطأ 50035 وتوقف الترقيم واختفى نصف البطاقة.
+    const searchNotices = [
+      { state: "results" as const, query: "q", resultCount: 63, failedCount: 0, page: 2, totalPages: 3, matches: [{ title: "T", sourceName: "S", lang: "en" }] },
+      { state: "availability" as const, query: "q", chapterNumber: 3, anyAvailable: true, availability: [{ ok: true, sourceName: "S", title: "T", detail: null }] },
+      { state: "chapters" as const, mangaTitle: "M", sourceName: "S", totalChapters: 60, page: 1, totalPages: 3, thumbnailUrl: null, author: null, artist: null, statusText: null, genres: [], description: null },
+    ];
+    const samples: unknown[][] = [
+      buildJobCard({ status: "downloading", stage: "download", jobId: "j1", progress: { done: 1, total: 5 } }),
+      buildMergeCard({ status: "downloading", stage: "merge", mergeId: "m1", progress: { done: 1, total: 5 } }),
+      // بطاقة النقل أثناء العمل بلا أزرار — عيّنة المكتمل تحمل زر فتح بالرابط.
+      buildMoveCard({
+        status: "completed",
+        title: "✅ تم النقل",
+        driveUrl: "https://drive.google.com/drive/folders/dest",
+      }),
+      ...searchNotices.map((notice, index) =>
+        buildSearchCardComponents(
+          notice,
+          { customId: `search:pick:sg${index}`, placeholder: "اختر…", options: [{ label: "L", value: "0" }] },
+          null,
+          buildSearchPageNavRow(
+            index === 2 ? "cpage" : "page",
+            "sg",
+            1,
+            3,
+            index === 2 ? { label: "عودة إلى النتائج", customId: "search:back:sg" } : undefined
+          )
+        )
+      ),
+      // صفحة واحدة: زر العودة وحده في الصف — يجب أن يبقى بمعرّف.
+      buildSearchCardComponents(
+        { state: "chapters" as const, mangaTitle: "M", sourceName: "S", totalChapters: 5, page: 1, totalPages: 1 },
+        { customId: "search:chap:sg9", placeholder: "اختر…", options: [{ label: "L", value: "0" }] },
+        null,
+        buildSearchPageNavRow("cpage", "sg9", 0, 1, { label: "عودة إلى النتائج", customId: "search:back:sg9" })
+      ),
+    ];
+    for (const components of samples) {
+      const buttons = collectButtons(components as ComponentShape[]);
+      expect(buttons.length).toBeGreaterThan(0);
+      for (const button of buttons) {
+        expect(button.custom_id || button.url).toBeTruthy();
+      }
+    }
+  });
+
+  it("phrases chapter counts, statuses, and cleans html summaries", () => {
+    expect(chaptersCount(1)).toBe("فصل واحد");
+    expect(chaptersCount(2)).toBe("فصلان");
+    expect(chaptersCount(7)).toBe("7 فصول");
+    expect(chaptersCount(180)).toBe("180 فصلًا");
+    expect(mangaStatusAr("ONGOING")).toBe("مستمرة");
+    expect(mangaStatusAr("COMPLETED")).toBe("مكتملة");
+    expect(mangaStatusAr("CANCELLED")).toBe("ملغاة");
+    expect(mangaStatusAr("HIATUS")).toBe("متوقفة مؤقتًا");
+    expect(mangaStatusAr("UNKNOWN")).toBeNull();
+    expect(mangaStatusAr(null)).toBeNull();
+    expect(stripHtmlTags("<p>Hi<br>there</p>  <b>bold</b>")).toBe("Hi\nthere bold");
+    expect(safeMediaUrl("https://ok.com/x.jpg")).toBe("https://ok.com/x.jpg");
+    expect(safeMediaUrl("http://insecure.com/x.jpg")).toBeNull();
+    expect(safeMediaUrl("javascript:alert(1)")).toBeNull();
+    expect(safeMediaUrl(null)).toBeNull();
+  });
+
+  it("renders the manga page with cover, ordered summary, and total chapters only", () => {
+    const [container] = buildSearchCardComponents(
+      {
+        state: "chapters",
+        mangaTitle: "Solo Leveling",
+        sourceName: "MangaSwat",
+        totalChapters: 180,
+        page: 1,
+        totalPages: 8,
+        thumbnailUrl: "https://example.com/cover.jpg",
+        author: "Chugong",
+        statusText: "مستمرة",
+        genres: ["أكشن", "فانتازيا"],
+        description: "قصة سونغ جين وو…",
+      },
+      {
+        customId: "search:chap:s1",
+        placeholder: "اختر فصلًا…",
+        options: [{ label: "فصل 180", value: "0" }],
+      },
+      null,
+      buildSearchPageNavRow("cpage", "s1", 0, 8, {
+        label: "عودة إلى النتائج",
+        customId: "search:back:s1",
+      })
+    ) as unknown as [ComponentShape];
+
+    expect(container.type).toBe(17);
+    const texts = collectTexts([container]).join("\n");
+    // العنوان في رأس البطاقة مع سطر الموقع.
+    expect(texts).toContain("## Solo Leveling");
+    expect(texts).toContain("الموقع: **MangaSwat**");
+    // التفاصيل مرتبة: القصة ثم المؤلف ثم الحالة ثم التصنيفات.
+    expect(texts).toContain("📖 **القصة:** قصة سونغ جين وو…");
+    expect(texts).toContain("✍️ **المؤلف:** Chugong");
+    expect(texts).toContain("📊 **الحالة:** مستمرة");
+    expect(texts).toContain("🏷️ **التصنيفات:** أكشن، فانتازيا");
+    // الفصول ملخصًا بالعدد الكلي فقط.
+    expect(texts).toContain("📚 **عدد الفصول: 180 فصلًا**");
+    expect(texts).toContain("الصفحة 1 من 8");
+    // غلاف العمل في رأس القسم بدل صورة البوت.
+    const header = container.components![0] as ComponentShape;
+    expect(header.accessory).toMatchObject({
+      media: { url: "https://example.com/cover.jpg" },
+    });
+    // زر العودة موجود داخل البطاقة بمعرّفه.
+    const back = collectButtons([container]).find(
+      button => button.custom_id === "search:back:s1"
+    );
+    expect(back).toBeTruthy();
+  });
+
+  it("falls back gracefully when the cover is missing or unsafe and details are absent", () => {
+    const [container] = buildSearchCardComponents(
+      {
+        state: "chapters",
+        mangaTitle: "X",
+        sourceName: "S",
+        totalChapters: 3,
+        page: 1,
+        totalPages: 1,
+        thumbnailUrl: "http://insecure.com/x.jpg",
+        author: null,
+        artist: null,
+        statusText: null,
+        genres: [],
+        description: null,
+      },
+      {
+        customId: "search:chap:s2",
+        placeholder: "اختر فصلًا…",
+        options: [{ label: "فصل 3", value: "0" }],
+      },
+      null,
+      buildSearchPageNavRow("cpage", "s2", 0, 1, {
+        label: "عودة إلى النتائج",
+        customId: "search:back:s2",
+      })
+    ) as unknown as [ComponentShape];
+
+    // صورة غير آمنة + لا صورة بوت في الاختبار → لا accessory إطلاقًا.
+    const header = container.components![0] as ComponentShape;
+    expect(header.accessory).toBeUndefined();
+    const texts = collectTexts([container]).join("\n");
+    expect(texts).toContain("عدد الفصول: 3 فصول");
+    // لا سطور تفاصيل فارغة.
+    expect(texts).not.toContain("القصة:");
+    expect(texts).not.toContain("المؤلف:");
+  });
+
+  it("groups /مواقع sources into ordered language sections with clear separators", () => {
+    const source = (id: number, name: string, lang: string | null) => ({
+      id,
+      name,
+      hostname: `${name.toLowerCase()}.com`,
+      baseUrl: `https://${name.toLowerCase()}.com`,
+      suwayomiSourceId: `src-${id}`,
+      extensionPackage: `pkg-${id}`,
+      extensionName: name,
+      status: "active" as const,
+      documentedIntegrationUrl: null,
+      allowDirectChapterLookup: true,
+      rejectLoginRequired: true,
+      rejectCaptchaRequired: true,
+      notes: null,
+      origin: "suwayomi" as const,
+      lang,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const groups = groupSourcesByLang([
+      source(1, "EnglishSite", "en"),
+      source(2, "ArabicSite", "ar"),
+      source(3, "SpanishSite", "es"),
+      source(4, "MysterySite", null),
+    ]);
+    // العربية أولًا ثم الإنجليزية ثم البقية، وبلا لغة آخرًا.
+    expect(groups.map(group => group.key)).toEqual(["ar", "en", "es", "other"]);
+    expect(groups[0]!.label).toBe("المواقع العربية");
+    expect(groups[1]!.label).toBe("المواقع الإنجليزية");
+    expect(languageGroupLabel("multi")).toBe("مواقع متعددة اللغات");
+    expect(languageGroupLabel(null)).toBe("مواقع أخرى");
+    // اللغات غير الشهيرة تُسمّى بالعربية عبر Intl (أو رمزها إن غاب).
+    expect(languageGroupLabel("es")).toMatch(/^مواقع/);
+
+    const [container] = buildSourcesComponents(
+      [
+        source(2, "ArabicSite", "ar"),
+        source(1, "EnglishSite", "en"),
+        source(4, "MysterySite", null),
+      ],
+      4,
+      null
+    ) as unknown as [ComponentShape];
+    const texts = collectTexts([container]).join("\n");
+    expect(texts).toContain("🌐 **المواقع العربية — 1**");
+    expect(texts).toContain("• **ArabicSite** — arabicsite.com ⚡");
+    expect(texts).toContain("🌐 **المواقع الإنجليزية — 1**");
+    expect(texts).toContain("🌐 **مواقع أخرى — 1**");
+    // ترتيب الأقسام في النص نفسه: العربية قبل الإنجليزية قبل الأخرى.
+    const arIndex = texts.indexOf("المواقع العربية");
+    const enIndex = texts.indexOf("المواقع الإنجليزية");
+    const otherIndex = texts.indexOf("مواقع أخرى");
+    expect(arIndex).toBeLessThan(enIndex);
+    expect(enIndex).toBeLessThan(otherIndex);
+  });
+
+  it("truncates oversized language sections with a footer line", () => {
+    const source = (id: number) => ({
+      id,
+      name: `Site${String(id).padStart(2, "0")}`,
+      hostname: `site${id}.com`,
+      baseUrl: `https://site${id}.com`,
+      suwayomiSourceId: `src-${id}`,
+      extensionPackage: null,
+      extensionName: null,
+      status: "active" as const,
+      documentedIntegrationUrl: null,
+      allowDirectChapterLookup: true,
+      rejectLoginRequired: true,
+      rejectCaptchaRequired: true,
+      notes: null,
+      origin: "suwayomi" as const,
+      lang: "ar",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const sources = Array.from({ length: SOURCES_GROUP_LIMIT + 5 }, (_, index) => source(index + 1));
+    const [container] = buildSourcesComponents(sources, sources.length, null) as unknown as [ComponentShape];
+    const texts = collectTexts([container]).join("\n");
+    expect(texts).toContain(`🌐 **المواقع العربية — ${SOURCES_GROUP_LIMIT + 5}**`);
+    expect(texts).toContain(`و5 موقعًا آخر في هذا القسم…`);
+    expect(texts).not.toContain(`Site${String(SOURCES_GROUP_LIMIT + 1).padStart(2, "0")}`);
   });
 });
