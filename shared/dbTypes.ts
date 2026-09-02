@@ -37,6 +37,8 @@ export type ContentSource = {
   rejectLoginRequired: boolean;
   rejectCaptchaRequired: boolean;
   notes: string | null;
+  /** مصدر إضافة السجل: يدوي من اللوحة أو مزامنة تلقائية من Suwayomi. */
+  origin?: "manual" | "suwayomi";
   createdAt: Date;
   updatedAt: Date;
 };

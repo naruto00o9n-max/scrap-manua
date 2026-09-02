@@ -5,6 +5,8 @@ import {
   buildMergeCard,
   buildMergePromptComponents,
   buildPromptComponents,
+  buildSearchCardComponents,
+  buildSourcesComponents,
   getRegisteredDiscordCommands,
   noticeFromJob,
 } from "./discordBot";
@@ -56,7 +58,7 @@ function collectThumbnails(components: unknown[]): ComponentShape[] {
 describe("Discord ZEUS chapter experience", () => {
   it("registers Arabic-only commands", () => {
     const names = getRegisteredDiscordCommands().map(command => command.name);
-    expect(names).toEqual(["فصل", "دمج", "مساعدة"]);
+    expect(names).toEqual(["فصل", "دمج", "مصادر", "بحث", "مساعدة"]);
   });
 
   it("builds a gold Components V2 card with a live progress bar and pipeline checklist", () => {
@@ -344,9 +346,10 @@ describe("Discord ZEUS chapter experience", () => {
 
   it("uses only component types the Discord API accepts (50035 regression guard)", () => {
     // الأنواع الحقيقية المعروفة في Discord API:
-    // 1 ActionRow، 2 Button، 9 Section، 10 TextDisplay، 11 Thumbnail،
-    // 12 MediaGallery، 14 Separator، 17 Container. أي نوع آخر (كـ 18) يرفضه الـ API.
-    const KNOWN_TYPES = new Set([1, 2, 9, 10, 11, 12, 14, 17]);
+    // 1 ActionRow، 2 Button، 3 StringSelect، 9 Section، 10 TextDisplay،
+    // 11 Thumbnail، 12 MediaGallery، 14 Separator، 17 Container.
+    // أي نوع آخر (كـ 18) يرفضه الـ API.
+    const KNOWN_TYPES = new Set([1, 2, 3, 9, 10, 11, 12, 14, 17]);
     // الأبناء المسموح بهم داخل الحاوية (17) كما يحددهم الـ API حرفيًا.
     const CONTAINER_CHILD_TYPES = new Set([1, 9, 10, 12, 13, 14]);
     // أنواع المكونات العليا المسموح بها في الرسالة.
@@ -378,8 +381,10 @@ describe("Discord ZEUS chapter experience", () => {
       if (parentType === 9 && component.type !== 10) {
         problems.push(`${path}: داخل القسم (9) يُسمح فقط بالنص (10)`);
       }
-      if (parentType === 1 && component.type !== 2) {
-        problems.push(`${path}: داخل الصف (1) يُسمح فقط بالأزرار (2)`);
+      if (parentType === 1 && component.type !== 2 && component.type !== 3) {
+        problems.push(
+          `${path}: داخل الصف (1) يُسمح فقط بالأزرار (2) والقوائم المنسدلة (3)`
+        );
       }
       if (Array.isArray(component.components)) {
         for (const [index, child] of (
@@ -456,6 +461,66 @@ describe("Discord ZEUS chapter experience", () => {
       buildHelpComponents(null),
       buildPromptComponents(null),
       buildMergePromptComponents(null),
+      buildSourcesComponents(
+        [
+          {
+            id: 1,
+            name: "RokariComics",
+            hostname: "rokaricomics.com",
+            baseUrl: "https://rokaricomics.com",
+            suwayomiSourceId: "rokaricomics",
+            extensionPackage: "rokaricomics",
+            extensionName: "RokariComics",
+            status: "active",
+            documentedIntegrationUrl: null,
+            allowDirectChapterLookup: true,
+            rejectLoginRequired: true,
+            rejectCaptchaRequired: true,
+            notes: null,
+            origin: "suwayomi",
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+        ],
+        1,
+        null
+      ),
+      ...[
+        { state: "progress" as const, query: "سولو", progress: { done: 3, total: 12 }, failedCount: 1 },
+        {
+          state: "results" as const,
+          query: "سولو",
+          resultCount: 3,
+          failedCount: 0,
+          matches: [
+            { title: "Solo Leveling", sourceName: "A", lang: "en" },
+            { title: "سولو لفلنغ", sourceName: "B", lang: "ar" },
+          ],
+        },
+        {
+          state: "availability" as const,
+          query: "سولو",
+          chapterNumber: 38,
+          availability: [
+            { ok: true, sourceName: "A", title: "Solo Leveling", detail: "Chapter 38 — 2026-02-01" },
+            { ok: false, sourceName: "B", title: "سولو لفلنغ", detail: "لم ينزل بعد في هذا المصدر" },
+            { ok: false, sourceName: "C", title: "X", detail: "تعذر الفحص: مهلة" },
+          ],
+          anyAvailable: true,
+        },
+        { state: "chapters" as const, mangaTitle: "Solo Leveling", sourceName: "A", totalChapters: 200, chaptersShown: 25 },
+        { state: "failed" as const, detail: "لا نتائج" },
+      ].map(notice =>
+        buildSearchCardComponents(notice, {
+          customId: "search:pick:s1",
+          placeholder: "اختر…",
+          options: [
+            { label: "Solo Leveling", description: "A (en)", value: "0" },
+            { label: "سولو لفلنغ", description: "B (ar)", value: "1" },
+          ],
+        })
+      ),
+      buildSearchCardComponents({ state: "results" as const, query: "x", resultCount: 1, matches: [{ title: "T", sourceName: "S", lang: "en" }] }, null),
     ];
 
     for (const components of samples) {
