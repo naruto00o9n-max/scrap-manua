@@ -100,6 +100,38 @@ describe("searchAllSources", () => {
     expect(outcome.failed.map(item => item.sourceName)).toEqual(["Source B", "Source C"]);
     expect(outcome.matches).toHaveLength(1);
   });
+
+  it("retries failing sources once before counting them as failed", async () => {
+    // المواقع كثيرًا ما تتعثر في الموجة الأولى (تقييد اندفاع الطلبات) ثم
+    // تنجح من محاولة هادئة — المتعثر حقًا فقط يبقى في قائمة الفشل.
+    const calls: string[] = [];
+    const searcher: MangaSearcher = {
+      async searchSourceManga(sourceId: string) {
+        calls.push(sourceId);
+        if (sourceId === "dead") throw new Error("boom");
+        const flakyHits = calls.filter(call => call === "flaky").length;
+        if (sourceId === "flaky" && flakyHits === 1) throw new Error("انتهت مهلة هذا الموقع");
+        if (sourceId === "flaky") return [manga(9, "Solo Leveling")];
+        return [];
+      },
+      async fetchMangaAndChapters() {
+        return [];
+      },
+    };
+    const outcome = await searchAllSources(
+      searcher,
+      [
+        { suwayomiSourceId: "flaky", name: "Flaky", lang: "en" },
+        { suwayomiSourceId: "ok", name: "OK", lang: "en" },
+        { suwayomiSourceId: "dead", name: "Dead", lang: "ar" },
+      ],
+      "solo"
+    );
+    // المتعثر المتعافي لم يعد ضمن الفشل، والمصدر الميت فعلاً بقي وحده.
+    expect(outcome.failed.map(item => item.sourceName)).toEqual(["Dead"]);
+    expect(outcome.matches.map(item => item.mangaId)).toEqual([9]);
+    expect(calls.filter(call => call === "flaky")).toHaveLength(2);
+  });
 });
 
 describe("checkChapterAvailability", () => {

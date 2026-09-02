@@ -8,6 +8,7 @@ import {
   buildPromptComponents,
   buildSearchCardComponents,
   buildSearchPageNavRow,
+  buildSearchSessionView,
   buildSourcesComponents,
   chaptersCount,
   foldersCount,
@@ -20,10 +21,12 @@ import {
   noticeFromJob,
   paginateForSelect,
   parseDriveFolderLinks,
+  resultsFailureSuffix,
   safeMediaUrl,
   sitesCount,
   SOURCES_GROUP_LIMIT,
   stripHtmlTags,
+  type SearchSession,
 } from "./discordBot";
 
 type ComponentShape = {
@@ -902,6 +905,61 @@ describe("Discord ZEUS chapter experience", () => {
     expect(safeMediaUrl(null)).toBeNull();
   });
 
+  it("summarizes failed sites with the count and up to three names", () => {
+    expect(resultsFailureSuffix({ state: "results", failedCount: 0 })).toBe("");
+    expect(resultsFailureSuffix({ state: "results", failedCount: 2, failedNames: ["Site B", "Site C"] }))
+      .toBe(" (تعذر الوصول إلى موقعين: Site B، Site C)");
+    expect(
+      resultsFailureSuffix({ state: "results", failedCount: 6, failedNames: ["A", "B", "C", "D", "E", "F"] })
+    ).toBe(" (تعذر الوصول إلى 6 مواقع: A، B، C وغيرها)");
+    expect(resultsFailureSuffix({ state: "results", failedCount: 3 })).toBe(" (تعذر الوصول إلى 3 مواقع)");
+  });
+
+  it("shows which sites failed on the search results card", () => {
+    const [container] = buildSearchCardComponents(
+      {
+        state: "results",
+        query: "سولو",
+        resultCount: 5,
+        failedCount: 6,
+        failedNames: ["BoxMan", "Comick", "Asura", "Toonily", "Flame", "Reaper"],
+        page: 1,
+        totalPages: 1,
+        matches: [{ title: "Solo Leveling", sourceName: "Site A", lang: "en" }],
+      },
+      null
+    ) as unknown as [ComponentShape];
+    const texts = collectTexts([container]).join("\n");
+    expect(texts).toContain("(تعذر الوصول إلى 6 مواقع: BoxMan، Comick، Asura وغيرها)");
+  });
+
+  it("drops the repeated filler description from chapter select options", () => {
+    const session = {
+      requesterId: "1",
+      channelId: "c",
+      createdAt: Date.now(),
+      query: "q",
+      failedCount: 0,
+      failedNames: [],
+      chapterNumber: null,
+      matches: [],
+      matchPage: 0,
+      view: "chapters" as const,
+      chapters: [
+        { label: "فصل 12 — العودة", url: "/c/12", realUrl: null, number: 12 },
+        { label: "فصل 11", url: "/c/11", realUrl: null, number: 11 },
+      ],
+      chapterPage: 0,
+      mangaTitle: "M",
+    } satisfies SearchSession;
+    const view = buildSearchSessionView(session, "s1");
+    expect(view.select?.options).toEqual([
+      { label: "فصل 12 — العودة", value: "0" },
+      { label: "فصل 11", value: "1" },
+    ]);
+    expect(view.notice.state).toBe("chapters");
+  });
+
   it("renders the manga page with cover, ordered summary, and total chapters only", () => {
     const [container] = buildSearchCardComponents(
       {
@@ -1039,7 +1097,8 @@ describe("Discord ZEUS chapter experience", () => {
     ) as unknown as [ComponentShape];
     const texts = collectTexts([container]).join("\n");
     expect(texts).toContain("🌐 **المواقع العربية — 1**");
-    expect(texts).toContain("• **ArabicSite** — arabicsite.com ⚡");
+    expect(texts).toContain("• **ArabicSite** — arabicsite.com");
+    expect(texts).not.toContain("⚡");
     expect(texts).toContain("🌐 **المواقع الإنجليزية — 1**");
     expect(texts).toContain("🌐 **مواقع أخرى — 1**");
     // ترتيب الأقسام في النص نفسه: العربية قبل الإنجليزية قبل الأخرى.

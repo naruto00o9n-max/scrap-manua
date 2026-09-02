@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import sharp from "sharp";
-import { mergeChapterPages } from "./imageMerging";
+import { mergeChapterPages, pickUniformWidth } from "./imageMerging";
 
 async function image(width: number, height: number, color: string) {
   return sharp({ create: { width, height, channels: 3, background: color } }).png().toBuffer();
@@ -8,7 +8,7 @@ async function image(width: number, height: number, color: string) {
 
 describe("chapter image merging", () => {
   it("packs the chapter tail into one image when the total fits the ceiling", async () => {
-    const buffers = [await image(800, 5000, "#111111"), await image(1200, 6000, "#222222"), await image(1200, 3000, "#333333")];
+    const buffers = [await image(1200, 5000, "#111111"), await image(1200, 6000, "#222222"), await image(1200, 3000, "#333333")];
     vi.stubGlobal("fetch", vi.fn(async (_url: string) => new Response(buffers.shift(), { status: 200, headers: { "content-type": "image/png" } })));
 
     const output = await mergeChapterPages(["https://pages.test/1", "https://pages.test/2", "https://pages.test/3"]);
@@ -64,5 +64,57 @@ describe("chapter image merging", () => {
     expect(output[0]?.width).toBe(900);
     expect(output[0]?.height).toBe(15000);
     vi.unstubAllGlobals();
+  });
+
+  it("scales off-width pages to the common width instead of padding with white", async () => {
+    // سيناريو المستخدم: صفحات الفصل بعرض 800 وآخر صفحة أعرض (1200) —
+    // كانت تُفرش فوق لوحة 1200 مع حشو أبيض على الجانبين؛ المطلوب تحجيمها
+    // إلى العرض المشترك 800 مع الحفاظ على النسبة (900 → 600 ارتفاعًا).
+    const buffers = [
+      await image(800, 2000, "#111111"),
+      await image(800, 2000, "#222222"),
+      await image(1200, 900, "#333333"),
+    ];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string) => new Response(buffers.shift(), { status: 200, headers: { "content-type": "image/png" } })));
+
+    const output = await mergeChapterPages(["https://pages.test/1", "https://pages.test/2", "https://pages.test/3"]);
+    expect(output).toHaveLength(1);
+    // العرض = العرض الأكثر تكرارًا (800)، والارتفاع = 2000+2000+600 بعد تحجيم الأخيرة.
+    expect(output[0]!.width).toBe(800);
+    expect(output[0]!.height).toBe(4600);
+    // الحافة اليمنى لمنطقة الصفحة الأخيرة داكنة — لا حشو أبيض على الجانب.
+    const edge = await sharp(output[0]!.data)
+      .extract({ left: 770, top: 4050, width: 30, height: 40 })
+      .stats();
+    expect(edge.channels[0]!.mean).toBeLessThan(100);
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps same-width chapters byte-identical in geometry (no re-encode)", async () => {
+    const buffers = [await image(800, 3000, "#101010"), await image(800, 3000, "#202020")];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string) => new Response(buffers.shift(), { status: 200, headers: { "content-type": "image/png" } })));
+    const output = await mergeChapterPages(["https://pages.test/a", "https://pages.test/b"]);
+    expect(output).toHaveLength(1);
+    expect(output[0]!.width).toBe(800);
+    expect(output[0]!.height).toBe(6000);
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("pickUniformWidth", () => {
+  it("picks the most frequent width as the chapter's real width", () => {
+    expect(pickUniformWidth([800, 800, 1200])).toBe(800);
+    expect(pickUniformWidth([1200, 800, 800, 1200, 1200])).toBe(1200);
+  });
+
+  it("breaks ties toward the larger width to keep more detail", () => {
+    expect(pickUniformWidth([800, 1200])).toBe(1200);
+    expect(pickUniformWidth([700, 900, 700, 900])).toBe(900);
+  });
+
+  it("ignores unreadable widths and returns zero when nothing is readable", () => {
+    expect(pickUniformWidth([0, null, undefined, 800])).toBe(800);
+    expect(pickUniformWidth([undefined, null, 0])).toBe(0);
+    expect(pickUniformWidth([])).toBe(0);
   });
 });

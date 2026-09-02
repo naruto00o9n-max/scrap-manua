@@ -25,10 +25,11 @@ export type SearchOutcome = {
   failed: SearchFailure[];
 };
 
-/** واجهة مصغرة للعميل تكتفي بما يحتاجه البحث — تجعل الاختبار بدون سيرفر حقيقي. */
+/** واجهة مصغرة للعميل تكتفي بما يحتاجه البحث — تجعل الاختبار بدون سيرفر حقيقي.
+ *  المهلة اختيارية: مسار /بحث يمرر مهلة أطول من الافتراضية للمواقع البطيئة. */
 export type MangaSearcher = {
-  searchSourceManga(sourceId: string, query: string): Promise<SuwayomiManga[]>;
-  fetchMangaAndChapters(mangaId: number): Promise<SuwayomiChapter[]>;
+  searchSourceManga(sourceId: string, query: string, timeoutMs?: number): Promise<SuwayomiManga[]>;
+  fetchMangaAndChapters(mangaId: number, timeoutMs?: number): Promise<SuwayomiChapter[]>;
 };
 
 export type SearchableSource = {
@@ -90,6 +91,11 @@ function toMatch(source: SearchableSource, manga: SuwayomiManga, score: number):
 /**
  * يبحث في كل مصدر على حدة بالتوازي (تزامن محدود) ويجمع أفضل التطابقات،
  * مع مهلة لكل مصدر: المصدر البطيء لا يُفشل البحث كله — يُحصى كمتعثر فقط.
+ *
+ * محاولتان لا واحدة: المصادر كثيرًا ما تفشل في الموجة الأولى بسبب بطئها
+ * أو تقييدها عند اندفاع الطلبات المتوازية عليها، ثم تنجح من محاولة هادئة
+ * بعد اكتمال الموجة — لذا المتعثرون يُعادون مرة واحدة بتزامن أقل ومهلة أطول،
+ * وما بقي متعثرًا بعدها يُعد فشلًا حقيقيًا ويُرفع في النتيجة.
  */
 export async function searchAllSources(
   searcher: MangaSearcher,
@@ -98,53 +104,86 @@ export async function searchAllSources(
   options?: {
     concurrency?: number;
     timeoutMs?: number;
+    /** تزامن محاولة إعادة المصادر المتعثرة — أهدأ من الموجة الأولى. */
+    retryConcurrency?: number;
+    /** مهلة محاولة الإعادة — أطول من الموجة الأولى لأنها للمواقع البطيئة تحديدًا. */
+    retryTimeoutMs?: number;
     topPerSource?: number;
     onProgress?: (done: number, total: number) => Promise<void> | void;
   }
 ): Promise<SearchOutcome> {
   const concurrency = Math.max(1, Math.min(options?.concurrency ?? 6, 8));
-  const timeoutMs = options?.timeoutMs ?? 20_000;
+  const timeoutMs = options?.timeoutMs ?? 15_000;
+  const retryConcurrency = Math.max(1, Math.min(options?.retryConcurrency ?? 2, 8));
+  const retryTimeoutMs = options?.retryTimeoutMs ?? 30_000;
   const topPerSource = Math.max(1, options?.topPerSource ?? 3);
   const matches: SearchMatch[] = [];
-  const failed: SearchFailure[] = [];
-  let cursor = 0;
-  let done = 0;
-  const total = sources.length;
 
-  async function worker() {
-    while (true) {
-      const index = cursor++;
-      if (index >= total) return;
-      const source = sources[index]!;
-      try {
-        const found = await Promise.race([
-          searcher.searchSourceManga(source.suwayomiSourceId, query),
-          new Promise<never>((_resolve, reject) =>
-            setTimeout(() => reject(new Error("انتهت مهلة هذا الموقع")), timeoutMs)
-          ),
-        ]);
-        const ranked = found
-          .map(manga => ({ manga, score: matchScore(query, manga.title) }))
-          .filter(item => item.score > 0)
-          .sort((a, b) => b.score - a.score)
-          .slice(0, topPerSource);
-        for (const item of ranked) matches.push(toMatch(source, item.manga, item.score));
-      } catch (error) {
-        failed.push({
-          sourceName: source.name,
-          message: error instanceof Error ? error.message : "خطأ غير معروف",
-        });
-      }
-      done += 1;
-      if (options?.onProgress) {
-        try { await options.onProgress(done, total); } catch { /* فشل الإشعار لا يُفشل البحث */ }
+  /**
+   * موجة بحث واحدة فوق قائمة مصادر. تعيد المتعثرين مع كائن المصدر نفسه
+   * (لا الاسم فقط) لتمييز المكررات عند إعادة المحاولة.
+   */
+  async function runPass(
+    list: SearchableSource[],
+    passConcurrency: number,
+    passTimeoutMs: number,
+    withProgress: boolean
+  ): Promise<Array<{ source: SearchableSource; message: string }>> {
+    const passFailed: Array<{ source: SearchableSource; message: string }> = [];
+    let cursor = 0;
+    let done = 0;
+
+    async function worker() {
+      while (true) {
+        const index = cursor++;
+        if (index >= list.length) return;
+        const source = list[index]!;
+        try {
+          // المهلة الداخلية تتجاوز مهلة السباق بقليل حتى تكون رسالة المهلة
+          // العربية هي ما يُلتقط، لا رسالة إحباط fetch الإنجليزية.
+          const found = await Promise.race([
+            searcher.searchSourceManga(source.suwayomiSourceId, query, passTimeoutMs + 1_000),
+            new Promise<never>((_resolve, reject) =>
+              setTimeout(() => reject(new Error("انتهت مهلة هذا الموقع")), passTimeoutMs)
+            ),
+          ]);
+          const ranked = found
+            .map(manga => ({ manga, score: matchScore(query, manga.title) }))
+            .filter(item => item.score > 0)
+            .sort((a, b) => b.score - a.score)
+            .slice(0, topPerSource);
+          for (const item of ranked) matches.push(toMatch(source, item.manga, item.score));
+        } catch (error) {
+          passFailed.push({
+            source,
+            message: error instanceof Error ? error.message : "خطأ غير معروف",
+          });
+        }
+        done += 1;
+        if (withProgress && options?.onProgress) {
+          try { await options.onProgress(done, list.length); } catch { /* فشل الإشعار لا يُفشل البحث */ }
+        }
       }
     }
+
+    await Promise.all(Array.from({ length: Math.min(passConcurrency, list.length) }, () => worker()));
+    return passFailed;
   }
 
-  await Promise.all(Array.from({ length: Math.min(concurrency, total) }, () => worker()));
+  const firstPassFailed = await runPass(sources, concurrency, timeoutMs, true);
+  let failed = firstPassFailed;
+  if (firstPassFailed.length) {
+    // الموجة الثانية الهادئة: نفس المصادر المتعثرة بتزامن أقل ومهلة أطول.
+    const retryTargets = firstPassFailed.map(item => item.source);
+    failed = await runPass(retryTargets, retryConcurrency, retryTimeoutMs, false);
+  }
+
   matches.sort((a, b) => b.score - a.score);
-  return { matches, searched: total, failed };
+  return {
+    matches,
+    searched: sources.length,
+    failed: failed.map(item => ({ sourceName: item.source.name, message: item.message })),
+  };
 }
 
 export type AvailabilityRow = {
@@ -174,7 +213,7 @@ export async function checkChapterAvailability(
       const match = targets[index]!;
       try {
         const chapters = await Promise.race([
-          searcher.fetchMangaAndChapters(match.mangaId),
+          searcher.fetchMangaAndChapters(match.mangaId, timeoutMs + 1_000),
           new Promise<never>((_resolve, reject) =>
             setTimeout(() => reject(new Error("انتهت مهلة جلب الفصول")), timeoutMs)
           ),
