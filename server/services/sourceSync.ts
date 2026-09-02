@@ -10,7 +10,7 @@ import { SuwayomiClient, type SuwayomiSource } from "./suwayomi";
 // ============================================================
 
 const SYNC_INTERVAL_MS = 10 * 60 * 1000;
-const AUTO_NOTE = "أُضيف تلقائيًا من Suwayomi";
+const AUTO_NOTE = "أُضيف تلقائيًا";
 
 export type SyncPlanAction =
   | { kind: "create"; source: SuwayomiSource; hostname: string | null }
@@ -22,6 +22,8 @@ export type SyncPlan = {
   activate: number[];
   disable: number[];
   keep: number;
+  /** مصادر تُوقفت عن الإضافة لأن نطاقها محجوز بصف موجود أو بمصدر آخر في نفس الدفعة. */
+  skippedHostname: number;
 };
 
 /** يستخرج نطاق موقع المصدر من homeUrl إن وُجد. */
@@ -50,12 +52,23 @@ export function planSourceChanges(installed: SuwayomiSource[], existing: Syncabl
     existing.filter(row => row.suwayomiSourceId).map(row => [row.suwayomiSourceId!, row])
   );
   const installedIds = new Set(installed.map(source => source.id));
-  const plan: SyncPlan = { create: [], activate: [], disable: [], keep: 0 };
+  const plan: SyncPlan = { create: [], activate: [], disable: [], keep: 0, skippedHostname: 0 };
+
+  // فهرس hostname محجوز فريدًا في قاعدة البيانات — أي مصدر جديد يطلب نطاقًا
+  // محجوزًا (مثل عشرات لغات MangaDex كلها على mangadex.org، أو مصدر أُضيف
+  // يدويًا من اللوحة) يُتخطّى بصمت بدل الفشل بخطأ E11000 مكرر كل دورة.
+  const takenHostnames = new Set(existing.map(row => row.hostname));
 
   for (const source of installed) {
     const row = bySuwayomiId.get(source.id);
     if (!row) {
-      plan.create.push({ kind: "create", source, hostname: hostnameFromHomeUrl(source.homeUrl) });
+      const hostname = hostnameFromHomeUrl(source.homeUrl);
+      if (hostname && takenHostnames.has(hostname)) {
+        plan.skippedHostname += 1;
+        continue;
+      }
+      if (hostname) takenHostnames.add(hostname);
+      plan.create.push({ kind: "create", source, hostname });
     } else if (row.status !== "active") {
       plan.activate.push(row.id);
     } else {
@@ -150,7 +163,7 @@ export async function syncSourcesFromSuwayomi(): Promise<{ added: number; activa
             extensionName: row.extensionName,
             status: "disabled",
             allowDirectChapterLookup: row.allowDirectChapterLookup,
-            notes: `${AUTO_NOTE} — ثم أُزيل من Suwayomi`,
+            notes: `${AUTO_NOTE} — ثم أُزيل من قائمة المواقع`,
             origin: "suwayomi",
           });
         } catch (error) {

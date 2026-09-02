@@ -17,8 +17,9 @@ export type SuwayomiChapter = {
   name: string;
   url: string;
   realUrl: string | null;
+  // ملاحظة: لا نطلب releaseDate إطلاقًا — بعض إصدارات Suwayomi لا تعرف هذا
+  // الحقل في ChapterType وترفض الاستعلام كله بخطأ FieldUndefined.
   chapterNumber?: number;
-  releaseDate?: string | null;
   manga: { id: number; title: string; sourceId: string };
 };
 
@@ -194,7 +195,7 @@ export class SuwayomiClient {
 
   async fetchMangaAndChapters(mangaId: number): Promise<SuwayomiChapter[]> {
     const result = await this.request<{ fetchMangaAndChapters: { chapters: SuwayomiChapter[] } }>(
-      "mutation FetchMangaAndChapters($input: FetchMangaAndChaptersInput!) { fetchMangaAndChapters(input: $input) { chapters { id name url realUrl chapterNumber releaseDate manga { id title sourceId } } } }",
+      "mutation FetchMangaAndChapters($input: FetchMangaAndChaptersInput!) { fetchMangaAndChapters(input: $input) { chapters { id name url realUrl chapterNumber manga { id title sourceId } } } }",
       { input: { id: mangaId, fetchManga: true, fetchChapters: true } },
     );
     return result.fetchMangaAndChapters.chapters;

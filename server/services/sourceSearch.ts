@@ -120,7 +120,7 @@ export async function searchAllSources(
         const found = await Promise.race([
           searcher.searchSourceManga(source.suwayomiSourceId, query),
           new Promise<never>((_resolve, reject) =>
-            setTimeout(() => reject(new Error("انتهت مهلة هذا المصدر")), timeoutMs)
+            setTimeout(() => reject(new Error("انتهت مهلة هذا الموقع")), timeoutMs)
           ),
         ]);
         const ranked = found
@@ -149,7 +149,7 @@ export async function searchAllSources(
 
 export type AvailabilityRow = {
   match: SearchMatch;
-  chapter: { name: string; releaseDate: string | null; number: number } | null;
+  chapter: { name: string; number: number } | null;
   error: string | null;
 };
 
@@ -188,7 +188,6 @@ export async function checkChapterAvailability(
           chapter: hit
             ? {
                 name: hit.name,
-                releaseDate: hit.releaseDate ?? null,
                 number: hit.chapterNumber!,
               }
             : null,

@@ -74,4 +74,41 @@ describe("planSourceChanges", () => {
     );
     expect(plan.disable).toEqual([1]);
   });
+
+  it("skips sources whose hostname is already held by an existing row (E11000)", () => {
+    // عشرات لغات MangaDex كلها على mangadex.org، وهناك صف يدوي يحجز النطاق.
+    const plan = planSourceChanges(
+      [
+        installed("md-en", "MangaDex (EN)", "https://mangadex.org"),
+        installed("md-cs", "MangaDex (CS)", "https://mangadex.org"),
+      ],
+      [row(7, null, "active", null, "mangadex.org")]
+    );
+    expect(plan.create).toHaveLength(0);
+    expect(plan.skippedHostname).toBe(2);
+  });
+
+  it("skips later sources sharing a hostname within the same batch", () => {
+    const plan = planSourceChanges(
+      [
+        installed("md-en", "MangaDex (EN)", "https://mangadex.org"),
+        installed("md-fr", "MangaDex (FR)", "https://mangadex.org"),
+        installed("wt-en", "Webtoons (EN)", "https://www.webtoons.com"),
+        installed("wt-fr", "Webtoons (FR)", "https://www.webtoons.com"),
+      ],
+      []
+    );
+    expect(plan.create.map(action => action.source.id)).toEqual(["md-en", "wt-en"]);
+    expect(plan.skippedHostname).toBe(2);
+  });
+
+  it("still creates sources without a resolvable hostname (placeholder path)", () => {
+    const plan = planSourceChanges(
+      [installed("mystery", "Mystery", null), installed("mystery2", "Mystery 2", null)],
+      []
+    );
+    expect(plan.create).toHaveLength(2);
+    expect(plan.skippedHostname).toBe(0);
+    expect(plan.create.every(action => action.hostname === null)).toBe(true);
+  });
 });

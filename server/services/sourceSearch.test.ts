@@ -111,11 +111,11 @@ describe("checkChapterAvailability", () => {
       async fetchMangaAndChapters(mangaId: number) {
         if (mangaId === 1) {
           return [
-            { id: 11, name: "Chapter 38", url: "/c/38", realUrl: null, chapterNumber: 38, releaseDate: "2026-02-01", manga: { id: 1, title: "t", sourceId: "a" } },
+            { id: 11, name: "Chapter 38", url: "/c/38", realUrl: null, chapterNumber: 38, manga: { id: 1, title: "t", sourceId: "a" } },
           ];
         }
         if (mangaId === 2) throw new Error("timeout");
-        return [{ id: 12, name: "Chapter 37", url: "/c/37", realUrl: null, chapterNumber: 37, releaseDate: null, manga: { id: 2, title: "t", sourceId: "b" } }];
+        return [{ id: 12, name: "Chapter 37", url: "/c/37", realUrl: null, chapterNumber: 37, manga: { id: 2, title: "t", sourceId: "b" } }];
       },
     };
     const matches = [
@@ -125,7 +125,7 @@ describe("checkChapterAvailability", () => {
     ];
     const rows = await checkChapterAvailability(searcher, matches, 38);
     expect(rows[0]!.chapter?.number).toBe(38);
-    expect(rows[0]!.chapter?.releaseDate).toBe("2026-02-01");
+    expect(rows[0]!.chapter?.name).toBe("Chapter 38");
     expect(rows[1]!.error).toBe("timeout");
     expect(rows[2]!.chapter).toBeNull();
     expect(rows[2]!.error).toBeNull();
