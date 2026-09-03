@@ -150,3 +150,63 @@ describe("sourceLangBackfills", () => {
     expect(backfills[0]!.lang).toBe("ja");
   });
 });
+
+describe("owner source control", () => {
+  it("never touches owner-locked rows in activate or disable paths", () => {
+    // المالك عطّل الموقع من إدارة المواقع: المزامنة لا تعيد تفعيله
+    const lockedDisabled = planSourceChanges(
+      [installed("locked-source", "LockedSite", "https://locked.example")],
+      [
+        {
+          id: 7,
+          suwayomiSourceId: "locked-source",
+          status: "disabled",
+          origin: "suwayomi",
+          hostname: "locked.example",
+          ownerLocked: true,
+        },
+      ]
+    );
+    expect(lockedDisabled.activate).toHaveLength(0);
+    expect(lockedDisabled.keep).toBe(1);
+    // والمزامنة لا تعطّل موقعًا قفله المالك حتى لو أُزيلت إضافته
+    const lockedActiveGone = planSourceChanges(
+      [],
+      [
+        {
+          id: 8,
+          suwayomiSourceId: "gone-source",
+          status: "active",
+          origin: "suwayomi",
+          hostname: "gone.example",
+          ownerLocked: true,
+        },
+      ]
+    );
+    expect(lockedActiveGone.disable).toHaveLength(0);
+  });
+
+  it("never re-creates sources on the owner's blocked list (deleted sites)", () => {
+    const bySourceId = planSourceChanges(
+      [installed("blocked-source", "BlockedSite", "https://blocked.example")],
+      [],
+      { suwayomiSourceIds: ["blocked-source"], hostnames: [] }
+    );
+    expect(bySourceId.create).toHaveLength(0);
+    expect(bySourceId.blockedSkipped).toBe(1);
+    const byHostname = planSourceChanges(
+      [installed("other-source", "OtherSite", "https://blocked.example")],
+      [],
+      { suwayomiSourceIds: [], hostnames: ["blocked.example"] }
+    );
+    expect(byHostname.create).toHaveLength(0);
+    expect(byHostname.blockedSkipped).toBe(1);
+    // بلا قائمة حجب يُعاد إنشاؤه كالعادة
+    const unblocked = planSourceChanges(
+      [installed("blocked-source", "BlockedSite", "https://blocked.example")],
+      []
+    );
+    expect(unblocked.create).toHaveLength(1);
+    expect(unblocked.blockedSkipped).toBe(0);
+  });
+});

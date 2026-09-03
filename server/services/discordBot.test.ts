@@ -10,6 +10,7 @@ import {
   buildSearchPageNavRow,
   buildSearchSessionView,
   buildSourcesComponents,
+  buildSourcesManageComponents,
   chaptersCount,
   foldersCount,
   getRegisteredDiscordCommands,
@@ -72,6 +73,26 @@ function collectThumbnails(components: unknown[]): ComponentShape[] {
     components: components as ComponentShape[],
   }).filter(item => item.type === 11);
 }
+
+
+const manageSource = {
+  id: 1,
+  name: "RokariComics",
+  hostname: "rokaricomics.com",
+  baseUrl: "https://rokaricomics.com",
+  suwayomiSourceId: "rokaricomics",
+  extensionPackage: "rokaricomics",
+  extensionName: "RokariComics",
+  status: "active" as const,
+  documentedIntegrationUrl: null,
+  allowDirectChapterLookup: true,
+  rejectLoginRequired: true,
+  rejectCaptchaRequired: true,
+  notes: null,
+  origin: "suwayomi" as const,
+  createdAt: new Date(),
+  updatedAt: new Date(),
+};
 
 describe("Discord ZEUS chapter experience", () => {
   it("registers Arabic-only commands", () => {
@@ -631,6 +652,57 @@ describe("Discord ZEUS chapter experience", () => {
     expect(stale.stage).toBe("validate");
   });
 
+
+  it("builds the sources management cards: select list, action buttons, confirm delete, pagination", () => {
+    const disabled = { ...manageSource, id: 2, name: "DisabledSite", status: "disabled" as const, hostname: "disabled.example" };
+    const [listCard] = buildSourcesManageComponents([manageSource, disabled], { kind: "list", page: 0 }, null) as unknown as [ComponentShape];
+    expect(listCard.type).toBe(17);
+    const select = flatten(listCard).find(item => item.type === 3) as
+      | { custom_id?: string; options?: Array<{ label: string; value: string }> }
+      | undefined;
+    // القائمة تعرض المواقع كلها (المفعّلة أولًا) بقيم = معرفاتها
+    expect(select?.custom_id).toBe("sources:pick");
+    expect(select?.options?.map(option => option.value)).toEqual(["1", "2"]);
+    expect(select?.options?.[0]?.label.startsWith("✅")).toBe(true);
+    expect(select?.options?.[1]?.label.startsWith("⛔")).toBe(true);
+
+    const [siteCard] = buildSourcesManageComponents([manageSource], { kind: "site", sourceId: 1 }, null) as unknown as [ComponentShape];
+    expect(collectButtons([siteCard]).map(button => button.custom_id)).toEqual([
+      "sources:toggle:1",
+      "sources:rename:1",
+      "sources:delete:1",
+      "sources:manage",
+    ]);
+    expect(collectTexts([siteCard]).join("\n")).toContain("مفعّل");
+    // الموقع المفقود يعود للقائمة تلقائيًا بدل بطاقة مكسورة
+    const [fallbackCard] = buildSourcesManageComponents([manageSource], { kind: "site", sourceId: 99 }, null) as unknown as [ComponentShape];
+    expect(collectTexts([fallbackCard]).join("\n")).toContain("اختر موقعًا");
+
+    const [confirmCard] = buildSourcesManageComponents([manageSource], { kind: "confirm", sourceId: 1 }, null) as unknown as [ComponentShape];
+    const confirmButtons = collectButtons([confirmCard]);
+    expect(confirmButtons.map(button => button.custom_id)).toEqual([
+      "sources:confirmdelete:1",
+      "sources:pick:1",
+    ]);
+    expect(confirmButtons.map(button => button.label)).toEqual(["تأكيد الحذف", "تراجع"]);
+
+    // ترقيم القائمة: 30 موقعًا → صفحة من 25 + أزرار تنقل بمعرفات الصفحات
+    const many = Array.from({ length: 30 }, (_item, index) => ({
+      ...manageSource,
+      id: index + 1,
+      name: `Site${index + 1}`,
+    }));
+    const [pagedCard] = buildSourcesManageComponents(many, { kind: "list", page: 0 }, null) as unknown as [ComponentShape];
+    const pagedSelect = flatten(pagedCard).find(item => item.type === 3) as { options?: unknown[] } | undefined;
+    expect(pagedSelect?.options).toHaveLength(25);
+    const navIds = collectButtons([pagedCard]).map(button => button.custom_id);
+    expect(navIds).toEqual(["sources:list:-1", "sources:stay:0", "sources:list:1"]);
+
+    // بطاقة /مواقع العامة تحمل زر فتح الإدارة
+    const [publicCard] = buildSourcesComponents([manageSource], 1, null) as unknown as [ComponentShape];
+    expect(collectButtons([publicCard]).map(button => button.custom_id)).toEqual(["sources:manage"]);
+  });
+
   it("uses only component types the Discord API accepts (50035 regression guard)", () => {
     // الأنواع الحقيقية المعروفة في Discord API:
     // 1 ActionRow، 2 Button، 3 StringSelect، 9 Section، 10 TextDisplay،
@@ -773,6 +845,23 @@ describe("Discord ZEUS chapter experience", () => {
         null
       ),
       ...[
+        { kind: "list" as const, page: 0 },
+        { kind: "site" as const, sourceId: 1 },
+        { kind: "confirm" as const, sourceId: 1 },
+        { kind: "rename" as const, sourceId: 1 },
+        { kind: "site" as const, sourceId: 99 },
+      ].map(view => buildSourcesManageComponents([manageSource], view as never, null)),
+      buildSourcesManageComponents(
+        Array.from({ length: 30 }, (_item, index) => ({
+          ...manageSource,
+          id: index + 1,
+          name: `Site${index + 1}`,
+          status: index % 2 ? ("disabled" as const) : ("active" as const),
+        })),
+        { kind: "list", page: 0 },
+        null
+      ),
+      ...[
         { state: "progress" as const, query: "سولو", progress: { done: 3, total: 12 }, failedCount: 1 },
         {
           state: "results" as const,
@@ -870,6 +959,12 @@ describe("Discord ZEUS chapter experience", () => {
           )
         )
       ),
+      // بطاقات الإدارة التي تحمل أزرارًا (القائمة ذات الصفحة الواحدة بلا أزرار — قائمة فقط)
+      ...[
+        { kind: "site" as const, sourceId: 1 },
+        { kind: "confirm" as const, sourceId: 1 },
+        { kind: "rename" as const, sourceId: 1 },
+      ].map(view => buildSourcesManageComponents([manageSource], view as never, null)),
       // صفحة واحدة: زر العودة وحده في الصف — يجب أن يبقى بمعرّف.
       buildSearchCardComponents(
         { state: "chapters" as const, mangaTitle: "M", sourceName: "S", totalChapters: 5, page: 1, totalPages: 1 },

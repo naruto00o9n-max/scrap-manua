@@ -223,6 +223,8 @@ export type SaveSourceInput = {
   origin?: "manual" | "suwayomi" | null;
   /** لغة المصدر من إضافة Suwayomi — تُستخدم لتجميع /مواقع حسب اللغة. */
   lang?: string | null;
+  /** أوقفه المالك يدويًا — المزامنة التلقائية لا تعدل المصادر المقفولة. */
+  ownerLocked?: boolean | null;
 };
 
 function normalizeSource(input: SaveSourceInput, existing?: ContentSource): ContentSource {
@@ -243,6 +245,7 @@ function normalizeSource(input: SaveSourceInput, existing?: ContentSource): Cont
     notes: input.notes ?? null,
     origin: input.origin ?? existing?.origin ?? "manual",
     lang: input.lang ?? existing?.lang ?? null,
+    ownerLocked: input.ownerLocked ?? existing?.ownerLocked ?? false,
     createdAt: existing?.createdAt ?? timestamp,
     updatedAt: timestamp,
   };
@@ -268,6 +271,56 @@ export async function getSourceBySuwayomiId(suwayomiSourceId: string): Promise<C
   const db = await requireDb();
   const row = await collections(db).contentSources.findOne({ suwayomiSourceId });
   return row ? stripMongoId(row) as ContentSource : undefined;
+}
+
+/** يحذف مصدرًا نهائيًا من قاعدة البيانات (تُضاف نطاقاته لقائمة الحجب لاحقًا). */
+export async function deleteSource(id: number): Promise<void> {
+  const db = await requireDb();
+  await collections(db).contentSources.deleteOne({ id });
+}
+
+// قائمة المصادر المحجوبة: مواقع حذفها المالك من إدارة المواقع — المزامنة
+// التلقائية لا تعيد إضافتها ما دامت في هذه القائمة (تُحفظ في appSettings).
+export type BlockedSources = { suwayomiSourceIds: string[]; hostnames: string[] };
+
+const BLOCKED_SOURCES_KEY = "blocked_sources";
+
+export function parseBlockedSources(raw: string | null): BlockedSources {
+  const empty: BlockedSources = { suwayomiSourceIds: [], hostnames: [] };
+  if (!raw) return empty;
+  try {
+    const parsed = JSON.parse(raw) as Partial<BlockedSources>;
+    return {
+      suwayomiSourceIds: Array.isArray(parsed.suwayomiSourceIds)
+        ? parsed.suwayomiSourceIds.filter(item => typeof item === "string" && item)
+        : [],
+      hostnames: Array.isArray(parsed.hostnames)
+        ? parsed.hostnames.filter(item => typeof item === "string" && item)
+        : [],
+    };
+  } catch {
+    return empty;
+  }
+}
+
+export async function getBlockedSources(): Promise<BlockedSources> {
+  return parseBlockedSources(await getSetting(BLOCKED_SOURCES_KEY));
+}
+
+export async function addBlockedSourceEntry(entry: { suwayomiSourceId?: string | null; hostname?: string | null }): Promise<BlockedSources> {
+  const current = await getBlockedSources();
+  const next: BlockedSources = {
+    suwayomiSourceIds: [
+      ...current.suwayomiSourceIds,
+      ...(entry.suwayomiSourceId && !current.suwayomiSourceIds.includes(entry.suwayomiSourceId) ? [entry.suwayomiSourceId] : []),
+    ],
+    hostnames: [
+      ...current.hostnames,
+      ...(entry.hostname && !current.hostnames.includes(entry.hostname) && !entry.hostname.endsWith(".internal") ? [entry.hostname] : []),
+    ],
+  };
+  await setSetting(BLOCKED_SOURCES_KEY, JSON.stringify(next));
+  return next;
 }
 
 export async function saveSource(input: SaveSourceInput): Promise<ContentSource> {

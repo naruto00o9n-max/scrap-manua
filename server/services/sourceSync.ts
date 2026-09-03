@@ -1,5 +1,10 @@
 import { ENV } from "../_core/env";
-import { listSources, saveSource } from "../db";
+import {
+  getBlockedSources,
+  listSources,
+  saveSource,
+  type BlockedSources,
+} from "../db";
 import { getUsableSuwayomiToken } from "./settings";
 import { SuwayomiClient, type SuwayomiSource } from "./suwayomi";
 
@@ -24,6 +29,8 @@ export type SyncPlan = {
   keep: number;
   /** مصادر تُوقفت عن الإضافة لأن نطاقها محجوز بصف موجود أو بمصدر آخر في نفس الدفعة. */
   skippedHostname: number;
+  /** مواقع حذفها المالك سابقًا (قائمة الحجب) — لا تُعاد إضافتها تلقائيًا. */
+  blockedSkipped: number;
 };
 
 /** يستخرج نطاق موقع المصدر من homeUrl إن وُجد. */
@@ -46,14 +53,20 @@ export type SyncableExistingSource = {
   origin?: string | null;
   hostname: string;
   lang?: string | null;
+  /** قفله المالك يدويًا — لا تفعيل ولا تعطيل تلقائي له. */
+  ownerLocked?: boolean | null;
 };
 
-export function planSourceChanges(installed: SuwayomiSource[], existing: SyncableExistingSource[]): SyncPlan {
+export function planSourceChanges(
+  installed: SuwayomiSource[],
+  existing: SyncableExistingSource[],
+  blocked: BlockedSources = { suwayomiSourceIds: [], hostnames: [] }
+): SyncPlan {
   const bySuwayomiId = new Map(
     existing.filter(row => row.suwayomiSourceId).map(row => [row.suwayomiSourceId!, row])
   );
   const installedIds = new Set(installed.map(source => source.id));
-  const plan: SyncPlan = { create: [], activate: [], disable: [], keep: 0, skippedHostname: 0 };
+  const plan: SyncPlan = { create: [], activate: [], disable: [], keep: 0, skippedHostname: 0, blockedSkipped: 0 };
 
   // فهرس hostname محجوز فريدًا في قاعدة البيانات — أي مصدر جديد يطلب نطاقًا
   // محجوزًا (مثل عشرات لغات MangaDex كلها على mangadex.org، أو مصدر أُضيف
@@ -63,14 +76,22 @@ export function planSourceChanges(installed: SuwayomiSource[], existing: Syncabl
   for (const source of installed) {
     const row = bySuwayomiId.get(source.id);
     if (!row) {
+      // مواقع حذفها المالك من إدارة المواقع لا تُعاد إضافتها تلقائيًا.
       const hostname = hostnameFromHomeUrl(source.homeUrl);
+      if (
+        blocked.suwayomiSourceIds.includes(source.id) ||
+        (hostname && blocked.hostnames.includes(hostname))
+      ) {
+        plan.blockedSkipped += 1;
+        continue;
+      }
       if (hostname && takenHostnames.has(hostname)) {
         plan.skippedHostname += 1;
         continue;
       }
       if (hostname) takenHostnames.add(hostname);
       plan.create.push({ kind: "create", source, hostname });
-    } else if (row.status !== "active") {
+    } else if (row.status !== "active" && !row.ownerLocked) {
       plan.activate.push(row.id);
     } else {
       plan.keep += 1;
@@ -79,6 +100,7 @@ export function planSourceChanges(installed: SuwayomiSource[], existing: Syncabl
 
   for (const row of existing) {
     if (
+      !row.ownerLocked &&
       row.origin === "suwayomi" &&
       row.suwayomiSourceId &&
       !installedIds.has(row.suwayomiSourceId) &&
@@ -125,7 +147,8 @@ export async function syncSourcesFromSuwayomi(): Promise<{ added: number; activa
       const suwayomi = new SuwayomiClient(ENV.suwayomiBaseUrl, getUsableSuwayomiToken());
       const installed = await suwayomi.listInstalledSources();
       const existing = await listSources();
-      const plan = planSourceChanges(installed, existing);
+      const blocked = await getBlockedSources();
+      const plan = planSourceChanges(installed, existing, blocked);
 
       let added = 0;
       for (const action of plan.create) {

@@ -41,6 +41,8 @@ export type ContentSource = {
   origin?: "manual" | "suwayomi";
   /** لغة المصدر كما تُبلّغ عنها إضافة Suwayomi (ar/en/…) — لتجميع /مواقع. */
   lang?: string | null;
+  /** أوقفه المالك يدويًا من إدارة المواقع — المزامنة لا تعيد تفعيله تلقائيًا. */
+  ownerLocked?: boolean;
   createdAt: Date;
   updatedAt: Date;
 };
