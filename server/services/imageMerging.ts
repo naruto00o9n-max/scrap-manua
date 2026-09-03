@@ -12,8 +12,11 @@ sharp.cache(false);
 sharp.concurrency(1);
 
 const MAX_PAGE_SIZE_BYTES = 40 * 1024 * 1024;
-const MIN_OUTPUT_HEIGHT = 11000;
-const MAX_OUTPUT_HEIGHT = 14000;
+// سقف ارتفاع الصورة المدمجة: عتبة مستهدفة ~14000px مع هامش مرونة يسمح
+// بإغلاق المجموعة عندما ترفعها الصفحة التالية قليلًا فوق العتبة
+// (مثل 5000+5000+4316 = 14316 أو 5000+5000+4925 = 14925) بدل ترك صفحات
+// صغيرة مستقلة — طلب المستخدم: «دمج اثنين أو ثلاثة ليصل العتبة».
+const FLEX_OUTPUT_HEIGHT = 15000;
 const OUTPUT_MIME = "image/png";
 const PAGE_DOWNLOAD_CONCURRENCY = 6;
 
@@ -111,75 +114,111 @@ async function downloadPagesToTemp(
 }
 
 /**
- * قواعد التجميع: لا تقسيم لأي صفحة ولا حشو أبيض؛ العرض يُوحد بالتحجير قبل
- * التجميع، والصفحة الأطول من 14000px تبقى مستقلة كاملة، والصفحة الأطول من
- * 1000px تُضم فقط إلى مجموعة مجاورة إذا كان الناتج المنظم بين 11000 و14000px،
- * والبقية تتراكم في مجموعات تصل إلى الحد الأدنى دون تجاوز الحد الأعلى.
- * عدم القص هو الأولوية المطلقة.
+ * التجميع الاحترافي المرن: لا قص لأي صفحة ولا حشو أبيض ولا إعادة ترتيب —
+ * العرض يُوحد بالتحجير قبل التجميع، ثم تُقسم صفحات الفصل إلى أقل عدد ممكن
+ * من الصور بحيث لا يتجاوز ارتفاع أي صورة سقف المرونة (15000px ≈ عتبة
+ * 14000px + هامش)، وبين التوزيعات ذات العدد الأدنى يُختار التوزيع الأكثر
+ * تساويًا في الارتفاع — فتخرج صور الفصل متقاربة الطول حول العتبة بدل
+ * «تارة كبير وتارة صغير»، وتُدمج الصفحات الصغيرة اثنين أو ثلاثة أو أكثر
+ * حتى تبلغ العتبة كما طلب المستخدم.
  *
- * إصلاح ذيل الفصل: صفحات النهاية التي تعذر عليها بلوغ الحد الأدنى (11000px)
- * كانت تُترك كل واحدة مستقلة رغم إمكانية دمجها معًا دون تجاوز الحد الأعلى —
- * فبعد التجميع الأساسي تُدمج المجموعات الختامية المتتالية في صورة أخيرة واحدة
- * كلما بقي مجموعها داخل سقف 14000px.
+ * الصفحة الأطول من سقف المرونة تبقى مستقلة كاملة (القص ممنوع إطلاقًا)،
+ * وهي حاجز يقسم الفصل إلى نافذات متصلة تُوازن كل واحدة على حدة.
  */
 function groupPageIndexes(dimensions: Array<{ height?: number }>): number[][] {
-  const groups: number[][] = [];
-  let current: number[] = [];
-  let currentHeight = 0;
-  const flushCurrent = () => {
-    if (current.length) groups.push(current);
-    current = [];
-    currentHeight = 0;
-  };
-  for (let index = 0; index < dimensions.length; index += 1) {
-    const height = dimensions[index]?.height ?? 0;
+  const heights = dimensions.map((item, index) => {
+    const height = item?.height ?? 0;
     if (!height) throw new Error(`تعذر قراءة ارتفاع الصفحة ${index + 1}.`);
-    if (height > MAX_OUTPUT_HEIGHT) {
-      flushCurrent();
-      groups.push([index]);
-      continue;
-    }
-    if (height > 1000) {
-      flushCurrent();
-      const candidate: number[] = [index];
-      let candidateHeight = height;
-      let next = index + 1;
-      while (candidateHeight < MIN_OUTPUT_HEIGHT && next < dimensions.length) {
-        const nextHeight = dimensions[next]?.height ?? 0;
-        if (!nextHeight || candidateHeight + nextHeight > MAX_OUTPUT_HEIGHT) break;
-        candidate.push(next);
-        candidateHeight += nextHeight;
-        next += 1;
-      }
-      if (candidateHeight >= MIN_OUTPUT_HEIGHT && candidateHeight <= MAX_OUTPUT_HEIGHT) {
-        groups.push(candidate);
-        index = next - 1;
-      } else {
-        groups.push([index]);
-      }
-      continue;
-    }
-    if (current.length && currentHeight + height > MAX_OUTPUT_HEIGHT) flushCurrent();
-    current.push(index);
-    currentHeight += height;
-    if (currentHeight >= MIN_OUTPUT_HEIGHT) flushCurrent();
-  }
-  flushCurrent();
+    return height;
+  });
 
-  // دمج الذيل الختامي: نمشي من آخر مجموعة نحو البداية ونضمّ المجموعات المتتالية
-  // في مجموعة أخيرة واحدة ما دام المجموع الكلي لا يتجاوز سقف 14000px.
-  // المجموعات المقبولة سابقًا في المتن لا تُلمس إلا إذا كانت ضمن هذا الذيل.
-  let tail = groups.pop() ?? [];
-  let tailHeight = tail.reduce((sum, index) => sum + (dimensions[index]?.height ?? 0), 0);
-  while (groups.length) {
-    const previous = groups[groups.length - 1]!;
-    const previousHeight = previous.reduce((sum, index) => sum + (dimensions[index]?.height ?? 0), 0);
-    if (tailHeight + previousHeight > MAX_OUTPUT_HEIGHT) break;
-    tail = [...previous, ...tail];
-    tailHeight += previousHeight;
-    groups.pop();
+  const groups: number[][] = [];
+  let segmentStart = 0;
+  const flushSegment = (endExclusive: number) => {
+    if (endExclusive > segmentStart) {
+      groups.push(...partitionSegmentEvenly(heights, segmentStart, endExclusive));
+    }
+    segmentStart = endExclusive;
+  };
+  for (let index = 0; index < heights.length; index += 1) {
+    if (heights[index]! > FLEX_OUTPUT_HEIGHT) {
+      flushSegment(index);
+      groups.push([index]);
+      segmentStart = index + 1;
+    }
   }
-  if (tail.length) groups.push(tail);
+  flushSegment(heights.length);
+  return groups;
+}
+
+/**
+ * يقسم نافذة متصلة من الصفحات (كل ارتفاعاتها داخل سقف المرونة) إلى أقل عدد
+ * ممكن من المجموعات المتصلة، ثم يوازن ارتفاعات المجموعات: العدد الأدنى
+ * يُحسب بتعبئة جشعة حتى السقف (مثالية لتقسيم تسلسل متصل)، وبين التوزيعات
+ * ذات العدد الأدنى يُختار عبر برمجة ديناميكية التوزيع الذي يقلل مجموع
+ * مربعات انحراف ارتفاع كل مجموعة عن الارتفاع المثالي (مجموع النافذة ÷
+ * عددها) — أي التوزيع الأكثر تساويًا.
+ */
+function partitionSegmentEvenly(heights: number[], start: number, end: number): number[][] {
+  const length = end - start;
+  const segment = heights.slice(start, end);
+  const total = segment.reduce((sum, height) => sum + height, 0);
+
+  // العدد الأدنى للمجموعات: تعبئة جشعة حتى سقف المرونة.
+  let minGroups = 1;
+  let accumulated = 0;
+  for (const height of segment) {
+    if (accumulated > 0 && accumulated + height > FLEX_OUTPUT_HEIGHT) {
+      minGroups += 1;
+      accumulated = 0;
+    }
+    accumulated += height;
+  }
+  if (minGroups === 1) {
+    return [Array.from({ length }, (_, offset) => start + offset)];
+  }
+
+  const ideal = total / minGroups;
+  const prefix: number[] = [0];
+  for (const height of segment) prefix.push(prefix[prefix.length - 1]! + height);
+  const groupSum = (from: number, to: number) => prefix[to]! - prefix[from]!;
+
+  // bestCost[g][i]: أقل تكلفة لتقسيم أول i صفحة إلى g مجموعة، وchoice[g][i]:
+  // عدد الصفحات قبل المجموعة الأخيرة في التوزيع الأمثل.
+  const infinite = Number.POSITIVE_INFINITY;
+  const bestCost: number[][] = Array.from({ length: minGroups + 1 }, () => new Array<number>(length + 1).fill(infinite));
+  const choice: number[][] = Array.from({ length: minGroups + 1 }, () => new Array<number>(length + 1).fill(-1));
+  bestCost[0]![0] = 0;
+  for (let groupsUsed = 1; groupsUsed <= minGroups; groupsUsed += 1) {
+    for (let pages = groupsUsed; pages <= length; pages += 1) {
+      // نفحص بدايات المجموعة الأخيرة من الأكبر إلى الأصغر، وعند تعادل
+      // التكلفة يفوز التوزيع الذي يجعل المجموعات السابقة أكثر امتلاءً —
+      // نفس روح التعبئة الجشعة: الصور الأولى ممتلئة أولًا.
+      for (let previous = pages - 1; previous >= groupsUsed - 1; previous -= 1) {
+        if (bestCost[groupsUsed - 1]![previous] === infinite) continue;
+        const sum = groupSum(previous, pages);
+        if (sum > FLEX_OUTPUT_HEIGHT) continue;
+        const cost = bestCost[groupsUsed - 1]![previous]! + (sum - ideal) ** 2;
+        if (cost < bestCost[groupsUsed]![pages]!) {
+          bestCost[groupsUsed]![pages] = cost;
+          choice[groupsUsed]![pages] = previous;
+        }
+      }
+    }
+  }
+
+  // استخراج حدود المجموعات من جدول الاختيار (مضمونة الجدوى لأن التعبئة
+  // الجشعة أثبتت أن العدد الأدنى ممكن ضمن السقف).
+  const bounds: number[] = [length];
+  for (let groupsUsed = minGroups; groupsUsed >= 1; groupsUsed -= 1) {
+    bounds.unshift(choice[groupsUsed]![bounds[0]!]!);
+  }
+  const groups: number[][] = [];
+  for (let groupIndex = 0; groupIndex < minGroups; groupIndex += 1) {
+    const from = bounds[groupIndex]!;
+    const to = bounds[groupIndex + 1]!;
+    groups.push(Array.from({ length: to - from }, (_, offset) => start + from + offset));
+  }
   return groups;
 }
 
