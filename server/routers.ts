@@ -1,5 +1,11 @@
 import { z } from "zod";
 import {
+  SUPPORTED_DIRECT_SOURCES,
+  listDirectSessions,
+  removeDirectSession,
+  saveDirectSession,
+} from "./services/directSource";
+import {
   addBlockedSourceEntry,
   cancelChapterJob,
   deleteSource,
@@ -137,6 +143,21 @@ export const appRouter = router({
         pngPalette: z.boolean(),
       }))
       .mutation(({ input }) => saveImageOutputConfig(input)),
+    // جلسات المواقع المدفوعة: كوكي تسجيل الدخول لكل موقع يدعم السحب
+    // المباشر. القيمة لا تُعاد للواجهة أبدًا — فقط الموقع وتاريخ التحديث.
+    directSessions: router({
+      list: adminProcedure.query(() => listDirectSessions()),
+      supported: adminProcedure.query(() => SUPPORTED_DIRECT_SOURCES),
+      save: adminProcedure
+        .input(z.object({
+          hostname: z.enum(SUPPORTED_DIRECT_SOURCES),
+          cookie: z.string().min(8).max(4000),
+        }))
+        .mutation(({ input }) => saveDirectSession(input.hostname, input.cookie)),
+      remove: adminProcedure
+        .input(z.object({ hostname: z.string().min(3).max(255) }))
+        .mutation(({ input }) => removeDirectSession(input.hostname)),
+    }),
   }),
   users: router({
     list: adminProcedure.query(() => listUsers()),

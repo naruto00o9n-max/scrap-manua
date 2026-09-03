@@ -14,7 +14,7 @@ import {
   setJobChapterDetails,
   updateJobUploadProgress,
 } from "../db";
-import type { ChapterJob } from "../../shared/dbTypes";
+import type { ChapterJob, ContentSource } from "../../shared/dbTypes";
 import { ENV } from "../_core/env";
 import {
   noticeFromJob,
@@ -30,6 +30,13 @@ import {
   sharingPolicyFromMode,
 } from "./googleDrive";
 import { getUsableSuwayomiToken } from "./settings";
+import {
+  DirectSourceError,
+  fetchDirectChapterWithSession,
+  getDirectSessionCookie,
+  isDirectSourceSupported,
+  probeDirectChapterPage,
+} from "./directSource";
 import { SuwayomiClient, type SuwayomiChapter } from "./suwayomi";
 import { imageOutputDescription, openChapterMergeSession } from "./imageMerging";
 import { recordOwnerAlert } from "./alerts";
@@ -71,6 +78,108 @@ function createProgressPoster(
   };
 }
 
+/** الفصل بعد إيجاده بالكامل: بيانات العرض وقائمة الصفحات — من أي مسار. */
+type ResolvedChapter = {
+  mangaTitle: string;
+  chapterName: string;
+  pages: string[];
+  sourceChapterId: string;
+};
+
+/**
+ * المسار المعتاد: إيجاد الفصل وجلب صفحاته عبر خادم السحب والإضافة المثبتة.
+ * محاولات العثور على الفصل ثلاث مع فترات انتظار، وآخر سبب حقيقي يُحفظ لبطاقة
+ * الفشل بدل رسالة عامة.
+ */
+async function resolveChapterViaSuwayomi(
+  job: ChapterJob,
+  source: ContentSource,
+  hooks: {
+    onRetry: (attempt: number) => Promise<void>;
+    onFinalFailure: () => Promise<void>;
+  }
+): Promise<ResolvedChapter> {
+  if (!source.suwayomiSourceId) {
+    throw new Error("المصدر لم يعد مفعّلًا أو غير مربوط بمصدر مصرح به.");
+  }
+  const suwayomi = new SuwayomiClient(
+    ENV.suwayomiBaseUrl,
+    getUsableSuwayomiToken()
+  );
+  const installedSource = (await suwayomi.listInstalledSources()).find(
+    item => item.id === source.suwayomiSourceId
+  );
+  if (!installedSource?.extension?.isInstalled) {
+    throw new Error("الإضافة المطابقة للمصدر غير مثبتة أو لم تعد متاحة.");
+  }
+  if (
+    source.extensionPackage &&
+    installedSource.extension.pkgName !== source.extensionPackage
+  ) {
+    throw new Error(
+      "حزمة الإضافة المثبتة لا تطابق الحزمة المعتمدة للمصدر."
+    );
+  }
+  if (
+    source.extensionName &&
+    installedSource.extension.name !== source.extensionName
+  ) {
+    throw new Error(
+      "اسم الإضافة المثبتة لا يطابق الإضافة المعتمدة للمصدر."
+    );
+  }
+  // Live source refreshes (webtoons.com, Naver, ...) occasionally return an
+  // empty chapter list or briefly fail. Retry resolution with a short
+  // backoff before declaring the job failed.
+  let chapter: SuwayomiChapter | null = null;
+  const resolutionAttempts = 3;
+  let lastResolutionError: unknown = null;
+  for (let attempt = 1; attempt <= resolutionAttempts; attempt++) {
+    try {
+      chapter = await suwayomi.findOrFetchChapterFromSource(
+        source.suwayomiSourceId,
+        job.canonicalUrl
+      );
+      if (chapter) break;
+    } catch (error) {
+      // الأخطاء الحية (اتصال/إضافة/بحث) تُحفظ لإظهار السبب الحقيقي في البطاقة
+      // بدل رسالة عامة، والمحاولة التالية تعيد المحاولة طالما لم تنهِ المحاولات.
+      lastResolutionError = error;
+      chapter = null;
+    }
+    if (attempt < resolutionAttempts) {
+      await hooks.onRetry(attempt);
+      await new Promise(resolve =>
+        setTimeout(resolve, attempt === 1 ? 5_000 : 15_000)
+      );
+    }
+  }
+  if (!chapter) {
+    // فرصة أخيرة لسبب أوضح: الموقع المدعوم بالسحب المباشر قد يكون فصله
+    // مقفلًا (مدفوعًا) — وهذا وحده يفسر غيابه عن فصول الخادم المفهرسة.
+    await hooks.onFinalFailure();
+    throw lastResolutionError instanceof Error && lastResolutionError.message
+      ? lastResolutionError
+      : new Error(
+          "لم أعثر على الفصل بهذا الرابط في المصادر المفعلة. تأكد من تثبيت الإضافة المصرح بها وأن الفصل معروف للخادم."
+        );
+  }
+  if (chapter.manga.sourceId !== source.suwayomiSourceId) {
+    throw new Error(
+      "الفصل الموجود لا يطابق المصدر المصرح به لهذا النطاق."
+    );
+  }
+  const fetched = await suwayomi.fetchChapterPages(chapter.id);
+  if (!fetched.pages.length)
+    throw new Error("لم تُعثر على أي صفحات قابلة للرفع لهذا الفصل.");
+  return {
+    mangaTitle: fetched.chapter.manga.title,
+    chapterName: fetched.chapter.name,
+    pages: fetched.pages,
+    sourceChapterId: String(chapter.id),
+  };
+}
+
 async function processChapterJob(job: ChapterJob): Promise<void> {
   // حالة المسار الحية لهذا الطلب؛ تُغذّي بطاقة Discord في كل تحديث.
   let stage: JobStage = "validate";
@@ -97,92 +206,77 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
     if (
       !source ||
       source.status !== "active" ||
-      !source.allowDirectChapterLookup ||
-      !source.suwayomiSourceId
+      !source.allowDirectChapterLookup
     ) {
       throw new Error(
         "المصدر لم يعد مفعّلًا أو غير مربوط بمصدر مصرح به."
       );
     }
 
-    const suwayomi = new SuwayomiClient(
-      ENV.suwayomiBaseUrl,
-      getUsableSuwayomiToken()
-    );
-    const installedSource = (await suwayomi.listInstalledSources()).find(
-      item => item.id === source.suwayomiSourceId
-    );
-    if (!installedSource?.extension?.isInstalled) {
-      throw new Error(
-        "الإضافة المطابقة للمصدر غير مثبتة أو لم تعد متاحة."
-      );
-    }
-    if (
-      source.extensionPackage &&
-      installedSource.extension.pkgName !== source.extensionPackage
-    ) {
-      throw new Error(
-        "حزمة الإضافة المثبتة لا تطابق الحزمة المعتمدة للمصدر."
-      );
-    }
-    if (
-      source.extensionName &&
-      installedSource.extension.name !== source.extensionName
-    ) {
-      throw new Error(
-        "اسم الإضافة المثبتة لا يطابق الإضافة المعتمدة للمصدر."
-      );
-    }
     stage = "chapter";
     await post({ ...base(), status: "downloading" }, true);
-    // Live source refreshes (webtoons.com, Naver, ...) occasionally return an
-    // empty chapter list or briefly fail. Retry resolution with a short
-    // backoff before declaring the job failed.
-    let chapter: SuwayomiChapter | null = null;
-    const resolutionAttempts = 3;
-    let lastResolutionError: unknown = null;
-    for (let attempt = 1; attempt <= resolutionAttempts; attempt++) {
-      try {
-        chapter = await suwayomi.findOrFetchChapterFromSource(
-          source.suwayomiSourceId,
-          job.canonicalUrl
-        );
-        if (chapter) break;
-      } catch (error) {
-        // الأخطاء الحية (اتصال/إضافة/بحث) تُحفظ لإظهار السبب الحقيقي في البطاقة
-        // بدل رسالة عامة، والمحاولة التالية تعيد المحاولة طالما لم تنهِ المحاولات.
-        lastResolutionError = error;
-        chapter = null;
-      }
-      if (attempt < resolutionAttempts) {
+
+    // ============================================================
+    // التوجيه الذكي بين مسارين دون أي خيار يدوي:
+    // • للمواقع التي وثّق المالك جلستها في اللوحة، تُفحص صفحة الفصل مباشرة
+    //   أولًا: الفصل المقفل (المدفوع) لا تعرفه إضافة الخادم أصلًا فيُسحب
+    //   بحقن كوكي الجلسة، والفصل المجاني يمر عبر المسار المعتاد كما هو.
+    // • لغير ذلك: المسار المعتاد فورًا — سلوك كل المصادر الأخرى لم يتغير.
+    // ============================================================
+    let resolved: ResolvedChapter | null = null;
+    const sessionCookie = isDirectSourceSupported(source.hostname)
+      ? await getDirectSessionCookie(source.hostname)
+      : null;
+    if (sessionCookie) {
+      const probe = await probeDirectChapterPage(job.canonicalUrl);
+      if (probe.mode === "locked") {
         await addJobAttempt(
           job.id,
           "downloading",
-          `لم يُعثر على الفصل في المحاولة ${attempt}، تتم إعادة المحاولة بعد مهلة.`
+          "الفصل محمي (مدفوع) — سيُسحب مباشرة بجلية الموقع الموثقة من لوحة التحكم."
         );
-        await new Promise(resolve =>
-          setTimeout(resolve, attempt === 1 ? 5_000 : 15_000)
+        await post({ ...base(), status: "downloading" }, true);
+        const direct = await fetchDirectChapterWithSession(
+          job.canonicalUrl,
+          sessionCookie
+        );
+        resolved = {
+          mangaTitle: direct.mangaTitle,
+          chapterName: direct.chapterName,
+          pages: direct.pages,
+          sourceChapterId: job.canonicalUrl,
+        };
+        await addJobAttempt(
+          job.id,
+          "downloading",
+          `فُتح الفصل بالجلسة الموثقة — ${direct.pages.length} صفحة.`
         );
       }
     }
-    if (!chapter) {
-      throw lastResolutionError instanceof Error && lastResolutionError.message
-        ? lastResolutionError
-        : new Error(
-            "لم أعثر على الفصل بهذا الرابط في المصادر المفعلة. تأكد من تثبيت الإضافة المصرح بها وأن الفصل معروف للخادم."
+    if (!resolved) {
+      resolved = await resolveChapterViaSuwayomi(job, source, {
+        onRetry: async attempt => {
+          await addJobAttempt(
+            job.id,
+            "downloading",
+            `لم يُعثر على الفصل في المحاولة ${attempt}، تتم إعادة المحاولة بعد مهلة.`
           );
-    }
-    if (chapter.manga.sourceId !== source.suwayomiSourceId) {
-      throw new Error(
-        "الفصل الموجود لا يطابق المصدر المصرح به لهذا النطاق."
-      );
+        },
+        onFinalFailure: async () => {
+          if (!sessionCookie && isDirectSourceSupported(source.hostname)) {
+            const probe = await probeDirectChapterPage(job.canonicalUrl);
+            if (probe.mode === "locked") {
+              throw new DirectSourceError(
+                "هذا الفصل مقفل (مدفوع) ولا يظهر في فصول الموقع المفهرسة. لسحبه وثّق جلسة الموقع من لوحة التحكم ثم أعد /فصل."
+              );
+            }
+          }
+        },
+      });
     }
 
-    const fetched = await suwayomi.fetchChapterPages(chapter.id);
-    if (!fetched.pages.length)
-      throw new Error("لم تُعثر على أي صفحات قابلة للرفع لهذا الفصل.");
-    pageCount = fetched.pages.length;
-    label = `**${fetched.chapter.manga.title}** — ${fetched.chapter.name}`;
+    pageCount = resolved.pages.length;
+    label = `**${resolved.mangaTitle}** — ${resolved.chapterName}`;
     stage = "download";
     await post({ ...base(), status: "downloading" }, true);
     // تُنزّل الصفحات وتُدمج عبر ملفات مؤقتة على القرص بدل الذاكرة؛ ذلك يمنع
@@ -192,7 +286,7 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
     // صيغة اللوحة (JPG/WebP) ويخرج PNG دائمًا بينما /دمج يحترم الإعداد.
     const outputConfig = await getImageOutputConfig();
     const mergeSession = await openChapterMergeSession(
-      fetched.pages,
+      resolved.pages,
       async event => {
         if (event.phase === "downloading") {
           await post({
@@ -217,15 +311,15 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
         throw new Error("تعذر دمج صفحات الفصل في صور قابلة للرفع.");
       mergedCount = mergedImages.length;
       await setJobChapterDetails(job.id, {
-        sourceChapterId: String(chapter.id),
-        mangaTitle: fetched.chapter.manga.title,
-        chapterTitle: fetched.chapter.name,
+        sourceChapterId: resolved.sourceChapterId,
+        mangaTitle: resolved.mangaTitle,
+        chapterTitle: resolved.chapterName,
         totalPages: mergedImages.length,
       });
       await addJobAttempt(
         job.id,
         "downloading",
-        `سُحبت ${fetched.pages.length} صفحة ودمجت في ${mergedImages.length} صور طويلة — ${imageOutputDescription(outputConfig)}.`
+        `سُحبت ${resolved.pages.length} صفحة ودمجت في ${mergedImages.length} صور طويلة — ${imageOutputDescription(outputConfig)}.`
       );
 
       const drive = new GoogleDriveClient();
@@ -236,8 +330,8 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
       const folder = await drive.createChapterFolder(
         // نطاق المصدر يُضاف لاسم العمل حتى لا يشارك مصدران مختلفان نفس المجلد
         // إذا تطابق اسم العمل واسم الفصل بينهما.
-        mangaFolderTitle(fetched.chapter.manga.title, job.canonicalUrl),
-        fetched.chapter.name,
+        mangaFolderTitle(resolved.mangaTitle, job.canonicalUrl),
+        resolved.chapterName,
         sharing
       );
       await markJobUploading(job.id, folder.id, folder.url);
