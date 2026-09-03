@@ -15,9 +15,21 @@ export function isMonitorRequestAuthorized(rawToken: string | undefined): boolea
   return timingSafeEqual(Buffer.from(rawToken), Buffer.from(expected));
 }
 
+// تسميات عربية للخدمات في رسائل التنبيه والسجلات المرئية —
+// الاسم الداخلي للخدمة لا يظهر كما هو في أي رسالة مرسلة.
+const SERVICE_LABELS: Record<string, string> = {
+  discord: "ديسكورد",
+  "google-drive": "جوجل درايف",
+  suwayomi: "خادم السحب",
+};
+
+function serviceLabel(service: string): string {
+  return SERVICE_LABELS[service] ?? service;
+}
+
 async function checkService(service: string, isConfigured: boolean, check: () => Promise<void>): Promise<MonitorResult> {
   if (!isConfigured) {
-    const message = `إعدادات ${service} غير مكتملة في أسرار الخادم.`;
+    const message = `إعدادات ${serviceLabel(service)} غير مكتملة في أسرار الخادم.`;
     await saveIntegrationHealth(service, "offline", message);
     await recordOwnerAlert(service, "critical", message);
     return { service, healthy: false, message };
@@ -27,9 +39,9 @@ async function checkService(service: string, isConfigured: boolean, check: () =>
     await saveIntegrationHealth(service, "healthy", "فحص خارجي ناجح.");
     return { service, healthy: true, message: "اتصال سليم" };
   } catch (error) {
-    const message = error instanceof Error ? error.message : `تعذر فحص ${service}.`;
+    const message = error instanceof Error ? error.message : `تعذر فحص ${serviceLabel(service)}.`;
     await saveIntegrationHealth(service, "offline", message);
-    await recordOwnerAlert(service, "critical", `${service}: ${message}`);
+    await recordOwnerAlert(service, "critical", `${serviceLabel(service)}: ${message}`);
     return { service, healthy: false, message };
   }
 }

@@ -16,14 +16,11 @@ import {
 import { ENV } from "../_core/env";
 import { ZEUS_AVATAR_BASE64 } from "../assets/zeusAvatar";
 import {
-  addBlockedSourceEntry,
   addJobAttempt,
   cancelChapterJob,
-  deleteSource,
   getBlockedSources,
   getChapterJob,
   getSetting,
-  getSourceById,
   getSourceBySuwayomiId,
   listActiveDiscordRoleIds,
   listSources,
@@ -435,7 +432,6 @@ export function buildHelpComponents(
       [
         "### 🔹 /مواقع",
         "يعرض المواقع التي يدعمها ZEUS مرتبة في أقسام لغوية: العربية قسم، والإنجليزية قسم، وهكذا.",
-        "زر «إدارة المواقع» أسفل القائمة يفتح للمالك: تعطيل موقع أو تفعيله، إعادة تسميته، أو حذفه من البوت نهائيًا.",
       ].join("\n")
     ),
     separator(),
@@ -2070,21 +2066,8 @@ export function buildSourcesComponents(
   }
   if (!groups.length) {
     body.push(separator());
-    body.push(text("لا توجد مواقع متاحة بعد — أضف إضافة على Suwayomi وستظهر هنا فورًا."));
+    body.push(text("لا توجد مواقع متاحة بعد — تُضاف المواقع تلقائيًا فور اعتمادها."));
   }
-  body.push(separator());
-  body.push({
-    type: 1,
-    components: [
-      {
-        type: 2,
-        style: 2,
-        label: "إدارة المواقع",
-        emoji: { name: "⚙" },
-        custom_id: "sources:manage",
-      },
-    ],
-  });
   body.push(text("-# ZEUS"));
   return [raw({ type: 17, accent_color: GOLD, components: body })];
 }
@@ -2324,320 +2307,6 @@ async function replySources(interaction: any) {
         )
       )
       .catch(() => undefined);
-  }
-}
-
-// ============================================================
-// إدارة المواقع (المالك فقط): تعطيل/تفعيل، إعادة تسمية، حذف نهائي.
-// تعطيل الموقع يقفله للمالك فلا تعيد المزامنة تفعيله، والحذف يسجّل
-// النطاق في قائمة الحجب فلا تعيد المزامنة إضافته من جديد.
-// ============================================================
-
-export type SourcesManageView =
-  | { kind: "list"; page: number }
-  | { kind: "site"; sourceId: number }
-  | { kind: "confirm"; sourceId: number }
-  | { kind: "rename"; sourceId: number };
-
-const SOURCES_MANAGE_PAGE_SIZE = 25;
-
-type PendingSourceRename = {
-  sourceId: number;
-  channelId: string;
-  messageId: string;
-  timer: NodeJS.Timeout;
-};
-
-const SOURCE_RENAME_TIMEOUT_MS = 2 * 60 * 1000;
-const pendingSourceRenames = new Map<string, PendingSourceRename>();
-
-function clearSourceRename(key: string) {
-  const pending = pendingSourceRenames.get(key);
-  if (pending) {
-    clearTimeout(pending.timer);
-    pendingSourceRenames.delete(key);
-  }
-}
-
-function sourceStatusEmoji(source: ContentSource): string {
-  return source.status === "active" ? "✅" : "⛔";
-}
-
-/** بطاقة إدارة المواقع: قائمة صفحات، أو تفاصيل موقع، أو تأكيد حذف، أو طلب تسمية. */
-export function buildSourcesManageComponents(
-  sources: ContentSource[],
-  view: SourcesManageView,
-  avatar: string | null = avatarUrl()
-): APIMessageTopLevelComponent[] {
-  const ordered = [...sources].sort(
-    (a, b) =>
-      (a.status === "active" ? 0 : 1) - (b.status === "active" ? 0 : 1) ||
-      a.name.localeCompare(b.name, "ar")
-  );
-  const findSource = (sourceId: number) => ordered.find(item => item.id === sourceId);
-
-  if (view.kind !== "list") {
-    const source = findSource(view.sourceId);
-    if (!source) {
-      return buildSourcesManageComponents(sources, { kind: "list", page: 0 }, avatar);
-    }
-
-    if (view.kind === "confirm") {
-      const body: Raw[] = [
-        headerBlock(`## 🗑 حذف ${source.name}`, [], avatar),
-        separator(2),
-        text(
-          "سيُحذف الموقع من قوائم البحث والسحب ولن تعيد المزامنة إضافته تلقائيًا.\nلا يُحذف أي شيء من Suwayomi نفسها."
-        ),
-        separator(),
-        {
-          type: 1,
-          components: [
-            {
-              type: 2,
-              style: 4,
-              label: "تأكيد الحذف",
-              custom_id: `sources:confirmdelete:${source.id}`,
-            },
-            {
-              type: 2,
-              style: 2,
-              label: "تراجع",
-              custom_id: `sources:pick:${source.id}`,
-            },
-          ],
-        },
-      ];
-      return [raw({ type: 17, accent_color: GOLD, components: body })];
-    }
-
-    if (view.kind === "rename") {
-      const body: Raw[] = [
-        headerBlock(`## ✏ إعادة تسمية ${source.name}`, [], avatar),
-        separator(2),
-        text("اكتب الاسم الجديد في هذه القناة خلال دقيقتين."),
-        separator(),
-        {
-          type: 1,
-          components: [
-            {
-              type: 2,
-              style: 2,
-              label: "إلغاء",
-              custom_id: `sources:cancelrename:${source.id}`,
-            },
-          ],
-        },
-      ];
-      return [raw({ type: 17, accent_color: GOLD, components: body })];
-    }
-
-    const body: Raw[] = [
-      headerBlock(`## ⚙ ${source.name}`, [], avatar),
-      separator(2),
-      text(
-        [
-          `**النطاق:** ${source.hostname.endsWith(".internal") ? "عبر /بحث" : source.hostname}`,
-          `**الحالة:** ${source.status === "active" ? "مفعّل ✅" : "معطّل ⛔"}`,
-        ].join("\n")
-      ),
-      separator(),
-      {
-        type: 1,
-        components: [
-          {
-            type: 2,
-            style: 2,
-            label: source.status === "active" ? "تعطيل" : "تفعيل",
-            custom_id: `sources:toggle:${source.id}`,
-          },
-          {
-            type: 2,
-            style: 2,
-            label: "إعادة تسمية",
-            custom_id: `sources:rename:${source.id}`,
-          },
-          {
-            type: 2,
-            style: 4,
-            label: "حذف",
-            custom_id: `sources:delete:${source.id}`,
-          },
-          {
-            type: 2,
-            style: 2,
-            label: "رجوع",
-            emoji: { name: "↩" },
-            custom_id: "sources:manage",
-          },
-        ],
-      },
-    ];
-    return [raw({ type: 17, accent_color: GOLD, components: body })];
-  }
-
-  const totalPages = Math.max(1, Math.ceil(ordered.length / SOURCES_MANAGE_PAGE_SIZE));
-  const page = Math.min(Math.max(0, view.page), totalPages - 1);
-  const slice = ordered.slice(page * SOURCES_MANAGE_PAGE_SIZE, (page + 1) * SOURCES_MANAGE_PAGE_SIZE);
-  const body: Raw[] = [
-    headerBlock("## 🛠️ إدارة المواقع", [], avatar),
-    separator(2),
-    text(
-      ordered.length
-        ? `اختر موقعًا لإدارته${totalPages > 1 ? ` — صفحة ${page + 1} من ${totalPages}` : ""}.`
-        : "لا توجد مواقع بعد."
-    ),
-  ];
-  if (slice.length) {
-    body.push({
-      type: 1,
-      components: [
-        {
-          type: 3,
-          custom_id: "sources:pick",
-          placeholder: "اختر موقعًا…",
-          options: slice.map(source => ({
-            label: `${sourceStatusEmoji(source)} ${source.name}`.slice(0, 100),
-            description: source.hostname.slice(0, 100) || undefined,
-            value: String(source.id),
-          })),
-        },
-      ],
-    });
-  }
-  if (totalPages > 1) {
-    body.push({
-      type: 1,
-      components: [
-        {
-          type: 2,
-          style: 2,
-          label: "السابق",
-          emoji: { name: "◀" },
-          custom_id: `sources:list:${page - 1}`,
-          disabled: page <= 0,
-        },
-        {
-          type: 2,
-          style: 2,
-          label: `صفحة ${page + 1} من ${totalPages}`,
-          custom_id: `sources:stay:${page}`,
-          disabled: true,
-        },
-        {
-          type: 2,
-          style: 2,
-          label: "التالي",
-          emoji: { name: "▶" },
-          custom_id: `sources:list:${page + 1}`,
-          disabled: page >= totalPages - 1,
-        },
-      ],
-    });
-  }
-  return [raw({ type: 17, accent_color: GOLD, components: body })];
-}
-
-async function showSourcesManageView(interaction: any, view: SourcesManageView) {
-  const sources = await listSources();
-  await editMessageContent(
-    interaction.channelId,
-    interaction.message.id,
-    panelPayload(buildSourcesManageComponents(sources, view))
-  );
-}
-
-async function handleSourcesComponent(interaction: any) {
-  if (!isOwner(interaction.user.id)) {
-    await interaction
-      .reply({ content: "إدارة المواقع متاحة للمالك فقط.", flags: MessageFlags.Ephemeral })
-      .catch(() => undefined);
-    return;
-  }
-  const parts = interaction.customId.split(":");
-  const action = parts[1] as string;
-  const idFromCustom = Number(parts[2]);
-  const selectValue = Number(interaction.values?.[0]);
-  const sourceId = Number.isFinite(selectValue) && selectValue > 0 ? selectValue : idFromCustom;
-
-  await interaction.deferUpdate();
-  try {
-    if (action === "manage" || action === "list" || action === "stay") {
-      const page = Number.isFinite(idFromCustom) ? idFromCustom : 0;
-      await showSourcesManageView(interaction, { kind: "list", page });
-      return;
-    }
-    if (action === "pick") {
-      await showSourcesManageView(interaction, { kind: "site", sourceId });
-      return;
-    }
-    if (action === "toggle") {
-      const row = await getSourceById(sourceId);
-      if (!row) {
-        await showSourcesManageView(interaction, { kind: "list", page: 0 });
-        return;
-      }
-      const disabling = row.status === "active";
-      await saveSource({
-        ...row,
-        status: disabling ? "disabled" : "active",
-        // تعطيل الموقع يقفله حتى لا تعيد المزامنة تفعيله تلقائيًا،
-        // والتفعيل يعيد السلوك التلقائي المعتاد.
-        ownerLocked: disabling,
-      });
-      await showSourcesManageView(interaction, { kind: "site", sourceId });
-      return;
-    }
-    if (action === "rename") {
-      const key = `${interaction.channelId}:${interaction.user.id}`;
-      clearSourceRename(key);
-      const timer = setTimeout(() => {
-        pendingSourceRenames.delete(key);
-      }, SOURCE_RENAME_TIMEOUT_MS);
-      timer.unref?.();
-      pendingSourceRenames.set(key, {
-        sourceId,
-        channelId: interaction.channelId,
-        messageId: interaction.message.id,
-        timer,
-      });
-      await showSourcesManageView(interaction, { kind: "rename", sourceId });
-      return;
-    }
-    if (action === "cancelrename") {
-      clearSourceRename(`${interaction.channelId}:${interaction.user.id}`);
-      await showSourcesManageView(interaction, { kind: "site", sourceId });
-      return;
-    }
-    if (action === "delete") {
-      await showSourcesManageView(interaction, { kind: "confirm", sourceId });
-      return;
-    }
-    if (action === "confirmdelete") {
-      const row = await getSourceById(sourceId);
-      if (row) {
-        // قائمة الحجب تمنع المزامنة من إعادة إضافة الموقع المحذوف.
-        await addBlockedSourceEntry({
-          suwayomiSourceId: row.suwayomiSourceId,
-          hostname: row.hostname,
-        });
-        await deleteSource(row.id);
-      }
-      await showSourcesManageView(interaction, { kind: "list", page: 0 });
-      return;
-    }
-  } catch (error) {
-    console.warn("[Discord] Sources management failed", error);
-    await editMessageContent(
-      interaction.channelId,
-      interaction.message.id,
-      panelPayload(
-        buildSearchCardComponents({
-          state: "failed",
-          detail: "تعذر تنفيذ العملية على المواقع الآن — أعد المحاولة.",
-        })
-      )
-    ).catch(() => undefined);
   }
 }
 
@@ -3110,8 +2779,6 @@ async function replyChapter(interaction: any) {
 }
 
 async function handleButton(interaction: any) {
-  if (interaction.customId.startsWith("sources:"))
-    return void handleSourcesComponent(interaction);
   if (
     interaction.customId.startsWith("search:page:") ||
     interaction.customId.startsWith("search:cpage:")
@@ -3230,8 +2897,6 @@ export async function startDiscordBot() {
     try {
       if (interaction.isButton()) return void handleButton(interaction);
       if (interaction.isStringSelectMenu()) {
-        if (interaction.customId.startsWith("sources:"))
-          return void handleSourcesComponent(interaction);
         return void handleSearchSelectMenu(interaction);
       }
       if (!interaction.isChatInputCommand()) return;
@@ -3264,46 +2929,7 @@ export async function startDiscordBot() {
   client.on(Events.MessageCreate, async message => {
     if (message.author.bot || !message.guild) return;
     const key = `${message.channelId}:${message.author.id}`;
-    // أولًا: انتظار إعادة تسمية موقع من إدارة المواقع — الرسالة النصية هي الاسم الجديد.
-    const renamePending = pendingSourceRenames.get(key);
-    if (renamePending) {
-      const name = message.content.trim();
-      try {
-        const row = await getSourceById(renamePending.sourceId);
-        if (!row) {
-          clearSourceRename(key);
-          return;
-        }
-        if (!name || name.length < 1 || name.length > 80) {
-          await editMessageContent(
-            renamePending.channelId,
-            renamePending.messageId,
-            panelPayload(
-              buildSearchCardComponents({
-                state: "failed",
-                detail: "الاسم غير صالح — اكتب اسمًا من 1 إلى 80 حرفًا ثم أعد الإرسال، أو اضغط «إلغاء».",
-              })
-            )
-          ).catch(() => undefined);
-          return;
-        }
-        await saveSource({ ...row, name });
-        clearSourceRename(key);
-        const sources = await listSources();
-        await editMessageContent(
-          renamePending.channelId,
-          renamePending.messageId,
-          panelPayload(
-            buildSourcesManageComponents(sources, { kind: "site", sourceId: renamePending.sourceId })
-          )
-        ).catch(() => undefined);
-      } catch (error) {
-        console.warn("[Discord] Source rename failed", error);
-        clearSourceRename(key);
-      }
-      return; // الرسالة استُهلكت لإعادة التسمية.
-    }
-    // ثانيًا: طلبات الدمج المعلقة — مرفق ZIP/CBZ أو رابط Drive في رسالة عادية.
+    // طلبات الدمج المعلقة — مرفق ZIP/CBZ أو رابط Drive في رسالة عادية.
     if (pendingMergePrompts.has(key)) {
       const archive = Array.from(message.attachments.values()).find(item =>
         isSupportedArchiveName(item.name)

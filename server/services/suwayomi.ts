@@ -206,10 +206,10 @@ export class SuwayomiClient {
   private readonly endpoint: string;
 
   constructor(baseUrl: string, private readonly token = "") {
-    if (!baseUrl) throw new SuwayomiError("لم يُضبط عنوان Suwayomi Server.");
+    if (!baseUrl) throw new SuwayomiError("لم يُضبط عنوان خادم السحب.");
     const parsed = new URL(baseUrl);
     if (parsed.protocol !== "https:") {
-      throw new SuwayomiError("يجب أن يستخدم اتصال Suwayomi بروتوكول HTTPS.");
+      throw new SuwayomiError("يجب أن يستخدم اتصال خادم السحب بروتوكول HTTPS.");
     }
     this.endpoint = new URL("/api/graphql", parsed).toString();
   }
@@ -226,14 +226,14 @@ export class SuwayomiClient {
     });
 
     if (!response.ok) {
-      throw new SuwayomiError(`تعذر الوصول إلى Suwayomi (${response.status}).`);
+      throw new SuwayomiError(`تعذر الوصول إلى خادم السحب (${response.status}).`);
     }
 
     const body = (await response.json()) as GraphQlResponse<T>;
     if (body.errors?.length) {
       throw new SuwayomiError(body.errors.map(error => error.message ?? "خطأ GraphQL").join("؛ "));
     }
-    if (!body.data) throw new SuwayomiError("استجاب Suwayomi دون بيانات.");
+    if (!body.data) throw new SuwayomiError("استجاب خادم السحب دون بيانات.");
     return body.data;
   }
 

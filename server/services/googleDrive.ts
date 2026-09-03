@@ -113,7 +113,7 @@ export function buildPageFilename(pageIndex: number, contentType: string | null)
 
 function assertSafePageUrl(rawUrl: string): URL {
   let url: URL;
-  try { url = new URL(rawUrl); } catch { throw new GoogleDriveError("أعاد Suwayomi رابط صفحة غير صالح."); }
+  try { url = new URL(rawUrl); } catch { throw new GoogleDriveError("أعاد السحب رابط صفحة غير صالح."); }
   const host = url.hostname.toLowerCase();
   if (url.protocol !== "https:" || url.username || url.password || host === "localhost" || isIP(host) !== 0 || host.endsWith(".local") || host.endsWith(".internal")) {
     throw new GoogleDriveError("رفض النظام رابط صفحة غير آمن من المصدر.");
