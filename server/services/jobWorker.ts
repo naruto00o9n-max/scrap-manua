@@ -90,11 +90,7 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
       pageCount,
       mergedCount,
     });
-    await addJobAttempt(
-      job.id,
-      "downloading",
-      "بدأ التحقق من الفصل عبر Suwayomi."
-    );
+    await addJobAttempt(job.id, "downloading", "بدأ التحقق من الفصل في المصدر.");
     await post({ ...base(), status: "downloading" }, true);
     const source = await getSourceById(job.sourceId);
     if (
@@ -104,7 +100,7 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
       !source.suwayomiSourceId
     ) {
       throw new Error(
-        "المصدر لم يعد مفعّلًا أو غير مربوط بمصدر Suwayomi مصرح به."
+        "المصدر لم يعد مفعّلًا أو غير مربوط بمصدر مصرح به."
       );
     }
 
@@ -117,7 +113,7 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
     );
     if (!installedSource?.extension?.isInstalled) {
       throw new Error(
-        "إضافة Suwayomi المطابقة للمصدر غير مثبتة أو لم تعد متاحة."
+        "الإضافة المطابقة للمصدر غير مثبتة أو لم تعد متاحة."
       );
     }
     if (
@@ -125,7 +121,7 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
       installedSource.extension.pkgName !== source.extensionPackage
     ) {
       throw new Error(
-        "حزمة إضافة Suwayomi المثبتة لا تطابق الحزمة المعتمدة للمصدر."
+        "حزمة الإضافة المثبتة لا تطابق الحزمة المعتمدة للمصدر."
       );
     }
     if (
@@ -133,7 +129,7 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
       installedSource.extension.name !== source.extensionName
     ) {
       throw new Error(
-        "اسم إضافة Suwayomi المثبتة لا يطابق الإضافة المعتمدة للمصدر."
+        "اسم الإضافة المثبتة لا يطابق الإضافة المعتمدة للمصدر."
       );
     }
     stage = "chapter";
@@ -172,18 +168,18 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
       throw lastResolutionError instanceof Error && lastResolutionError.message
         ? lastResolutionError
         : new Error(
-            "لم يعثر Suwayomi على الفصل بهذا الرابط. تأكد من تثبيت الإضافة المصرح بها وأن الفصل معروف للخادم."
+            "لم أعثر على الفصل بهذا الرابط في المصادر المفعلة. تأكد من تثبيت الإضافة المصرح بها وأن الفصل معروف للخادم."
           );
     }
     if (chapter.manga.sourceId !== source.suwayomiSourceId) {
       throw new Error(
-        "الفصل الموجود في Suwayomi لا يطابق المصدر المصرح به لهذا النطاق."
+        "الفصل الموجود لا يطابق المصدر المصرح به لهذا النطاق."
       );
     }
 
     const fetched = await suwayomi.fetchChapterPages(chapter.id);
     if (!fetched.pages.length)
-      throw new Error("لم يعد Suwayomi أي صفحات قابلة للرفع لهذا الفصل.");
+      throw new Error("لم تُعثر على أي صفحات قابلة للرفع لهذا الفصل.");
     pageCount = fetched.pages.length;
     label = `**${fetched.chapter.manga.title}** — ${fetched.chapter.name}`;
     stage = "download";
@@ -223,7 +219,7 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
       await addJobAttempt(
         job.id,
         "downloading",
-        `استلم Suwayomi ${fetched.pages.length} صفحة ودمجها في ${mergedImages.length} صور طويلة غير خسارية.`
+        `سُحبت ${fetched.pages.length} صفحة ودمجت في ${mergedImages.length} صور طويلة غير خسارية.`
       );
 
       const drive = new GoogleDriveClient();

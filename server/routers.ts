@@ -1,9 +1,13 @@
 import { z } from "zod";
 import {
+  addBlockedSourceEntry,
   cancelChapterJob,
+  deleteSource,
   ensureDefaultAdminUser,
+  getBlockedSources,
   getDashboardSummary,
   getSetting,
+  getSourceById,
   getUserByEmail,
   listChapterJobs,
   listDiscordRoles,
@@ -23,6 +27,7 @@ import { COOKIE_NAME, ONE_YEAR_MS } from "../shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { adminProcedure, protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { getIntegrationConfiguration, getUsableSuwayomiToken } from "./services/settings";
+import { syncSourcesFromSuwayomi } from "./services/sourceSync";
 import { SuwayomiClient } from "./services/suwayomi";
 import { ENV } from "./_core/env";
 import { GoogleDriveClient } from "./services/googleDrive";
@@ -71,6 +76,34 @@ export const appRouter = router({
   sources: router({
     list: adminProcedure.query(() => listSources()),
     save: adminProcedure.input(sourceInput).mutation(({ input }) => saveSource(input)),
+    // تفعيل/تعطيل من اللوحة = قرار مالك: التعطيل يقفل المصدر فلا تعيده
+    // المزامنة التلقائية، والتفعيل يعيد السلوك التلقائي المعتاد.
+    setStatus: adminProcedure
+      .input(z.object({ id: z.number().int().positive(), status: z.enum(["active", "disabled"]) }))
+      .mutation(async ({ input }) => {
+        const row = await getSourceById(input.id);
+        if (!row) throw new Error("لم يُعثر على المصدر المطلوب.");
+        return saveSource({ ...row, status: input.status, ownerLocked: input.status === "disabled" });
+      }),
+    rename: adminProcedure
+      .input(z.object({ id: z.number().int().positive(), name: z.string().trim().min(1).max(80) }))
+      .mutation(async ({ input }) => {
+        const row = await getSourceById(input.id);
+        if (!row) throw new Error("لم يُعثر على المصدر المطلوب.");
+        return saveSource({ ...row, name: input.name });
+      }),
+    // حذف نهائي: يُسجّل النطاق ومعرّف المصدر في قائمة الحجب حتى لا تعيد
+    // المزامنة التلقائية إضافته في الدورة التالية.
+    remove: adminProcedure.input(z.object({ id: z.number().int().positive() })).mutation(async ({ input }) => {
+      const row = await getSourceById(input.id);
+      if (!row) throw new Error("لم يُعثر على المصدر المطلوب.");
+      await addBlockedSourceEntry({ suwayomiSourceId: row.suwayomiSourceId, hostname: row.hostname });
+      await deleteSource(row.id);
+      return { success: true } as const;
+    }),
+    // المزامنة الفورية من زر اللوحة — نفس مزامنة الدورة الدورية تمامًا.
+    syncNow: adminProcedure.mutation(() => syncSourcesFromSuwayomi()),
+    blocked: adminProcedure.query(() => getBlockedSources()),
   }),
   settings: router({
     get: adminProcedure.query(async () => ({
