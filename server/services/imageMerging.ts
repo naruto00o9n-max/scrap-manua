@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import sharp from "sharp";
+import sharp, { type Sharp } from "sharp";
 
 // التحكم في استهلاك ذاكرة libvips: بلا تخزين مؤقت للصور المفككة ومعالجة تسلسلية،
 // حتى لا تقتل الحاوية العملية عند دمج فصول طويلة (خطأ exit 137 / OOM).
@@ -17,21 +17,108 @@ const MAX_PAGE_SIZE_BYTES = 40 * 1024 * 1024;
 // (مثل 5000+5000+4316 = 14316 أو 5000+5000+4925 = 14925) بدل ترك صفحات
 // صغيرة مستقلة — طلب المستخدم: «دمج اثنين أو ثلاثة ليصل العتبة».
 const FLEX_OUTPUT_HEIGHT = 15000;
-const OUTPUT_MIME = "image/png";
 const PAGE_DOWNLOAD_CONCURRENCY = 6;
+
+/** صيغ إخراج الصور المدمجة المدعومة — الاختيار من لوحة الإعدادات. */
+export type ImageOutputFormat = "png" | "jpeg" | "webp";
+export type MergedImageMime = "image/png" | "image/jpeg" | "image/webp";
+
+export type ImageOutputConfig = {
+  format: ImageOutputFormat;
+  /** جودة الترميز (40–100): تُستخدم لصيغتي JPG/WebP ولخيار تقليل ألوان PNG. */
+  quality: number;
+  /** تقليل ألوان PNG (لوحة 256 لونًا بتردد مُدار) — أصغر أكثر مع فقدان غير محسوس للمانهوا. */
+  pngPalette: boolean;
+};
+
+/**
+ * الافتراضي: PNG بضغط أقصى **بلا أي فقدان**.
+ * السابق كان يرمّز PNG بمستوى ضغط 0 (تخزين خام بلا ضغط إطلاقًا) فكانت الصورة
+ * المدمجة 800×15000 تشغل ~46MB؛ نفس الصورة بمستوى الضغط الأقصى تنزل إلى
+ * كسر بسيط منها — إصلاح الحجم الهائل دون تغيير الصيغة ولا فقدان بكسل واحد.
+ */
+export const DEFAULT_IMAGE_OUTPUT: ImageOutputConfig = {
+  format: "png",
+  quality: 88,
+  pngPalette: false,
+};
+
+export const FORMAT_MIME: Record<ImageOutputFormat, MergedImageMime> = {
+  png: "image/png",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+};
+
+function clampQuality(quality: number): number {
+  if (!Number.isFinite(quality)) return DEFAULT_IMAGE_OUTPUT.quality;
+  return Math.min(100, Math.max(40, Math.round(quality)));
+}
+
+/**
+ * يطبّق ترميز الإخراج على أنبوب sharp حسب الإعداد:
+ * PNG بضغط أقصى (فلترة تكيفية)، واختياريًا تقليل ألوان بمستوى جودة محدد؛
+ * JPG يُسطّح الشفافية على أبيض ثم يرمّز عبر mozjpeg؛ WebP بجودة محددة.
+ */
+function encodeWithOutputConfig(pipeline: Sharp, config: ImageOutputConfig): Sharp {
+  if (config.format === "jpeg") {
+    return pipeline
+      .flatten({ background: { r: 255, g: 255, b: 255 } })
+      .jpeg({ quality: clampQuality(config.quality), mozjpeg: true });
+  }
+  if (config.format === "webp") {
+    return pipeline.webp({ quality: clampQuality(config.quality) });
+  }
+  return pipeline.png(
+    config.pngPalette
+      ? { compressionLevel: 9, adaptiveFiltering: true, palette: true, quality: clampQuality(config.quality), effort: 4 }
+      : { compressionLevel: 9, adaptiveFiltering: true, palette: false }
+  );
+}
+
+/** امتداد ملف الإخراج لكل صيغة. */
+export function imageOutputExtension(format: ImageOutputFormat): string {
+  return format === "jpeg" ? "jpg" : format;
+}
+
+/** وصف عربي قصير لصيغة الإخراج — يظهر في سجل محاولات الطلب. */
+export function imageOutputDescription(config: ImageOutputConfig): string {
+  if (config.format === "jpeg") return `JPG بجودة ${clampQuality(config.quality)}`;
+  if (config.format === "webp") return `WebP بجودة ${clampQuality(config.quality)}`;
+  return config.pngPalette
+    ? `PNG بتقليل الألوان (جودة ${clampQuality(config.quality)})`
+    : "PNG بلا أي فقدان بضغط أقصى";
+}
+
+/**
+ * يطبّع إعداد صيغة الصور القادم من الإعدادات المخزنة: أي قيمة ناقصة أو
+ * فاسدة أو خارج المدى تعود إلى الافتراضي الآمن (PNG بلا فقدان).
+ */
+export function normalizeImageOutputConfig(raw: string | null): ImageOutputConfig {
+  if (!raw) return { ...DEFAULT_IMAGE_OUTPUT };
+  try {
+    const parsed = JSON.parse(raw) as Partial<ImageOutputConfig>;
+    const format: ImageOutputFormat =
+      parsed.format === "jpeg" || parsed.format === "webp" ? parsed.format : "png";
+    const quality = clampQuality(Number(parsed.quality));
+    const pngPalette = parsed.pngPalette === true;
+    return { format, quality, pngPalette };
+  } catch {
+    return { ...DEFAULT_IMAGE_OUTPUT };
+  }
+}
 
 export type MergedChapterImage = {
   data: Buffer;
   width: number;
   height: number;
-  mimeType: typeof OUTPUT_MIME;
+  mimeType: MergedImageMime;
 };
 
 export type MergedChapterFile = {
   filePath: string;
   width: number;
   height: number;
-  mimeType: typeof OUTPUT_MIME;
+  mimeType: MergedImageMime;
 };
 
 export type ChapterMergeSession = {
@@ -227,7 +314,8 @@ async function renderGroupToFile(
   pagePaths: string[],
   dimensions: Array<{ width?: number; height?: number }>,
   width: number,
-  outputPath: string
+  outputPath: string,
+  output: ImageOutputConfig
 ): Promise<number> {
   const dims = group.map(index => dimensions[index]!);
   const height = dims.reduce((sum, item) => sum + (item.height ?? 0), 0);
@@ -237,10 +325,8 @@ async function renderGroupToFile(
     left: Math.floor((width - (dims[position]?.width ?? width)) / 2),
     top: dims.slice(0, position).reduce((sum, item) => sum + (item.height ?? 0), 0),
   }));
-  await sharp({ create: { width, height, channels: 4, background: { r: 255, g: 255, b: 255, alpha: 1 } } })
-    .composite(composites)
-    .png({ compressionLevel: 0, adaptiveFiltering: false, palette: false })
-    .toFile(outputPath);
+  const canvas = sharp({ create: { width, height, channels: 4, background: { r: 255, g: 255, b: 255, alpha: 1 } } }).composite(composites);
+  await encodeWithOutputConfig(canvas, output).toFile(outputPath);
   return height;
 }
 
@@ -289,7 +375,8 @@ async function scalePagesToUniformWidth(
     const targetPath = path.join(scaledDir, `${path.basename(pagePaths[index]!)}.scaled.png`);
     await sharp(pagePaths[index]!)
       .resize({ width })
-      .png({ compressionLevel: 0, adaptiveFiltering: false, palette: false })
+      // ملف وسيط مؤقت على القرص: ضغط معقول أسرع من الأقصى ويوفر مساحة العمل.
+      .png({ compressionLevel: 6, adaptiveFiltering: true, palette: false })
       .toFile(targetPath);
     paths[index] = targetPath;
     // نقرأ الأبعاد الفعلية للملف المحجّم — القسمة والتقريب قد يفرقان بكسلًا عن الحساب.
@@ -306,7 +393,8 @@ async function scalePagesToUniformWidth(
  */
 export async function openLocalImageMergeSession(
   pagePaths: string[],
-  onProgress?: MergeProgressListener
+  onProgress?: MergeProgressListener,
+  output: ImageOutputConfig = { ...DEFAULT_IMAGE_OUTPUT }
 ): Promise<ChapterMergeSession> {
   if (!pagePaths.length) {
     return { images: [], cleanup: async () => {} };
@@ -327,11 +415,12 @@ export async function openLocalImageMergeSession(
 
     const groups = groupPageIndexes(dimensions);
     const images: MergedChapterFile[] = [];
+    const extension = imageOutputExtension(output.format);
     // التسلسل مقصود: تُرسم مجموعة واحدة في كل مرة وتُكتب إلى القرص فورًا.
     for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
-      const outputPath = path.join(dir, `merged-${String(groupIndex + 1).padStart(3, "0")}.png`);
-      const height = await renderGroupToFile(groups[groupIndex]!, effectivePaths, dimensions, width, outputPath);
-      images.push({ filePath: outputPath, width, height, mimeType: OUTPUT_MIME });
+      const outputPath = path.join(dir, `merged-${String(groupIndex + 1).padStart(3, "0")}.${extension}`);
+      const height = await renderGroupToFile(groups[groupIndex]!, effectivePaths, dimensions, width, outputPath, output);
+      images.push({ filePath: outputPath, width, height, mimeType: FORMAT_MIME[output.format] });
       if (onProgress) {
         try { await onProgress({ phase: "merging", done: groupIndex + 1, total: groups.length }); } catch { /* فشل الإشعار لا يُفشل المعالجة */ }
       }
@@ -352,7 +441,8 @@ export async function openLocalImageMergeSession(
  */
 export async function openChapterMergeSession(
   pageUrls: string[],
-  onProgress?: MergeProgressListener
+  onProgress?: MergeProgressListener,
+  output: ImageOutputConfig = { ...DEFAULT_IMAGE_OUTPUT }
 ): Promise<ChapterMergeSession> {
   if (!pageUrls.length) {
     return { images: [], cleanup: async () => {} };
@@ -360,7 +450,7 @@ export async function openChapterMergeSession(
   const downloadDir = await mkdtemp(path.join(tmpdir(), "manga-pages-"));
   try {
     const pagePaths = await downloadPagesToTemp(pageUrls, downloadDir, onProgress);
-    const session = await openLocalImageMergeSession(pagePaths, onProgress);
+    const session = await openLocalImageMergeSession(pagePaths, onProgress, output);
     const sessionCleanup = session.cleanup;
     session.cleanup = async () => {
       await sessionCleanup();
@@ -377,15 +467,18 @@ export async function openChapterMergeSession(
  * واجهة قديمة تُعيد Buffers للتوافق مع الاختبارات والسكربتات؛ عامل الفصول
  * يستخدم openChapterMergeSession لتفادي الاحتفاظ بكل الصور في الذاكرة.
  */
-export async function mergeChapterPages(pageUrls: string[]): Promise<MergedChapterImage[]> {
-  const session = await openChapterMergeSession(pageUrls);
+export async function mergeChapterPages(
+  pageUrls: string[],
+  output: ImageOutputConfig = { ...DEFAULT_IMAGE_OUTPUT }
+): Promise<MergedChapterImage[]> {
+  const session = await openChapterMergeSession(pageUrls, undefined, output);
   try {
     return await Promise.all(
       session.images.map(async image => ({
         data: await readFile(image.filePath),
         width: image.width,
         height: image.height,
-        mimeType: OUTPUT_MIME,
+        mimeType: FORMAT_MIME[output.format],
       }))
     );
   } finally {

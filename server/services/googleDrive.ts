@@ -204,9 +204,9 @@ export class GoogleDriveClient {
     };
   }
 
-  async uploadMergedPage(data: Buffer, folderId: string, imageIndex: number): Promise<void> {
+  async uploadMergedPage(data: Buffer, folderId: string, imageIndex: number, mimeType: string = "image/png"): Promise<void> {
     if (!data.length || data.length > MAX_PAGE_SIZE_BYTES) throw new GoogleDriveError("حجم الصورة المدمجة غير صالح.");
-    const filename = buildPageFilename(imageIndex, "image/png");
+    const filename = buildPageFilename(imageIndex, mimeType);
     const existing = await this.drive.files.list({
       q: `'${escapeDriveQuery(folderId)}' in parents and name = '${escapeDriveQuery(filename)}' and trashed = false`,
       fields: "files(id)",
@@ -215,16 +215,16 @@ export class GoogleDriveClient {
     if (existing.data.files?.[0]?.id) return;
     await this.drive.files.create({
       requestBody: { name: filename, parents: [folderId] },
-      media: { mimeType: "image/png", body: Readable.from(data) },
+      media: { mimeType, body: Readable.from(data) },
       fields: "id",
     });
   }
 
-  /** يرفع صورة مدمجة من ملف مؤقت على القرص عبر تدفق مباشر دون تحميلها في الذاكرة. */
-  async uploadMergedPageFile(filePath: string, folderId: string, imageIndex: number): Promise<void> {
+  /** يرفع صورة مدمجة من ملف مؤقت على القرص عبر تدفق مباشر دون تحميلها في الذاكرة، بالصيغة الفعلية للناتج. */
+  async uploadMergedPageFile(filePath: string, folderId: string, imageIndex: number, mimeType: string = "image/png"): Promise<void> {
     const stats = await stat(filePath);
     if (!stats.size || stats.size > MAX_MERGED_IMAGE_BYTES) throw new GoogleDriveError("حجم الصورة المدمجة غير صالح.");
-    const filename = buildPageFilename(imageIndex, "image/png");
+    const filename = buildPageFilename(imageIndex, mimeType);
     const existing = await this.drive.files.list({
       q: `'${escapeDriveQuery(folderId)}' in parents and name = '${escapeDriveQuery(filename)}' and trashed = false`,
       fields: "files(id)",
@@ -233,7 +233,7 @@ export class GoogleDriveClient {
     if (existing.data.files?.[0]?.id) return;
     await this.drive.files.create({
       requestBody: { name: filename, parents: [folderId] },
-      media: { mimeType: "image/png", body: createReadStream(filePath) },
+      media: { mimeType, body: createReadStream(filePath) },
       fields: "id",
     });
   }

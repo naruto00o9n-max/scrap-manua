@@ -8,6 +8,7 @@ import {
 import { ENV } from "./_core/env";
 import { hashPassword } from "./_core/auth";
 import { isChapterRequestDuplicate } from "./services/jobDedupe";
+import { normalizeImageOutputConfig, type ImageOutputConfig } from "./services/imageMerging";
 
 type MongoDocument<T> = T & { _id?: unknown };
 type DiscordRole = { id: number; discordRoleId: string; label: string; isActive: boolean; createdAt: Date };
@@ -340,6 +341,22 @@ export async function getSetting(key: string): Promise<string | null> {
 export async function setSetting(key: string, value: string): Promise<void> {
   const db = await requireDb();
   await collections(db).appSettings.updateOne({ key }, { $set: { key, value, updatedAt: now() } }, { upsert: true });
+}
+
+// ===== صيغة الصور المدمجة (PNG/JPG/WebP) =====
+// إعداد المالك من لوحة التحكم: الافتراضي PNG بضغط أقصى بلا أي فقدان،
+// ويمكن اختيار JPG أو WebP أو تقليل ألوان PNG لحجم أصغر أكثر.
+const IMAGE_OUTPUT_KEY = "image_output_config";
+
+export async function getImageOutputConfig(): Promise<ImageOutputConfig> {
+  return normalizeImageOutputConfig(await getSetting(IMAGE_OUTPUT_KEY));
+}
+
+export async function saveImageOutputConfig(config: ImageOutputConfig): Promise<ImageOutputConfig> {
+  // التطبيع هنا يعيد رفض أي قيمة فاسدة أو خارج المدى قبل تخزينها.
+  const normalized = normalizeImageOutputConfig(JSON.stringify(config));
+  await setSetting(IMAGE_OUTPUT_KEY, JSON.stringify(normalized));
+  return normalized;
 }
 
 export async function listDiscordRoles() {

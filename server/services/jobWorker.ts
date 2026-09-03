@@ -1,6 +1,7 @@
 import {
   addJobAttempt,
   getChapterJob,
+  getImageOutputConfig,
   getNextPendingChapterJob,
   getSetting,
   getSourceById,
@@ -30,7 +31,7 @@ import {
 } from "./googleDrive";
 import { getUsableSuwayomiToken } from "./settings";
 import { SuwayomiClient, type SuwayomiChapter } from "./suwayomi";
-import { openChapterMergeSession } from "./imageMerging";
+import { imageOutputDescription, openChapterMergeSession } from "./imageMerging";
 import { recordOwnerAlert } from "./alerts";
 
 let isDraining = false;
@@ -186,6 +187,8 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
     await post({ ...base(), status: "downloading" }, true);
     // تُنزّل الصفحات وتُدمج عبر ملفات مؤقتة على القرص بدل الذاكرة؛ ذلك يمنع
     // قتل العملية بسبب نفاد الذاكرة (exit 137) في الفصول الطويلة.
+    // صيغة الإخراج إعداد مالك من اللوحة: الافتراضي PNG بضغط أقصى بلا أي فقدان.
+    const outputConfig = await getImageOutputConfig();
     const mergeSession = await openChapterMergeSession(
       fetched.pages,
       async event => {
@@ -219,7 +222,7 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
       await addJobAttempt(
         job.id,
         "downloading",
-        `سُحبت ${fetched.pages.length} صفحة ودمجت في ${mergedImages.length} صور طويلة غير خسارية.`
+        `سُحبت ${fetched.pages.length} صفحة ودمجت في ${mergedImages.length} صور طويلة — ${imageOutputDescription(outputConfig)}.`
       );
 
       const drive = new GoogleDriveClient();
@@ -275,7 +278,8 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
         await drive.uploadMergedPageFile(
           mergedImage.filePath,
           folder.id,
-          pageNumber
+          pageNumber,
+          mergedImage.mimeType
         );
         await updateJobUploadProgress(job.id, pageNumber);
         await post({
