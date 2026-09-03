@@ -1,3 +1,5 @@
+import { matchScore } from "./sourceSearch";
+
 type GraphQlResponse<T> = {
   data?: T;
   errors?: Array<{ message?: string }>;
@@ -64,6 +66,14 @@ function normalizedUrl(value: string): string {
   return parsed.toString().replace(/\/$/, "");
 }
 
+/**
+ * يستنتج رابط العمل من رابط الفصل عبر مسح مقاطع المسار من النهاية بحثًا عن
+ * «علامة فصل»: إما كلمة الفصل وحدها (…/chapter/157) أو مقطع مركّب يحمل الرقم
+ * (chapter-6، ch-12.5، ep-4، أو بمعرف الموقع قبله مثل 11302227-chapter-6
+ * بروابط comix.to) — وكل ما قبل هذا المقطع هو مسار العمل.
+ * هذا يغطي صيغ الروابط الشائعة بدل قاعدة /chapter/ الوحيدة التي كانت تُفشل
+ * سحب مواقع كثيرة (comix.to وغيرها) بخطأ «لم يعثر Suwayomi على الفصل».
+ */
 export function mangaUrlFromChapterUrl(chapterUrl: string): string | null {
   const parsed = new URL(chapterUrl);
   const host = parsed.hostname.replace(/^www\./, "");
@@ -77,9 +87,59 @@ export function mangaUrlFromChapterUrl(chapterUrl: string): string | null {
     const listPath = parsed.pathname.replace(/\/ep-[^/]+\/viewer\/?$/i, "/list");
     return `${parsed.origin}${listPath}?title_no=${encodeURIComponent(titleNo)}`;
   }
-  const match = parsed.pathname.match(/^(.*)\/chapter\/[^/]+\/?$/i);
-  if (!match?.[1]) return null;
-  return `${parsed.origin}${match[1]}`;
+
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    if (isChapterMarkerSegment(segments[index]!)) {
+      const mangaSegments = segments.slice(0, index);
+      if (!mangaSegments.length) return null;
+      return `${parsed.origin}/${mangaSegments.join("/")}`;
+    }
+  }
+  return null;
+}
+
+/** هل هذا المقطع يوصف بأنه علامة فصل في مسار رابط؟ */
+function isChapterMarkerSegment(segment: string): boolean {
+  const value = segment.toLowerCase();
+  // كلمة الفصل وحدها: الرقم في المقطع التالي (…/chapter/157)
+  if (/^(chapter|ch|episode|ep)$/.test(value)) return true;
+  // مقطع مركّب يحمل الرقم داخل نفس المقطع، ومعرّف الموقع مسموح قبله
+  // (chapter-6، ch-12.5، ep-4، 11302227-chapter-6)
+  return /^(?:\d+-)?(?:chapter|ch|episode|ep)[-_.]?\d+(?:\.\d+)?$/.test(value);
+}
+
+function numberFromDigits(input: string): number | null {
+  const normalized = input
+    .replace(/[\u0660-\u0669]/g, digit => String(digit.charCodeAt(0) - 0x0660))
+    .replace(/[\u06f0-\u06f9]/g, digit => String(digit.charCodeAt(0) - 0x06f0));
+  const value = Number(normalized);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/**
+ * يستخرج رقم الفصل من رابطه إن وُجد — من علامة الفصل نفسها:
+ * …/chapter/157 → 157، …/11302227-chapter-6 → 6، …/ch-12.5 → 12.5.
+ * يُستخدم كتحقق ثانٍ عند تعذر مطابقة الرابط حرفيًا ضمن فصول العمل.
+ */
+export function chapterNumberFromUrl(chapterUrl: string): number | null {
+  let segments: string[];
+  try {
+    segments = new URL(chapterUrl).pathname.split("/").filter(Boolean);
+  } catch {
+    return null;
+  }
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    const value = segments[index]!.toLowerCase();
+    const compound = value.match(/^(?:\d+-)?(?:chapter|ch|episode|ep)[-_.](\d+(?:\.\d+)?)$/);
+    if (compound?.[1]) return numberFromDigits(compound[1]);
+    if (/^(chapter|ch|episode|ep)$/.test(value)) {
+      const next = segments[index + 1];
+      if (!next) return null;
+      return numberFromDigits(next.split(/[^0-9.]/)[0] ?? "");
+    }
+  }
+  return null;
 }
 
 export async function naverTitleFromChapterUrl(chapterUrl: string): Promise<string | null> {
@@ -101,7 +161,7 @@ export function sourceSearchQueryFromChapterUrl(chapterUrl: string): string | nu
   const segments = new URL(mangaUrl).pathname
     .split("/")
     .filter(Boolean)
-    .filter(segment => !/^(list|detail|viewer|episode)$/i.test(segment));
+    .filter(segment => !/^(list|detail|viewer|episode|title|read|series|manga|comic|comics)$/i.test(segment));
   const slug = segments.at(-1);
   if (!slug) return null;
   return slug
@@ -111,8 +171,20 @@ export function sourceSearchQueryFromChapterUrl(chapterUrl: string): string | nu
     .trim() || null;
 }
 
-function normalizedTitle(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+/**
+ * صيغ بحث بديلة لاستعلام العمل: الاستعلام الأساسي ثم نفسه دون أول كلمة إذا
+ * كانت تبدو معرّف موقع قصيرًا (مثل «501vk the top …» في comix.to) — تكرار
+ * المعرّف في نص البحث يُفشل البحث عند بعض المواقع حتى لو كان العمل موجودًا.
+ */
+export function searchQueryVariants(query: string | null): string[] {
+  if (!query) return [];
+  const variants = [query];
+  const words = query.split(" ").filter(Boolean);
+  if (words.length >= 4 && words[0]!.length <= 8 && /^[\da-z]+$/i.test(words[0]!)) {
+    const rest = words.slice(1).join(" ");
+    if (!variants.includes(rest)) variants.push(rest);
+  }
+  return variants;
 }
 
 function absoluteUrl(value: string, baseUrl: string): string {
@@ -238,7 +310,14 @@ export class SuwayomiClient {
     return result.fetchMangaDetails.manga;
   }
 
-  async findOrFetchChapterFromSource(sourceId: string, chapterUrl: string): Promise<SuwayomiChapter | null> {
+  /**
+   * يعثر على الفصل من رابطه داخل مصدر محدد. مساران: تطابق حرفي في فهرس
+   * Suwayomi أولًا، ثم استنتاج رابط العمل وبحث حي في الموقع ومطابقة الفصل
+   * بالرابط ثم برقمه. عند التعذر يُلقي خطأ Suwayomi برسالة عربية تشرح السبب
+   * الفعلي (لم يُعثر على العمل؟ الفصل غير مفهرس؟ الإضافة متعثرة؟) بدل رمز
+   * null صامت — بطاقة الفشل في Discord تعرض هذا السبب للطالب.
+   */
+  async findOrFetchChapterFromSource(sourceId: string, chapterUrl: string): Promise<SuwayomiChapter> {
     const indexedChapter = await this.findChapterByUrl(chapterUrl);
     if (indexedChapter) return indexedChapter;
 
@@ -248,47 +327,90 @@ export class SuwayomiClient {
     // Naver chapter URLs carry no readable slug, so derive the series title
     // from the chapter page itself before searching the source.
     const isNaver = parsedChapterUrl.hostname.replace(/^www\./, "") === "comic.naver.com";
-    const searchQuery = isNaver ? await naverTitleFromChapterUrl(chapterUrl) : baseSearchQuery;
-    if (!mangaUrl) return null;
+    const derivedQuery = isNaver ? await naverTitleFromChapterUrl(chapterUrl) : baseSearchQuery;
+    if (!mangaUrl && !derivedQuery) {
+      throw new SuwayomiError(
+        "تعذر استنتاج رابط العمل من رابط الفصل — بنية هذا الرابط غير مدعومة بعد."
+      );
+    }
 
-    const targetMangaUrl = normalizedUrl(mangaUrl);
-    const matchManga = (candidates: SuwayomiManga[]): SuwayomiManga | undefined => {
-      const byUrl = candidates.find(candidate => {
-        const candidateUrl = absoluteUrl(candidate.realUrl || candidate.url, mangaUrl);
-        try { return normalizedUrl(candidateUrl) === targetMangaUrl; } catch { return false; }
-      });
-      if (byUrl) return byUrl;
-      return searchQuery
-        ? candidates.find(candidate => normalizedTitle(candidate.title) === normalizedTitle(searchQuery))
+    const targetMangaUrl = mangaUrl ? normalizedUrl(mangaUrl) : null;
+    const matchManga = (candidates: SuwayomiManga[], queries: string[]): SuwayomiManga | undefined => {
+      const byUrl = targetMangaUrl
+        ? candidates.find(candidate => {
+            const candidateUrl = absoluteUrl(candidate.realUrl || candidate.url, mangaUrl!);
+            try { return normalizedUrl(candidateUrl) === targetMangaUrl; } catch { return false; }
+          })
         : undefined;
+      if (byUrl) return byUrl;
+      // مطابقة بالاسم: تطابق تام أو درجة قوية (≥75) مع أي صيغة من صيغ البحث.
+      return candidates.find(candidate =>
+        queries.some(query => matchScore(query, candidate.title) >= 75)
+      );
     };
 
-    const directManga = await this.findMangaByUrl(mangaUrl);
-    const mangaCandidates = directManga ? [directManga] : searchQuery ? await this.searchSourceManga(sourceId, searchQuery) : [];
-    let manga = directManga ?? matchManga(mangaCandidates);
-
-    // Webtoons.com search is punctuation-insensitive on its side, so the raw
-    // slug (which drops apostrophes) can miss the series. Retry with
-    // progressively shorter prefixes of the slug words.
-    if (!manga && !isNaver && searchQuery) {
-      const words = searchQuery.split(" ").filter(Boolean);
-      for (const length of [Math.min(6, words.length), Math.min(4, words.length), Math.min(3, words.length)]) {
+    const queries = searchQueryVariants(derivedQuery);
+    let manga: SuwayomiManga | undefined;
+    let searchedAny = false;
+    for (const query of queries) {
+      const directManga = mangaUrl ? await this.findMangaByUrl(mangaUrl) : null;
+      if (directManga) {
+        manga = directManga;
+        break;
+      }
+      if (!query) continue;
+      searchedAny = true;
+      const candidates = await this.searchSourceManga(sourceId, query);
+      manga = matchManga(candidates, queries);
+      if (manga) break;
+      // Webtoons.com search is punctuation-insensitive on its side, so the raw
+      // slug (which drops apostrophes) can miss the series. Retry with
+      // progressively shorter prefixes of the query words.
+      const words = query.split(" ").filter(Boolean);
+      for (const length of [Math.min(4, words.length), Math.min(3, words.length)]) {
         if (length < 3) break;
         const shortened = words.slice(0, length).join(" ");
-        if (shortened === searchQuery) continue;
+        if (shortened === query) continue;
         const retry = await this.searchSourceManga(sourceId, shortened);
-        manga = matchManga(retry);
+        manga = matchManga(retry, queries);
         if (manga) break;
       }
+      if (manga) break;
     }
-    if (!manga) return null;
+    if (!manga) {
+      if (!searchedAny) {
+        throw new SuwayomiError(
+          "لم أعثر على العمل في الخادم بهذا الرابط ولم أمكن البحث عنه في الموقع — تأكد من أن الإضافة تعمل."
+        );
+      }
+      throw new SuwayomiError(
+        `لم أعثر على العمل في الموقع عبر البحث${derivedQuery ? ` بـ «${derivedQuery}»` : ""} — قد تكون الإضافة متعثرة أو اسم العمل مكتوبًا بشكل مختلف. جرّب /بحث أولًا.`
+      );
+    }
 
     const chapters = await this.fetchMangaAndChapters(manga.id);
     const targetChapterUrl = normalizedUrl(chapterUrl);
-    return chapters.find(chapter => {
+    const byUrl = chapters.find(chapter => {
       const candidateUrl = absoluteUrl(chapter.realUrl || chapter.url, chapterUrl);
       try { return normalizedUrl(candidateUrl) === targetChapterUrl; } catch { return false; }
-    }) ?? null;
+    });
+    if (byUrl) return byUrl;
+
+    // مطابقة برقم الفصل: بعض المواقع تؤرشف روابط الفصول بصيغة مختلفة عن
+    // رابطها العام، فيفشل التطابق الحرفي وينجح التطابق بالرقم داخل العمل.
+    const urlChapterNumber = chapterNumberFromUrl(chapterUrl);
+    if (urlChapterNumber !== null) {
+      const byNumber = chapters.find(
+        chapter => typeof chapter.chapterNumber === "number" && Math.abs(chapter.chapterNumber - urlChapterNumber) < 0.001
+      );
+      if (byNumber) return byNumber;
+      throw new SuwayomiError(
+        `وُجد العمل «${manga.title}» لكن الفصل ${urlChapterNumber} غير موجود بين فصوله المفهرسة (${chapters.length}) — افتح العمل في الخادم لتحديث فصوله ثم أعد المحاولة.`
+      );
+    }
+    throw new SuwayomiError(
+      `وُجد العمل «${manga.title}» لكن تعذر مطابقة الفصل بهذا الرابط ضمن فصوله المفهرسة.`
+    );
   }
 
   async fetchChapterPages(chapterId: number): Promise<{ chapter: SuwayomiChapter; pages: string[] }> {

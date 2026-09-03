@@ -29,7 +29,7 @@ import {
   sharingPolicyFromMode,
 } from "./googleDrive";
 import { getUsableSuwayomiToken } from "./settings";
-import { SuwayomiClient } from "./suwayomi";
+import { SuwayomiClient, type SuwayomiChapter } from "./suwayomi";
 import { openChapterMergeSession } from "./imageMerging";
 import { recordOwnerAlert } from "./alerts";
 
@@ -141,16 +141,22 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
     // Live source refreshes (webtoons.com, Naver, ...) occasionally return an
     // empty chapter list or briefly fail. Retry resolution with a short
     // backoff before declaring the job failed.
-    let chapter: Awaited<
-      ReturnType<typeof suwayomi.findOrFetchChapterFromSource>
-    > = null;
+    let chapter: SuwayomiChapter | null = null;
     const resolutionAttempts = 3;
+    let lastResolutionError: unknown = null;
     for (let attempt = 1; attempt <= resolutionAttempts; attempt++) {
-      chapter = await suwayomi.findOrFetchChapterFromSource(
-        source.suwayomiSourceId,
-        job.canonicalUrl
-      );
-      if (chapter) break;
+      try {
+        chapter = await suwayomi.findOrFetchChapterFromSource(
+          source.suwayomiSourceId,
+          job.canonicalUrl
+        );
+        if (chapter) break;
+      } catch (error) {
+        // الأخطاء الحية (اتصال/إضافة/بحث) تُحفظ لإظهار السبب الحقيقي في البطاقة
+        // بدل رسالة عامة، والمحاولة التالية تعيد المحاولة طالما لم تنهِ المحاولات.
+        lastResolutionError = error;
+        chapter = null;
+      }
       if (attempt < resolutionAttempts) {
         await addJobAttempt(
           job.id,
@@ -163,9 +169,11 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
       }
     }
     if (!chapter) {
-      throw new Error(
-        "لم يعثر Suwayomi على الفصل بهذا الرابط. تأكد من تثبيت الإضافة المصرح بها وأن الفصل معروف للخادم."
-      );
+      throw lastResolutionError instanceof Error && lastResolutionError.message
+        ? lastResolutionError
+        : new Error(
+            "لم يعثر Suwayomi على الفصل بهذا الرابط. تأكد من تثبيت الإضافة المصرح بها وأن الفصل معروف للخادم."
+          );
     }
     if (chapter.manga.sourceId !== source.suwayomiSourceId) {
       throw new Error(
