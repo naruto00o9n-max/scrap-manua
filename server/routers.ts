@@ -6,6 +6,7 @@ import {
   ensureDefaultAdminUser,
   getBlockedSources,
   getDashboardSummary,
+  getImageOutputConfig,
   getSetting,
   getSourceById,
   getUserByEmail,
@@ -20,6 +21,7 @@ import {
   saveDiscordRole,
   saveIntegrationHealth,
   saveSource,
+  saveImageOutputConfig,
   setSetting,
   setUserBlocked,
 } from "./db";
@@ -125,6 +127,16 @@ export const appRouter = router({
         await setSetting("google_drive_sharing_domain", input.mode === "domain_reader" ? input.domain ?? "" : "");
         return { mode: input.mode, domain: input.mode === "domain_reader" ? input.domain ?? "" : "" };
       }),
+    // صيغة الصور المدمجة: الافتراضي PNG بضغط أقصى بلا أي فقدان؛
+    // ويمكن اختيار JPG أو WebP أو تقليل ألوان PNG من اللوحة.
+    getImageOutput: adminProcedure.query(() => getImageOutputConfig()),
+    setImageOutput: adminProcedure
+      .input(z.object({
+        format: z.enum(["png", "jpeg", "webp"]),
+        quality: z.number().int().min(40).max(100),
+        pngPalette: z.boolean(),
+      }))
+      .mutation(({ input }) => saveImageOutputConfig(input)),
   }),
   users: router({
     list: adminProcedure.query(() => listUsers()),

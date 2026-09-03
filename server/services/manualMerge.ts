@@ -5,7 +5,7 @@ import path from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import extract from "extract-zip";
-import { getSetting } from "../db";
+import { getImageOutputConfig, getSetting } from "../db";
 import {
   GoogleDriveClient,
   GoogleDriveError,
@@ -264,9 +264,15 @@ export async function runManualMerge(
 
     checkCancelled();
     // الدمج بنفس خوارزمية الفصول: أكبر عرض، مجموعات 11000–14000px، بلا قصّ.
-    const session = await openLocalImageMergeSession(imagePaths, async event => {
-      await emit({ phase: "merge", done: event.done, total: event.total });
-    });
+    // صيغة الإخراج إعداد مالك من اللوحة — نفس ما يستخدمه عامل الفصول.
+    const outputConfig = await getImageOutputConfig();
+    const session = await openLocalImageMergeSession(
+      imagePaths,
+      async event => {
+        await emit({ phase: "merge", done: event.done, total: event.total });
+      },
+      outputConfig
+    );
     try {
       const mergedImages = session.images;
       if (!mergedImages.length) {
@@ -285,7 +291,7 @@ export async function runManualMerge(
       for (let offset = 0; offset < mergedImages.length; offset += 1) {
         checkCancelled();
         const mergedImage = mergedImages[offset]!;
-        await drive.uploadMergedPageFile(mergedImage.filePath, folder.id, offset + 1);
+        await drive.uploadMergedPageFile(mergedImage.filePath, folder.id, offset + 1, mergedImage.mimeType);
         await emit({ phase: "upload", done: offset + 1, total: mergedImages.length });
       }
 
