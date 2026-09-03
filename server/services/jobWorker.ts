@@ -188,6 +188,8 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
     // تُنزّل الصفحات وتُدمج عبر ملفات مؤقتة على القرص بدل الذاكرة؛ ذلك يمنع
     // قتل العملية بسبب نفاد الذاكرة (exit 137) في الفصول الطويلة.
     // صيغة الإخراج إعداد مالك من اللوحة: الافتراضي PNG بضغط أقصى بلا أي فقدان.
+    // تنبيه: الإعداد يجب أن يُمرَّر هنا صراحة — إغفاله كان يجعل /فصل يتجاهل
+    // صيغة اللوحة (JPG/WebP) ويخرج PNG دائمًا بينما /دمج يحترم الإعداد.
     const outputConfig = await getImageOutputConfig();
     const mergeSession = await openChapterMergeSession(
       fetched.pages,
@@ -206,7 +208,8 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
             progress: { done: event.done, total: event.total },
           });
         }
-      }
+      },
+      outputConfig
     );
     try {
       const mergedImages = mergeSession.images;

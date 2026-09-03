@@ -20,11 +20,13 @@ import {
   cancelChapterJob,
   getBlockedSources,
   getChapterJob,
+  getImageOutputConfig,
   getSetting,
   getSourceBySuwayomiId,
   listActiveDiscordRoleIds,
   listSources,
   saveSource,
+  saveImageOutputConfig,
   saveIntegrationHealth,
   setDiscordProgressMessage,
   setSetting,
@@ -55,6 +57,7 @@ import { hostnameFromHomeUrl, syncSourcesFromSuwayomi } from "./sourceSync";
 import { SuwayomiClient } from "./suwayomi";
 import { UrlPolicyError } from "./urlPolicy";
 import { getUsableSuwayomiToken } from "./settings";
+import { imageOutputDescription, type ImageOutputConfig } from "./imageMerging";
 
 let client: Client | null = null;
 let started = false;
@@ -202,6 +205,34 @@ const commandPayload = [
         .setName("إلى")
         .setDescription("رابط المجلد الوجهة التي ستُجمع فيه المجلدات")
         .setRequired(true)
+    ),
+  new SlashCommandBuilder()
+    .setName("setting")
+    .setDescription("إعدادات صيغة الصور المدمجة - للمالك فقط")
+    .addStringOption(option =>
+      option
+        .setName("الصيغة")
+        .setDescription("صيغة إخراج الصور المدمجة - اختياري")
+        .setRequired(false)
+        .addChoices(
+          { name: "PNG - بلا أي فقدان (الافتراضي)", value: "png" },
+          { name: "JPG - أصغر بكثير", value: "jpeg" },
+          { name: "WebP - الأصغر عادةً", value: "webp" }
+        )
+    )
+    .addIntegerOption(option =>
+      option
+        .setName("الجودة")
+        .setDescription("جودة 40-100 لصيغتي JPG/WebP وتقليل ألوان PNG - اختياري")
+        .setRequired(false)
+        .setMinValue(40)
+        .setMaxValue(100)
+    )
+    .addBooleanOption(option =>
+      option
+        .setName("اللوحة")
+        .setDescription("تقليل ألوان PNG (حجم أصغر مع فقدان غير محسوس) - اختياري")
+        .setRequired(false)
     ),
   new SlashCommandBuilder()
     .setName("مساعدة")
@@ -452,6 +483,16 @@ export function buildHelpComponents(
         "**طريقة أ:** رابط مجلد يحتوي مجلدات الفصول (مثل مجلد العمل) في «من» ورابط الوجهة في «إلى» — يُنقل كل ما بداخله.",
         "**طريقة ب:** الصق عدة روابط مجلدات (كل مجلد فصل في سطر) في «من» — تُنقل هذه المجلدات نفسها إلى الوجهة أينما كانت.",
         "عند الانتهاء يظهر زر فتح المجلد الوجهة، وكل مجلد فصل يبقى بصوره داخله. وإن فشل الوصول لمجلد فتُظهر البطاقة حساب Drive الذي يستخدمه البوت لتشاركه معه.",
+      ].join("\n")
+    ),
+    separator(),
+    text(
+      [
+        "### 🔹 /setting",
+        "إعداد صيغة الصور المدمجة — للمالك فقط.",
+        "**1.** نفّذ `/setting` بدون خيارات لعرض الإعداد الحالي.",
+        "**2.** لتغييره اختر الصيغة من خانة «الصيغة»: PNG بلا أي فقدان (الافتراضي)، أو JPG أو WebP الأصغر بكثير مع فقدان غير ملحوظ، واضبط الجودة من خانة «الجودة» إن أردت.",
+        "**3.** يُطبق الإعداد على كل عمليات /فصل و/دمج الجديدة بعد الحفظ — الفصول المسحوبة سابقًا لا تتأثر.",
       ].join("\n")
     ),
     separator(),
@@ -880,19 +921,14 @@ export function noticeFromJob(job: {
 }
 
 export async function refreshDiscordCommands() {
-  if (!ENV.discordBotToken || !ENV.discordApplicationId || !ENV.discordGuildId)
-    return;
+  if (!ENV.discordBotToken || !ENV.discordApplicationId) return;
+  // تسجيل عالمي: الأوامر تعمل في كل السيرفرات التي ينضم إليها البوت
+  // دون ربطها بسيرفر محدد عبر DISCORD_GUILD_ID (لم يعد مطلوبًا إطلاقًا).
   await new REST({ version: "10" })
     .setToken(ENV.discordBotToken)
-    .put(
-      Routes.applicationGuildCommands(
-        ENV.discordApplicationId,
-        ENV.discordGuildId
-      ),
-      {
-        body: commandPayload,
-      }
-    );
+    .put(Routes.applicationCommands(ENV.discordApplicationId), {
+      body: commandPayload,
+    });
 }
 
 export function isDiscordBotReady() {
@@ -2724,6 +2760,127 @@ async function replyHelp(interaction: any) {
   await interaction.editReply(panelPayload(buildHelpComponents()));
 }
 
+// ============================================================
+// أمر /setting: إعداد صيغة الصور المدمجة من Discord مباشرة — للمالك فقط.
+// نفس الإعداد الذي تديره لوحة التحكم (appSettings: image_output_config)،
+// فأي تغيير من هنا يظهر في اللوحة والعكس صحيح.
+// ============================================================
+
+export type SettingChoiceInput = {
+  /** «png» أو «jpeg» أو «webp» — أي قيمة أخرى تُتجاهل وتبقى القيمة الحالية. */
+  format?: string | null;
+  /** جودة 40–100 — خارج المدى تُقص، والناقص يُبقي الحالية. */
+  quality?: number | null;
+  /** تقليل ألوان PNG — الناقص يُبقي الحالي. */
+  palette?: boolean | null;
+};
+
+/** يدمج اختيارات /setting الجزئية فوق الإعداد الحالي — دالة نقية قابلة للاختبار. */
+export function mergeImageOutputChoice(
+  current: ImageOutputConfig,
+  choice: SettingChoiceInput
+): ImageOutputConfig {
+  const format =
+    choice.format === "png" || choice.format === "jpeg" || choice.format === "webp"
+      ? choice.format
+      : current.format;
+  const quality =
+    typeof choice.quality === "number" && Number.isFinite(choice.quality)
+      ? Math.min(100, Math.max(40, Math.round(choice.quality)))
+      : current.quality;
+  const pngPalette =
+    typeof choice.palette === "boolean" ? choice.palette : current.pngPalette;
+  return { format, quality, pngPalette };
+}
+
+function formatLabelOf(format: ImageOutputConfig["format"]): string {
+  if (format === "jpeg") return "JPG";
+  if (format === "webp") return "WebP";
+  return "PNG";
+}
+
+/** بطاقة /setting: الإعداد الحالي + خطوات التغيير — تُستخدم للعرض والحفظ معًا. */
+export function buildSettingComponents(
+  config: ImageOutputConfig,
+  avatar: string | null = avatarUrl()
+): APIMessageTopLevelComponent[] {
+  const lines: string[] = [
+    `**الصيغة الحالية:** ${formatLabelOf(config.format)} — ${imageOutputDescription(config)}`,
+  ];
+  if (config.format === "png" && config.pngPalette) {
+    lines.push(`**تقليل ألوان PNG:** مفعّل (جودة ${config.quality})`);
+  }
+  if (config.format !== "png") {
+    lines.push(`**الجودة:** ${config.quality} من 100`);
+  }
+  const body: Raw[] = [
+    headerBlock("## ⚙️ إعدادات صيغة الصور", [], avatar),
+    separator(2),
+    text(lines.join("\n")),
+    separator(),
+    text(
+      [
+        "**1.** لتغيير الصيغة: نفّذ `/setting` واختر من خانة «الصيغة» — PNG بلا أي فقدان (الافتراضي)، وJPG وWebP أصغر بكثير مع فقدان غير ملحوظ.",
+        "**2.** لضبط الجودة (40–100) لصيغتي JPG/WebP أو لتقليل ألوان PNG: استخدم خانة «الجودة» وخانة «اللوحة».",
+        "**3.** الإعداد يُطبق على كل عمليات /فصل و/دمج الجديدة بعد الحفظ — الفصول السابقة لا تتأثر.",
+      ].join("\n")
+    ),
+    separator(),
+    text("-# ZEUS"),
+  ];
+  return [raw({ type: 17, accent_color: GOLD, components: body })];
+}
+
+async function replySetting(interaction: any) {
+  await interaction.deferReply();
+  try {
+    if (!isOwner(interaction.user.id)) {
+      await interaction.editReply(
+        panelPayload(
+          buildSearchCardComponents({
+            state: "failed",
+            detail: "🔒 هذا الأمر للمالك فقط.",
+          })
+        )
+      );
+      return;
+    }
+    const current = await getImageOutputConfig();
+    const formatChoice = interaction.options.getString("الصيغة", false);
+    const qualityChoice = interaction.options.getInteger("الجودة", false);
+    const paletteChoice = interaction.options.getBoolean("اللوحة", false);
+    // بلا خيارات: عرض الإعداد الحالي فقط.
+    if (
+      formatChoice === null &&
+      qualityChoice === null &&
+      paletteChoice === null
+    ) {
+      await interaction.editReply(panelPayload(buildSettingComponents(current)));
+      return;
+    }
+    const saved = await saveImageOutputConfig(
+      mergeImageOutputChoice(current, {
+        format: formatChoice,
+        quality: qualityChoice,
+        palette: paletteChoice,
+      })
+    );
+    await interaction.editReply(panelPayload(buildSettingComponents(saved)));
+  } catch (error) {
+    console.warn("[Discord] /setting failed", error);
+    await interaction
+      .editReply(
+        panelPayload(
+          buildSearchCardComponents({
+            state: "failed",
+            detail: "تعذر حفظ الإعداد الآن — أعد المحاولة بعد قليل.",
+          })
+        )
+      )
+      .catch(() => undefined);
+  }
+}
+
 async function replyChapter(interaction: any) {
   await interaction.deferReply();
   try {
@@ -2815,13 +2972,7 @@ async function handleButton(interaction: any) {
 }
 
 export async function startDiscordBot() {
-  if (
-    started ||
-    !ENV.discordBotToken ||
-    !ENV.discordApplicationId ||
-    !ENV.discordGuildId
-  )
-    return;
+  if (started || !ENV.discordBotToken || !ENV.discordApplicationId) return;
   started = true;
   client = new Client({
     intents: [
@@ -2856,16 +3007,15 @@ export async function startDiscordBot() {
     } catch (error) {
       console.warn("[Discord] Could not set avatar", error);
     }
-    // Registering guild commands can fail with DiscordAPIError[50001]
-    // "Missing Access" when the bot was invited only with the `bot` scope.
-    // Re-authorizing the app with the `applications.commands` scope fixes it,
-    // so retry a few times instead of giving up after a single attempt.
+    // تسجيل الأوامر العالمي قد يفشل بخطأ DiscordAPIError[50001] "Missing
+    // Access" إذا لم تكتمل صلاحيات التطبيق؛ نعيد المحاولة عدة مرات بدل
+    // الاستسلام من المحاولة الأولى.
     const maxAttempts = 6;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         await refreshDiscordCommands();
         console.info(
-          `[Discord] Guild commands refreshed (${commandPayload.length})`
+          `[Discord] Global commands refreshed (${commandPayload.length})`
         );
         await saveIntegrationHealth(
           "discord",
@@ -2911,6 +3061,8 @@ export async function startDiscordBot() {
         await replySearch(interaction);
       else if (interaction.commandName === "نقل")
         await replyMove(interaction);
+      else if (interaction.commandName === "setting")
+        await replySetting(interaction);
     } catch (error) {
       console.error("[Discord] Interaction handler failed", error);
       if (interaction.isRepliable()) {
