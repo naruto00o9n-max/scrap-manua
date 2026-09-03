@@ -9,6 +9,7 @@ import {
   buildSearchCardComponents,
   buildSearchPageNavRow,
   buildSearchSessionView,
+  buildSettingComponents,
   buildSourcesComponents,
   chaptersCount,
   foldersCount,
@@ -17,6 +18,7 @@ import {
   languageGroupLabel,
   mangaStatusAr,
   MAX_MOVE_LINKS,
+  mergeImageOutputChoice,
   moveAccessFailureDetail,
   noticeFromJob,
   paginateForSelect,
@@ -96,7 +98,24 @@ const manageSource = {
 describe("Discord ZEUS chapter experience", () => {
   it("registers Arabic-only commands", () => {
     const names = getRegisteredDiscordCommands().map(command => command.name);
-    expect(names).toEqual(["فصل", "دمج", "مواقع", "بحث", "نقل", "مساعدة"]);
+    expect(names).toEqual(["فصل", "دمج", "مواقع", "بحث", "نقل", "setting", "مساعدة"]);
+  });
+
+  it("registers the owner-only setting command with image format options", () => {
+    const setting = getRegisteredDiscordCommands().find(
+      command => command.name === "setting"
+    );
+    expect(setting).toBeTruthy();
+    const options = (setting?.options ?? []).map(option => option.name);
+    expect(options).toEqual(["الصيغة", "الجودة", "اللوحة"]);
+    const formatChoice = (setting?.options ?? [])[0] as {
+      choices?: Array<{ name: string; value: string }>;
+    };
+    expect(formatChoice.choices?.map(choice => choice.value)).toEqual([
+      "png",
+      "jpeg",
+      "webp",
+    ]);
   });
 
   it("registers the move command with both folder link options required", () => {
@@ -1141,5 +1160,74 @@ describe("Discord ZEUS chapter experience", () => {
     expect(texts).toContain(`🌐 **المواقع العربية — ${SOURCES_GROUP_LIMIT + 5}**`);
     expect(texts).toContain(`و5 موقعًا آخر في هذا القسم…`);
     expect(texts).not.toContain(`Site${String(SOURCES_GROUP_LIMIT + 1).padStart(2, "0")}`);
+  });
+});
+
+describe("image format /setting command", () => {
+  const current = { format: "png" as const, quality: 88, pngPalette: false };
+
+  it("keeps the current config when no choices are provided", () => {
+    expect(mergeImageOutputChoice(current, {})).toEqual(current);
+    expect(mergeImageOutputChoice(current, { format: null, quality: null, palette: null })).toEqual(current);
+  });
+
+  it("merges partial choices over the current config", () => {
+    expect(mergeImageOutputChoice(current, { format: "jpeg" })).toEqual({
+      format: "jpeg",
+      quality: 88,
+      pngPalette: false,
+    });
+    expect(mergeImageOutputChoice(current, { quality: 55 })).toEqual({
+      format: "png",
+      quality: 55,
+      pngPalette: false,
+    });
+    expect(mergeImageOutputChoice(current, { palette: true })).toEqual({
+      format: "png",
+      quality: 88,
+      pngPalette: true,
+    });
+    expect(
+      mergeImageOutputChoice(current, { format: "webp", quality: 70, palette: false })
+    ).toEqual({ format: "webp", quality: 70, pngPalette: false });
+  });
+
+  it("clamps quality and ignores invalid format values", () => {
+    expect(mergeImageOutputChoice(current, { quality: 9999 }).quality).toBe(100);
+    expect(mergeImageOutputChoice(current, { quality: 1 }).quality).toBe(40);
+    expect(mergeImageOutputChoice(current, { quality: 72.6 }).quality).toBe(73);
+    expect(mergeImageOutputChoice(current, { format: "bmp" }).format).toBe("png");
+    expect(mergeImageOutputChoice(current, { format: "" }).format).toBe("png");
+  });
+
+  it("renders the setting card with the current format details", () => {
+    const [container] = buildSettingComponents(
+      { format: "jpeg", quality: 85, pngPalette: false },
+      null
+    ) as unknown as [ComponentShape];
+    const texts = collectTexts([container]).join("\n");
+    expect(texts).toContain("JPG");
+    expect(texts).toContain("85");
+    expect(texts).toContain("الصيغة الحالية");
+  });
+
+  it("renders the lossless PNG card without a quality line", () => {
+    const [container] = buildSettingComponents(
+      { format: "png", quality: 88, pngPalette: false },
+      null
+    ) as unknown as [ComponentShape];
+    const texts = collectTexts([container]).join("\n");
+    expect(texts).toContain("PNG");
+    expect(texts).not.toContain("الجودة:");
+    expect(texts).not.toContain("مفعّل");
+  });
+
+  it("renders the palette PNG card with its quality", () => {
+    const [container] = buildSettingComponents(
+      { format: "png", quality: 90, pngPalette: true },
+      null
+    ) as unknown as [ComponentShape];
+    const texts = collectTexts([container]).join("\n");
+    expect(texts).toContain("مفعّل (جودة 90)");
   });
 });
