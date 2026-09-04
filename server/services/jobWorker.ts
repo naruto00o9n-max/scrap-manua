@@ -2,7 +2,7 @@ import {
   addJobAttempt,
   getChapterJob,
   getEffectiveImageOutputConfig,
-  getGuildChapterMergeEnabled,
+  getGuildChapterMergeConfig,
   getNextPendingChapterJob,
   getSetting,
   getSourceById,
@@ -44,6 +44,7 @@ import {
   imageOutputDescription,
   openChapterMergeSession,
   openChapterPagesSession,
+  resolveMergeDimensions,
   type MergeProgressListener,
 } from "./imageMerging";
 import { recordOwnerAlert } from "./alerts";
@@ -275,9 +276,12 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
   let label: string | null = null;
   let pageCount: number | undefined;
   let mergedCount: number | undefined;
-  // دمج الصفحات إعداد لكل سيرفر من /الاعدادات — الافتراضي مفعّل. عند
-  // تعطيله يُرفع الفصل صفحاته كما هي، ويظهر صف الدمج في القائمة كمتخطى.
-  const mergeEnabled = await getGuildChapterMergeEnabled(job.requestedInGuildId);
+  // دمج الصفحات إعداد لكل سيرفر من قسم الدمج في /الاعدادات — الافتراضي
+  // مفعّل بسقف 15000px وعرض تلقائي، ويمكن تعطيله أو تخصيص الأبعاد.
+  // عند التعطيل يُرفع الفصل صفحاته كما هي، ويظهر صف الدمج في القائمة كمتخطى.
+  const mergeConfig = await getGuildChapterMergeConfig(job.requestedInGuildId);
+  const mergeEnabled = mergeConfig.enabled;
+  const mergeDimensions = resolveMergeDimensions(mergeConfig);
   try {
     await markJobStarted(job.id);
     const live = await getChapterJob(job.id);
@@ -393,7 +397,7 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
     let uploadItems: Array<{ filePath: string; mimeType: string }>;
     let cleanupTemp: () => Promise<void>;
     if (mergeEnabled) {
-      const mergeSession = await openChapterMergeSession(resolved.pages, downloadEvents, outputConfig);
+      const mergeSession = await openChapterMergeSession(resolved.pages, downloadEvents, outputConfig, mergeDimensions);
       uploadItems = mergeSession.images.map(image => ({
         filePath: image.filePath,
         mimeType: image.mimeType,

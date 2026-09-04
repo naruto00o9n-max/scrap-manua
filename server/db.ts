@@ -8,7 +8,7 @@ import {
 import { ENV } from "./_core/env";
 import { hashPassword } from "./_core/auth";
 import { isChapterRequestDuplicate } from "./services/jobDedupe";
-import { normalizeImageOutputConfig, type ImageOutputConfig } from "./services/imageMerging";
+import { normalizeImageOutputConfig, normalizeChapterMergeSettings, resolveMergeDimensions, type ChapterMergeSettings, type ImageOutputConfig, type MergeDimensions } from "./services/imageMerging";
 
 type MongoDocument<T> = T & { _id?: unknown };
 type DiscordRole = { id: number; discordRoleId: string; label: string; isActive: boolean; createdAt: Date };
@@ -393,30 +393,44 @@ export async function clearGuildImageOutputConfig(guildId: string): Promise<void
 }
 
 // ===== دمج صفحات /فصل لكل سيرفر =====
-// مفتاح مستقل لكل سيرفر: الدمج «مفعّل» افتراضيًا (لا يُخزن شيء). عند تعطيله
-// يرفع /فصل صفحات الفصل كما هي بدون دمجها في صور طويلة ولا إعادة ترميز،
-// وأمر /دمج لا يتأثر إطلاقًا لأنه أمر دمج بحد ذاته.
+// مفتاح مستقل لكل سيرفر: الدمج «مفعّل» افتراضيًا (لا يُخزن شيء)، ويمكن
+// تخصيص أبعاد الدمج أيضًا (أقصى ارتفاع للصورة المدمجة وعرضها) من قسم
+// الدمج في /الاعدادات. عند التعطيل يرفع /فصل صفحات الفصل كما هي بدون
+// دمجها في صور طويلة ولا إعادة ترميز، وأمر /دمج لا يتأثر بحالة التفعيل
+// إطلاقًا لأنه أمر دمج بحد ذاته (لكنه يتبع تخصيص الأبعاد نفسه).
+// توافق مع القيمة القديمة: «off» النصية تعني معطلًا بلا تخصيص أبعاد.
 const GUILD_CHAPTER_MERGE_PREFIX = "chapter_merge_guild:";
+
+/** إعداد دمج /فصل المطبق على سيرفر (مطبّع دائمًا بعد القراءة). */
+export async function getGuildChapterMergeConfig(guildId?: string | null): Promise<ChapterMergeSettings> {
+  if (!guildId) return { enabled: true, heightCap: null, width: null };
+  return normalizeChapterMergeSettings(await getSetting(GUILD_CHAPTER_MERGE_PREFIX + guildId));
+}
 
 /** هل دمج الصفحات مفعّل لهذا السيرفر؟ الافتراضي: مفعّل. */
 export async function getGuildChapterMergeEnabled(guildId?: string | null): Promise<boolean> {
-  if (!guildId) return true;
-  const raw = await getSetting(GUILD_CHAPTER_MERGE_PREFIX + guildId);
-  return raw !== "off";
+  return (await getGuildChapterMergeConfig(guildId)).enabled;
+}
+
+/** الأبعاد المطبقة فعليًا على دمج هذا السيرفر (التخصيص أو الافتراضي). */
+export async function getEffectiveMergeDimensions(guildId?: string | null): Promise<MergeDimensions> {
+  return resolveMergeDimensions(await getGuildChapterMergeConfig(guildId));
 }
 
 /**
- * يضبط حالة الدمج لسيرفر. التفعيل يحذف المفتاح ليبقى السيرفر تابعًا
- * للافتراضي (مفعّل)، والتعطيل يخزن «off» صريحًا.
+ * يضبط إعداد الدمج الكامل لسيرفر: التفعيل + أبعاد مخصصة أو null للافتراضي.
+ * تُطبّع القيم هنا قبل التخزين فلا يدخل قاعدة البيانات شيء فاسد، وحالة
+ * «الافتراضي بالكامل» تُحذف من الأساس ليبقى السيرفر تابعًا للافتراضي.
  */
-export async function saveGuildChapterMergeEnabled(guildId: string, enabled: boolean): Promise<boolean> {
-  if (enabled) {
+export async function saveGuildChapterMergeConfig(guildId: string, config: ChapterMergeSettings): Promise<ChapterMergeSettings> {
+  const normalized = normalizeChapterMergeSettings(JSON.stringify(config));
+  if (normalized.enabled && normalized.heightCap === null && normalized.width === null) {
     const db = await requireDb();
     await collections(db).appSettings.deleteOne({ key: GUILD_CHAPTER_MERGE_PREFIX + guildId });
-    return true;
+    return normalized;
   }
-  await setSetting(GUILD_CHAPTER_MERGE_PREFIX + guildId, "off");
-  return false;
+  await setSetting(GUILD_CHAPTER_MERGE_PREFIX + guildId, JSON.stringify(normalized));
+  return normalized;
 }
 
 export async function listDiscordRoles() {

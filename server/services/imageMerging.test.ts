@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import sharp from "sharp";
-import { mergeChapterPages, pickUniformWidth } from "./imageMerging";
+import {
+  mergeChapterPages,
+  normalizeChapterMergeSettings,
+  normalizeMergeHeightCap,
+  normalizeMergeWidth,
+  pickUniformWidth,
+} from "./imageMerging";
 
 async function image(width: number, height: number, color: string) {
   return sharp({ create: { width, height, channels: 3, background: color } }).png().toBuffer();
@@ -139,6 +145,91 @@ describe("chapter image merging", () => {
     expect(output[0]!.width).toBe(800);
     expect(output[0]!.height).toBe(6000);
     vi.unstubAllGlobals();
+  });
+
+  it("respects a custom merge height cap from guild settings", async () => {
+    // سقف مخصص 9000px: ثلاث صفحات 4000px تخرج صورتين متساويتين قدر الإمكان
+    // (8000 ثم 4000) بدل صورة واحدة 12000px كما في الافتراضي.
+    const buffers = [await image(800, 4000, "#111111"), await image(800, 4000, "#222222"), await image(800, 4000, "#333333")];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string) => new Response(buffers.shift(), { status: 200, headers: { "content-type": "image/png" } })));
+    const output = await mergeChapterPages(
+      ["https://pages.test/1", "https://pages.test/2", "https://pages.test/3"],
+      undefined,
+      { heightCap: 9000 }
+    );
+    expect(output.map(item => item.height)).toEqual([8000, 4000]);
+    vi.unstubAllGlobals();
+  });
+
+  it("scales every page to a custom merge width from guild settings", async () => {
+    // عرض مخصص 600px: صفحات 800px تُحجّم كلها إلى 600 (الارتفاع ينكمش بالنسبة).
+    const buffers = [await image(800, 3000, "#111111"), await image(800, 3000, "#222222")];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string) => new Response(buffers.shift(), { status: 200, headers: { "content-type": "image/png" } })));
+    const output = await mergeChapterPages(
+      ["https://pages.test/1", "https://pages.test/2"],
+      undefined,
+      { width: 600 }
+    );
+    expect(output).toHaveLength(1);
+    expect(output[0]!.width).toBe(600);
+    expect(output[0]!.height).toBe(4500);
+    const metadata = await sharp(output[0]!.data).metadata();
+    expect(metadata.width).toBe(600);
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps the default 15000 ceiling when no dimensions are passed", async () => {
+    const buffers = [await image(800, 5000, "#111111"), await image(800, 5000, "#222222"), await image(800, 4316, "#333333")];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string) => new Response(buffers.shift(), { status: 200, headers: { "content-type": "image/png" } })));
+    const output = await mergeChapterPages(
+      ["https://pages.test/1", "https://pages.test/2", "https://pages.test/3"],
+      undefined,
+      {}
+    );
+    expect(output).toHaveLength(1);
+    expect(output[0]!.height).toBe(14316);
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("chapter merge settings normalization", () => {
+  it("returns enabled defaults for missing values", () => {
+    expect(normalizeChapterMergeSettings(null)).toEqual({ enabled: true, heightCap: null, width: null });
+    expect(normalizeChapterMergeSettings("")).toEqual({ enabled: true, heightCap: null, width: null });
+  });
+
+  it("maps the legacy off string to a disabled config with default dimensions", () => {
+    expect(normalizeChapterMergeSettings("off")).toEqual({ enabled: false, heightCap: null, width: null });
+  });
+
+  it("parses stored JSON and clamps out-of-range dimensions", () => {
+    expect(normalizeChapterMergeSettings(JSON.stringify({ enabled: false, heightCap: 12000, width: 900 }))).toEqual({
+      enabled: false,
+      heightCap: 12000,
+      width: 900,
+    });
+    expect(normalizeChapterMergeSettings(JSON.stringify({ heightCap: 5, width: 99999 }))).toEqual({
+      enabled: true,
+      heightCap: 2000,
+      width: 2400,
+    });
+    expect(normalizeChapterMergeSettings(JSON.stringify({ enabled: true, heightCap: null, width: null }))).toEqual({
+      enabled: true,
+      heightCap: null,
+      width: null,
+    });
+  });
+
+  it("falls back to defaults on corrupted JSON", () => {
+    expect(normalizeChapterMergeSettings("{not-json")).toEqual({ enabled: true, heightCap: null, width: null });
+  });
+
+  it("clamps raw height and width values directly", () => {
+    expect(normalizeMergeHeightCap(15000)).toBe(15000);
+    expect(normalizeMergeHeightCap(undefined)).toBe(15000);
+    expect(normalizeMergeHeightCap(-3)).toBe(15000);
+    expect(normalizeMergeWidth(undefined)).toBeNull();
+    expect(normalizeMergeWidth("bogus")).toBeNull();
   });
 });
 

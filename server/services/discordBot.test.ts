@@ -1,5 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ENV } from "../_core/env";
+// أدوار لوحة التحكم تُموّز بلا قاعدة بيانات في الاختبارات: قائمة ثابتة
+// تُستخدم في اختبار صلاحية /الاعدادات لأصحاب الدور المعتمد.
+vi.mock("../db", async importOriginal => ({
+  ...(await importOriginal<typeof import("../db")>()),
+  listActiveDiscordRoleIds: vi.fn(async () => ["role-approved"]),
+}));
 import {
   buildHelpComponents,
   buildJobCard,
@@ -21,6 +27,9 @@ import {
   mangaStatusAr,
   MAX_MOVE_LINKS,
   mergeImageOutputChoice,
+  mergeMergeChoice,
+  mergeHeightLabel,
+  mergeWidthLabel,
   moveAccessFailureDetail,
   noticeFromJob,
   paginateForSelect,
@@ -103,13 +112,13 @@ describe("Discord ZEUS chapter experience", () => {
     expect(names).toEqual(["فصل", "دمج", "مواقع", "بحث", "نقل", "الاعدادات", "مساعدة"]);
   });
 
-  it("registers the guild settings command with image format options", () => {
+  it("registers the guild settings command with image format and merge options", () => {
     const setting = getRegisteredDiscordCommands().find(
       command => command.name === "الاعدادات"
     );
     expect(setting).toBeTruthy();
     const options = (setting?.options ?? []).map(option => option.name);
-    expect(options).toEqual(["الصيغة", "الجودة", "اللوحة", "الدمج"]);
+    expect(options).toEqual(["الصيغة", "الجودة", "اللوحة", "الدمج", "الارتفاع", "العرض"]);
     const formatChoice = (setting?.options ?? [])[0] as {
       choices?: Array<{ name: string; value: string }>;
     };
@@ -118,6 +127,13 @@ describe("Discord ZEUS chapter experience", () => {
       "jpeg",
       "webp",
     ]);
+    // خانتا الارتفاع والعرض أرقام اختيارية بحدود مدى الدمج المقبول.
+    const heightOption = (setting?.options ?? [])[4] as { min_value?: number; max_value?: number };
+    const widthOption = (setting?.options ?? [])[5] as { min_value?: number; max_value?: number };
+    expect(heightOption.min_value).toBe(2000);
+    expect(heightOption.max_value).toBe(30000);
+    expect(widthOption.min_value).toBe(600);
+    expect(widthOption.max_value).toBe(2400);
   });
 
   it("keeps the settings command description free of ownership wording", () => {
@@ -1238,60 +1254,145 @@ describe("image format /setting command", () => {
     expect(mergeImageOutputChoice(current, { format: "bmp" }).format).toBe("png");
     expect(mergeImageOutputChoice(current, { format: "" }).format).toBe("png");
   });
+});
+
+describe("merge section choices (mergeMergeChoice)", () => {
+  const defaults = { enabled: true, heightCap: null, width: null };
+
+  it("keeps the current merge config when no choices are provided", () => {
+    expect(mergeMergeChoice(defaults, {})).toEqual(defaults);
+    expect(mergeMergeChoice(defaults, { enabled: null, height: null, width: null })).toEqual(defaults);
+  });
+
+  it("toggles the merge switch while leaving dimensions untouched", () => {
+    expect(mergeMergeChoice(defaults, { enabled: false })).toEqual({ enabled: false, heightCap: null, width: null });
+    expect(mergeMergeChoice({ enabled: false, heightCap: 12000, width: 900 }, { enabled: true })).toEqual({
+      enabled: true,
+      heightCap: 12000,
+      width: 900,
+    });
+  });
+
+  it("sets custom merge dimensions and returns to defaults with sentinels", () => {
+    expect(mergeMergeChoice(defaults, { height: 12000, width: 900 })).toEqual({
+      enabled: true,
+      heightCap: 12000,
+      width: 900,
+    });
+    expect(mergeMergeChoice({ enabled: true, heightCap: 12000, width: 900 }, { height: "default", width: "auto" })).toEqual({
+      enabled: true,
+      heightCap: null,
+      width: null,
+    });
+  });
+
+  it("clamps merge dimensions into their accepted range", () => {
+    expect(mergeMergeChoice(defaults, { height: 500 }).heightCap).toBe(2000);
+    expect(mergeMergeChoice(defaults, { height: 99999 }).heightCap).toBe(30000);
+    expect(mergeMergeChoice(defaults, { width: 100 }).width).toBe(600);
+    expect(mergeMergeChoice(defaults, { width: 99999 }).width).toBe(2400);
+  });
+
+  it("labels merge dimensions in Arabic for the panel", () => {
+    expect(mergeHeightLabel(null)).toBe("الافتراضي (15000px)");
+    expect(mergeHeightLabel(12000)).toBe("12000px");
+    expect(mergeWidthLabel(null)).toBe("تلقائي حسب الصفحات");
+    expect(mergeWidthLabel(900)).toBe("900px");
+  });
+});
+
+describe("settings panel sections", () => {
+  const baseView = {
+    guildName: "سيرفر الاختبار",
+    override: null,
+    effective: { format: "png" as const, quality: 88, pngPalette: false },
+    mergeConfig: { enabled: true, heightCap: null, width: null },
+    effectiveMergeDimensions: { heightCap: 15000, width: 1200 },
+    draft: { format: null, quality: null, palette: null, merge: null, height: null, width: null },
+    saved: false,
+    feedback: null,
+    hasDraft: false,
+    selects: [],
+  };
+
+  it("splits the panel into a format section and a merge section", () => {
+    const [container] = buildSettingsPanelComponents(
+      baseView,
+      null
+    ) as unknown as [ComponentShape];
+    const texts = collectTexts([container]).join("\n");
+    expect(texts).toContain("## ⚙️ إعدادات هذا السيرفر");
+    expect(texts).toContain("🖼 **قسم صيغة الصور**");
+    expect(texts).toContain("🧩 **قسم دمج الصفحات**");
+    expect(texts).toContain("الصيغة المطبقة حاليًا");
+    expect(texts).toContain("**دمج الصفحات في /فصل:** مفعّل");
+  });
+
+  it("shows the applied merge dimensions with their default source", () => {
+    const [container] = buildSettingsPanelComponents(
+      baseView,
+      null
+    ) as unknown as [ComponentShape];
+    const texts = collectTexts([container]).join("\n");
+    expect(texts).toContain("**أقصى ارتفاع للصورة المدمجة:** الافتراضي (15000px) — المطبق الآن 15000px");
+    expect(texts).toContain("**عرض الصورة المدمجة:** تلقائي حسب الصفحات — المطبق الآن 1200px");
+  });
+
+  it("shows custom merge dimensions without the applied annotation", () => {
+    const [container] = buildSettingsPanelComponents(
+      {
+        ...baseView,
+        mergeConfig: { enabled: false, heightCap: 12000, width: 900 },
+        effectiveMergeDimensions: { heightCap: 12000, width: 900 },
+      },
+      null
+    ) as unknown as [ComponentShape];
+    const texts = collectTexts([container]).join("\n");
+    expect(texts).toContain("**أقصى ارتفاع للصورة المدمجة:** 12000px");
+    expect(texts).toContain("**عرض الصورة المدمجة:** 900px");
+    expect(texts).not.toContain("المطبق الآن");
+    expect(texts).toContain("**دمج الصفحات في /فصل:** معطّل — الصفحات تُرفع كما هي بدون دمج");
+  });
 
   it("renders the settings panel with the effective config and its source", () => {
     const [container] = buildSettingsPanelComponents(
       {
-        guildName: "سيرفر الاختبار",
-        override: null,
+        ...baseView,
         effective: { format: "jpeg", quality: 85, pngPalette: false },
-        mergeEnabled: true,
-        draft: { format: null, quality: null, palette: null, merge: null },
-        saved: false,
-        feedback: null,
-        hasDraft: false,
-        selects: [],
       },
       null
     ) as unknown as [ComponentShape];
     const texts = collectTexts([container]).join("\n");
     expect(texts).toContain("JPG");
     expect(texts).toContain("85");
-    expect(texts).toContain("الصيغة المطبقة حاليًا");
     expect(texts).toContain("الافتراضي العام من لوحة التحكم");
-    expect(texts).toContain("**دمج الصفحات في /فصل:** مفعّل");
   });
 
   it("marks a guild with its own override as self-configured", () => {
     const [container] = buildSettingsPanelComponents(
       {
-        guildName: "سيرفر الاختبار",
+        ...baseView,
         override: { format: "webp", quality: 90, pngPalette: false },
         effective: { format: "webp", quality: 90, pngPalette: false },
-        mergeEnabled: false,
-        draft: { format: null, quality: null, palette: null, merge: null },
-        saved: false,
-        feedback: null,
-        hasDraft: false,
-        selects: [],
       },
       null
     ) as unknown as [ComponentShape];
     const texts = collectTexts([container]).join("\n");
     expect(texts).toContain("إعدادات هذا السيرفر");
-    expect(texts).toContain("**دمج الصفحات في /فصل:** معطّل — الصفحات تُرفع كما هي بدون دمج");
   });
 
-  it("renders chosen draft values and the save hint", () => {
+  it("renders chosen draft values of both sections and the save hint", () => {
     const [container] = buildSettingsPanelComponents(
       {
-        guildName: "سيرفر الاختبار",
-        override: null,
-        effective: { format: "png", quality: 88, pngPalette: false },
-        mergeEnabled: true,
-        draft: { format: "jpeg", quality: 90, palette: true, merge: false },
-        saved: false,
-        feedback: null,
+        ...baseView,
+        draft: {
+          format: "jpeg",
+          quality: 90,
+          palette: true,
+          merge: false,
+          height: "default",
+          width: 900,
+        },
         hasDraft: true,
         selects: [
           { customId: "settings:fmt:u1", placeholder: "الصيغة: JPG", options: [] },
@@ -1302,7 +1403,56 @@ describe("image format /setting command", () => {
     const texts = collectTexts([container]).join("\n");
     expect(texts).toContain("اختياراتك");
     expect(texts).toContain("دمج الصفحات: **معطّل**");
+    expect(texts).toContain("أقصى الارتفاع: **الافتراضي (15000px)**");
+    expect(texts).toContain("العرض: **900px**");
     expect(texts).toContain("حفظ إعدادات هذا السيرفر");
+  });
+
+  it("exposes six selects for the two sections in the interactive panel", () => {
+    const state = {
+      guildId: "g1",
+      guildName: "سيرفر الاختبار",
+      requesterId: "u1",
+      channelId: "c1",
+      messageId: null,
+      effectiveAtOpen: { format: "png" as const, quality: 88, pngPalette: false },
+      overrideAtOpen: null,
+      mergeAtOpen: { enabled: true, heightCap: null, width: null },
+      draft: { format: null, quality: null, palette: null, merge: null, height: null, width: null },
+      saved: false,
+      feedback: null,
+    };
+    // buildSettingsPanelView غير مُصدَّر مباشرة هنا — نتحقق عبر المكوّنات.
+    const payload = buildSettingsPanelComponents(
+      {
+        guildName: state.guildName,
+        override: state.overrideAtOpen,
+        effective: state.effectiveAtOpen,
+        mergeConfig: state.mergeAtOpen,
+        effectiveMergeDimensions: { heightCap: 15000, width: 1200 },
+        draft: state.draft,
+        saved: false,
+        feedback: null,
+        hasDraft: false,
+        selects: [
+          { customId: "settings:fmt:u1", placeholder: "قسم الصيغة — اختر الصيغة…", options: [] },
+          { customId: "settings:q:u1", placeholder: "قسم الصيغة — اختر الجودة…", options: [] },
+          { customId: "settings:pal:u1", placeholder: "قسم الصيغة — تقليل ألوان PNG: بدون تغيير…", options: [] },
+          { customId: "settings:merge:u1", placeholder: "قسم الدمج — حالة الدمج: بدون تغيير…", options: [] },
+          { customId: "settings:height:u1", placeholder: "قسم الدمج — أقصى ارتفاع: بدون تغيير…", options: [] },
+          { customId: "settings:width:u1", placeholder: "قسم الدمج — عرض الصورة: بدون تغيير…", options: [] },
+        ],
+      },
+      null
+    ) as unknown as [ComponentShape];
+    const flattened = flatten(payload[0]);
+    const customIds = flattened.map(item => item.custom_id).filter(Boolean);
+    for (const expected of [
+      "settings:save:u1",
+      "settings:reset:u1",
+    ]) {
+      expect(customIds).toContain(expected);
+    }
   });
 });
 
@@ -1314,29 +1464,44 @@ describe("settings command permissions", () => {
     memberPermissions: { has: () => false },
   };
 
-  it("allows the platform owner when configured", () => {
+  it("allows the platform owner when configured", async () => {
     // معرف المالك يُقرأ من البيئة عند تحميل الوحدة — إن لم يُعد فحالة
     // المالك تغطيها اختبارات النشر، والبقية هنا تعتمد صلاحيات السيرفر.
     const ownerId = ENV.ownerDiscordUserId;
     if (!ownerId) return;
-    expect(canManageSettings({ ...baseInteraction, user: { id: ownerId } })).toBe(true);
-    expect(canManageSettings(baseInteraction)).toBe(false);
+    expect(await canManageSettings({ ...baseInteraction, user: { id: ownerId } })).toBe(true);
+    expect(await canManageSettings(baseInteraction)).toBe(false);
   });
 
-  it("allows the guild owner and administrators", () => {
-    expect(canManageSettings({ ...baseInteraction, user: { id: "owner-2" } })).toBe(true);
+  it("allows the guild owner and administrators", async () => {
+    expect(await canManageSettings({ ...baseInteraction, user: { id: "owner-2" } })).toBe(true);
     expect(
-      canManageSettings({
+      await canManageSettings({
         ...baseInteraction,
         memberPermissions: { has: () => true },
       })
     ).toBe(true);
   });
 
-  it("rejects regular members and non-guild usage", () => {
-    expect(canManageSettings(baseInteraction)).toBe(false);
+  it("allows members holding a role approved from the dashboard", async () => {
     expect(
-      canManageSettings({ ...baseInteraction, inGuild: () => false })
+      await canManageSettings({
+        ...baseInteraction,
+        member: { roles: ["role-approved"] },
+      })
+    ).toBe(true);
+    expect(
+      await canManageSettings({
+        ...baseInteraction,
+        member: { roles: ["role-other"] },
+      })
+    ).toBe(false);
+  });
+
+  it("rejects regular members and non-guild usage", async () => {
+    expect(await canManageSettings(baseInteraction)).toBe(false);
+    expect(
+      await canManageSettings({ ...baseInteraction, inGuild: () => false })
     ).toBe(false);
   });
 });
