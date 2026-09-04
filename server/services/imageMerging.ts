@@ -12,11 +12,18 @@ sharp.cache(false);
 sharp.concurrency(1);
 
 const MAX_PAGE_SIZE_BYTES = 40 * 1024 * 1024;
-// سقف ارتفاع الصورة المدمجة: عتبة مستهدفة ~14000px مع هامش مرونة يسمح
-// بإغلاق المجموعة عندما ترفعها الصفحة التالية قليلًا فوق العتبة
+// سقف ارتفاع الصورة المدمجة الافتراضي: عتبة مستهدفة ~14000px مع هامش مرونة
+// يسمح بإغلاق المجموعة عندما ترفعها الصفحة التالية قليلًا فوق العتبة
 // (مثل 5000+5000+4316 = 14316 أو 5000+5000+4925 = 14925) بدل ترك صفحات
 // صغيرة مستقلة — طلب المستخدم: «دمج اثنين أو ثلاثة ليصل العتبة».
-const FLEX_OUTPUT_HEIGHT = 15000;
+// أصبح هذا السقف قابلًا للتخصيص لكل سيرفر من /الاعدادات (قسم الدمج).
+export const DEFAULT_MERGE_HEIGHT_CAP = 15000;
+/** مدى سقف الارتفاع المقبول — خارج المدى تُرجع القيمة للحد الأقرب. */
+export const MERGE_HEIGHT_CAP_MIN = 2000;
+export const MERGE_HEIGHT_CAP_MAX = 30000;
+/** مدى عرض الدمج المقبول عند اختيار عرض ثابت بدل اتباع الصفحات. */
+export const MERGE_WIDTH_MIN = 600;
+export const MERGE_WIDTH_MAX = 2400;
 const PAGE_DOWNLOAD_CONCURRENCY = 6;
 
 /** صيغ إخراج الصور المدمجة المدعومة — الاختيار من لوحة الإعدادات. */
@@ -48,6 +55,77 @@ export const FORMAT_MIME: Record<ImageOutputFormat, MergedImageMime> = {
   jpeg: "image/jpeg",
   webp: "image/webp",
 };
+
+// ============================================================
+// أبعاد الدمج القابلة للتخصيص لكل سيرفر (قسم الدمج في /الاعدادات)
+// ============================================================
+
+/** أبعاد الدمج المطبقة فعليًا على مجموعة صفحات: سقف الارتفاع والعرض المستهدف. */
+export type MergeDimensions = {
+  /** أقصى ارتفاع بالبكسل للصورة المدمجة الواحدة. */
+  heightCap: number;
+  /** عرض الدمج بالبكسل — null يعني اتباع العرض الأكثر تكرارًا في الصفحات. */
+  width: number | null;
+};
+
+/**
+ * إعداد الدمج المخزن لكل سيرفر: مفعّل/معطل + تخصيص الأبعاد، حيث null
+ * في heightCap أو width يعني «بلا تخصيص — اتبع الافتراضي».
+ */
+export type ChapterMergeSettings = {
+  enabled: boolean;
+  heightCap: number | null;
+  width: number | null;
+};
+
+/** الافتراضي: الدمج مفعّل وأبعاده كما كانت دائمًا (15000px وعرض الصفحات تلقائيًا). */
+export const DEFAULT_CHAPTER_MERGE_SETTINGS: ChapterMergeSettings = {
+  enabled: true,
+  heightCap: null,
+  width: null,
+};
+
+/** يقص سقف الارتفاع إلى المدى المقبول — القيم الفاسدة تعود إلى الافتراضي. */
+export function normalizeMergeHeightCap(value: unknown): number {
+  const height = Number(value);
+  if (!Number.isFinite(height) || height <= 0) return DEFAULT_MERGE_HEIGHT_CAP;
+  return Math.min(MERGE_HEIGHT_CAP_MAX, Math.max(MERGE_HEIGHT_CAP_MIN, Math.round(height)));
+}
+
+/** يقص عرض الدمج إلى المدى المقبول — null/الفاسد يعني «تلقائي حسب الصفحات». */
+export function normalizeMergeWidth(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const width = Number(value);
+  if (!Number.isFinite(width) || width <= 0) return null;
+  return Math.min(MERGE_WIDTH_MAX, Math.max(MERGE_WIDTH_MIN, Math.round(width)));
+}
+
+/**
+ * يطبّع إعداد دمج السيرفر القادم من قاعدة البيانات: القيمة القديمة «off»
+ * تعني الدمج معطلًا بلا تخصيص أبعاد، وJSON فاسد يعود إلى الافتراضي.
+ */
+export function normalizeChapterMergeSettings(raw: string | null): ChapterMergeSettings {
+  if (raw === null) return { ...DEFAULT_CHAPTER_MERGE_SETTINGS };
+  if (raw === "off") return { enabled: false, heightCap: null, width: null };
+  try {
+    const parsed = JSON.parse(raw) as Partial<ChapterMergeSettings>;
+    return {
+      enabled: parsed.enabled !== false,
+      heightCap: parsed.heightCap === null || parsed.heightCap === undefined ? null : normalizeMergeHeightCap(parsed.heightCap),
+      width: normalizeMergeWidth(parsed.width ?? null),
+    };
+  } catch {
+    return { ...DEFAULT_CHAPTER_MERGE_SETTINGS };
+  }
+}
+
+/** يحسم الأبعاد المطبقة فعليًا من إعداد السيرفر: التخصيص أو الافتراضي. */
+export function resolveMergeDimensions(settings: ChapterMergeSettings): MergeDimensions {
+  return {
+    heightCap: normalizeMergeHeightCap(settings.heightCap ?? DEFAULT_MERGE_HEIGHT_CAP),
+    width: normalizeMergeWidth(settings.width),
+  };
+}
 
 function clampQuality(quality: number): number {
   if (!Number.isFinite(quality)) return DEFAULT_IMAGE_OUTPUT.quality;
@@ -246,16 +324,19 @@ async function downloadPagesToTemp(
 /**
  * التجميع الاحترافي المرن: لا قص لأي صفحة ولا حشو أبيض ولا إعادة ترتيب —
  * العرض يُوحد بالتحجير قبل التجميع، ثم تُقسم صفحات الفصل إلى أقل عدد ممكن
- * من الصور بحيث لا يتجاوز ارتفاع أي صورة سقف المرونة (15000px ≈ عتبة
- * 14000px + هامش)، وبين التوزيعات ذات العدد الأدنى يُختار التوزيع الأكثر
- * تساويًا في الارتفاع — فتخرج صور الفصل متقاربة الطول حول العتبة بدل
- * «تارة كبير وتارة صغير»، وتُدمج الصفحات الصغيرة اثنين أو ثلاثة أو أكثر
- * حتى تبلغ العتبة كما طلب المستخدم.
+ * من الصور بحيث لا يتجاوز ارتفاع أي صورة سقف المرونة (15000px افتراضيًا
+ * وقابلًا للتخصيص من إعدادات السيرفر)، وبين التوزيعات ذات العدد الأدنى
+ * يُختار التوزيع الأكثر تساويًا في الارتفاع — فتخرج صور الفصل متقاربة
+ * الطول حول العتبة بدل «تارة كبير وتارة صغير»، وتُدمج الصفحات الصغيرة
+ * اثنين أو ثلاثة أو أكثر حتى تبلغ العتبة كما طلب المستخدم.
  *
  * الصفحة الأطول من سقف المرونة تبقى مستقلة كاملة (القص ممنوع إطلاقًا)،
  * وهي حاجز يقسم الفصل إلى نافذات متصلة تُوازن كل واحدة على حدة.
  */
-function groupPageIndexes(dimensions: Array<{ height?: number }>): number[][] {
+function groupPageIndexes(
+  dimensions: Array<{ height?: number }>,
+  heightCap: number = DEFAULT_MERGE_HEIGHT_CAP
+): number[][] {
   const heights = dimensions.map((item, index) => {
     const height = item?.height ?? 0;
     if (!height) throw new Error(`تعذر قراءة ارتفاع الصفحة ${index + 1}.`);
@@ -266,12 +347,12 @@ function groupPageIndexes(dimensions: Array<{ height?: number }>): number[][] {
   let segmentStart = 0;
   const flushSegment = (endExclusive: number) => {
     if (endExclusive > segmentStart) {
-      groups.push(...partitionSegmentEvenly(heights, segmentStart, endExclusive));
+      groups.push(...partitionSegmentEvenly(heights, segmentStart, endExclusive, heightCap));
     }
     segmentStart = endExclusive;
   };
   for (let index = 0; index < heights.length; index += 1) {
-    if (heights[index]! > FLEX_OUTPUT_HEIGHT) {
+    if (heights[index]! > heightCap) {
       flushSegment(index);
       groups.push([index]);
       segmentStart = index + 1;
@@ -289,7 +370,12 @@ function groupPageIndexes(dimensions: Array<{ height?: number }>): number[][] {
  * مربعات انحراف ارتفاع كل مجموعة عن الارتفاع المثالي (مجموع النافذة ÷
  * عددها) — أي التوزيع الأكثر تساويًا.
  */
-function partitionSegmentEvenly(heights: number[], start: number, end: number): number[][] {
+function partitionSegmentEvenly(
+  heights: number[],
+  start: number,
+  end: number,
+  heightCap: number = DEFAULT_MERGE_HEIGHT_CAP
+): number[][] {
   const length = end - start;
   const segment = heights.slice(start, end);
   const total = segment.reduce((sum, height) => sum + height, 0);
@@ -298,7 +384,7 @@ function partitionSegmentEvenly(heights: number[], start: number, end: number): 
   let minGroups = 1;
   let accumulated = 0;
   for (const height of segment) {
-    if (accumulated > 0 && accumulated + height > FLEX_OUTPUT_HEIGHT) {
+    if (accumulated > 0 && accumulated + height > heightCap) {
       minGroups += 1;
       accumulated = 0;
     }
@@ -327,7 +413,7 @@ function partitionSegmentEvenly(heights: number[], start: number, end: number): 
       for (let previous = pages - 1; previous >= groupsUsed - 1; previous -= 1) {
         if (bestCost[groupsUsed - 1]![previous] === infinite) continue;
         const sum = groupSum(previous, pages);
-        if (sum > FLEX_OUTPUT_HEIGHT) continue;
+        if (sum > heightCap) continue;
         const cost = bestCost[groupsUsed - 1]![previous]! + (sum - ideal) ** 2;
         if (cost < bestCost[groupsUsed]![pages]!) {
           bestCost[groupsUsed]![pages] = cost;
@@ -433,11 +519,14 @@ async function scalePagesToUniformWidth(
  * مجموعة واحدة في كل مرة. نفس منطق الدمج المستخدم لصفحات الفصول المسحوبة،
  * لكن دون أي تنزيل — يُستخدم لأمر الدمج اليدوي (صور جاهزة من ZIP أو Drive).
  * تنظيف الملفات المؤقتة يتم عبر cleanup() في كل الحالات.
+ * أبعاد الدمج (سقف الارتفاع والعرض) قابلة للتخصيص من إعدادات السيرفر —
+ * والناقص منها يعود إلى الافتراضي (15000px وعرض الصفحات الأكثر تكرارًا).
  */
 export async function openLocalImageMergeSession(
   pagePaths: string[],
   onProgress?: MergeProgressListener,
-  output: ImageOutputConfig = { ...DEFAULT_IMAGE_OUTPUT }
+  output: ImageOutputConfig = { ...DEFAULT_IMAGE_OUTPUT },
+  dimensions?: Partial<MergeDimensions>
 ): Promise<ChapterMergeSession> {
   if (!pagePaths.length) {
     return { images: [], cleanup: async () => {} };
@@ -445,24 +534,28 @@ export async function openLocalImageMergeSession(
   const dir = await mkdtemp(path.join(tmpdir(), "manga-merge-"));
   try {
     const originalDimensions = await Promise.all(pagePaths.map(pagePath => sharp(pagePath).metadata()));
-    const width = pickUniformWidth(originalDimensions.map(item => item.width));
-    if (!width) throw new Error("تعذر تحديد عرض موحد لصفحات الفصل.");
+    const uniformWidth = pickUniformWidth(originalDimensions.map(item => item.width));
+    if (!uniformWidth) throw new Error("تعذر تحديد عرض موحد لصفحات الفصل.");
+    // العرض المستهدف: تخصيص السيرفر إن وُجد وإلا العرض الأكثر تكرارًا.
+    const width = normalizeMergeWidth(dimensions?.width) ?? uniformWidth;
+    const heightCap = normalizeMergeHeightCap(dimensions?.heightCap ?? DEFAULT_MERGE_HEIGHT_CAP);
 
-    // توحيد العرض بالتحجير: الصفحات التي عرضها يساوي العرض المشترك تبقى كما
-    // هي بلا إعادة ترميز، وما خالفه يُحجّم فقط.
-    const { paths: effectivePaths, dimensions } = originalDimensions.every(
+    // توحيد العرض بالتحجير: الصفحات التي عرضها يساوي العرض المستهدف تبقى كما
+    // هي بلا إعادة ترميز، وما خالفه يُحجّم فقط (يشمل تخصيص العرض المختلف
+    // عن عرض الصفحات — حينها تُحجّم كل الصفحات إلى العرض المطلوب).
+    const { paths: effectivePaths, dimensions: effectiveDimensions } = originalDimensions.every(
       item => !item.width || item.width === width
     )
       ? { paths: pagePaths, dimensions: originalDimensions }
       : await scalePagesToUniformWidth(pagePaths, originalDimensions, width, path.join(dir, "scaled"));
 
-    const groups = groupPageIndexes(dimensions);
+    const groups = groupPageIndexes(effectiveDimensions, heightCap);
     const images: MergedChapterFile[] = [];
     const extension = imageOutputExtension(output.format);
     // التسلسل مقصود: تُرسم مجموعة واحدة في كل مرة وتُكتب إلى القرص فورًا.
     for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
       const outputPath = path.join(dir, `merged-${String(groupIndex + 1).padStart(3, "0")}.${extension}`);
-      const height = await renderGroupToFile(groups[groupIndex]!, effectivePaths, dimensions, width, outputPath, output);
+      const height = await renderGroupToFile(groups[groupIndex]!, effectivePaths, effectiveDimensions, width, outputPath, output);
       images.push({ filePath: outputPath, width, height, mimeType: FORMAT_MIME[output.format] });
       if (onProgress) {
         try { await onProgress({ phase: "merging", done: groupIndex + 1, total: groups.length }); } catch { /* فشل الإشعار لا يُفشل المعالجة */ }
@@ -545,7 +638,8 @@ export async function openChapterPagesSession(
 export async function openChapterMergeSession(
   pageUrls: string[],
   onProgress?: MergeProgressListener,
-  output: ImageOutputConfig = { ...DEFAULT_IMAGE_OUTPUT }
+  output: ImageOutputConfig = { ...DEFAULT_IMAGE_OUTPUT },
+  dimensions?: Partial<MergeDimensions>
 ): Promise<ChapterMergeSession> {
   if (!pageUrls.length) {
     return { images: [], cleanup: async () => {} };
@@ -553,7 +647,7 @@ export async function openChapterMergeSession(
   const downloadDir = await mkdtemp(path.join(tmpdir(), "manga-pages-"));
   try {
     const pagePaths = await downloadPagesToTemp(pageUrls, downloadDir, onProgress);
-    const session = await openLocalImageMergeSession(pagePaths, onProgress, output);
+    const session = await openLocalImageMergeSession(pagePaths, onProgress, output, dimensions);
     const sessionCleanup = session.cleanup;
     session.cleanup = async () => {
       await sessionCleanup();
@@ -572,9 +666,10 @@ export async function openChapterMergeSession(
  */
 export async function mergeChapterPages(
   pageUrls: string[],
-  output: ImageOutputConfig = { ...DEFAULT_IMAGE_OUTPUT }
+  output: ImageOutputConfig = { ...DEFAULT_IMAGE_OUTPUT },
+  dimensions?: Partial<MergeDimensions>
 ): Promise<MergedChapterImage[]> {
-  const session = await openChapterMergeSession(pageUrls, undefined, output);
+  const session = await openChapterMergeSession(pageUrls, undefined, output, dimensions);
   try {
     return await Promise.all(
       session.images.map(async image => ({

@@ -12,7 +12,11 @@ import {
   sharingPolicyFromMode,
   type DriveSharingPolicy,
 } from "./googleDrive";
-import { openLocalImageMergeSession, type ImageOutputConfig } from "./imageMerging";
+import {
+  openLocalImageMergeSession,
+  type ImageOutputConfig,
+  type MergeDimensions,
+} from "./imageMerging";
 
 // سقوف الأحمان: كل التنزيلات تُكتب على القرص عبر بث مباشر ولا تُحمَّل في الذاكرة،
 // وبهذا يبقي ذروة الاستهلاك منخفضة كما في عامل الفصول (درس خطأ exit 137).
@@ -136,6 +140,8 @@ export type ManualMergeHandlers = {
   isCancelled?: () => boolean;
   /** صيغة الإخراج المطبقة — تُقرأ من إعداد السيرفر في أمر /دمج بدل الافتراضي العام. */
   outputConfig?: ImageOutputConfig;
+  /** أبعاد الدمج المخصصة من قسم الدمج في /الاعدادات — الناقص يعود للافتراضي. */
+  mergeDimensions?: MergeDimensions;
 };
 
 export type ManualMergeResult = {
@@ -265,16 +271,17 @@ export async function runManualMerge(
     }
 
     checkCancelled();
-    // الدمج بنفس خوارزمية الفصول: أكبر عرض، مجموعات 11000–14000px، بلا قصّ.
-    // صيغة الإخراج إعداد لكل سيرفر من أمر /الاعدادات — ولمن لم يخصص يعمل
-    // بالإعداد العام من اللوحة.
+    // الدمج بنفس خوارزمية الفصول: أبعاد قابلة للتخصيص (سقف ارتفاع + عرض)، بلا قصّ.
+    // صيغة الإخراج وأبعاد الدمج إعداد لكل سيرفر من أمر /الاعدادات — ولمن لم يخصص
+    // يعمل بالإعداد العام من اللوحة أو الافتراضي.
     const outputConfig = handlers.outputConfig ?? (await getImageOutputConfig());
     const session = await openLocalImageMergeSession(
       imagePaths,
       async event => {
         await emit({ phase: "merge", done: event.done, total: event.total });
       },
-      outputConfig
+      outputConfig,
+      handlers.mergeDimensions
     );
     try {
       const mergedImages = session.images;
