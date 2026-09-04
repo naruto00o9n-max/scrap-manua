@@ -2,6 +2,7 @@ import {
   addJobAttempt,
   getChapterJob,
   getEffectiveImageOutputConfig,
+  getGuildChapterMergeEnabled,
   getNextPendingChapterJob,
   getSetting,
   getSourceById,
@@ -39,7 +40,12 @@ import {
   type DirectProbe,
 } from "./directSource";
 import { SuwayomiClient, type SuwayomiChapter } from "./suwayomi";
-import { imageOutputDescription, openChapterMergeSession } from "./imageMerging";
+import {
+  imageOutputDescription,
+  openChapterMergeSession,
+  openChapterPagesSession,
+  type MergeProgressListener,
+} from "./imageMerging";
 import { recordOwnerAlert } from "./alerts";
 
 let isDraining = false;
@@ -269,6 +275,9 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
   let label: string | null = null;
   let pageCount: number | undefined;
   let mergedCount: number | undefined;
+  // دمج الصفحات إعداد لكل سيرفر من /الاعدادات — الافتراضي مفعّل. عند
+  // تعطيله يُرفع الفصل صفحاته كما هي، ويظهر صف الدمج في القائمة كمتخطى.
+  const mergeEnabled = await getGuildChapterMergeEnabled(job.requestedInGuildId);
   try {
     await markJobStarted(job.id);
     const live = await getChapterJob(job.id);
@@ -282,6 +291,7 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
       label,
       pageCount,
       mergedCount,
+      mergeDisabled: !mergeEnabled,
     });
     await addJobAttempt(job.id, "downloading", "بدأ التحقق من الفصل في المصدر.");
     await post({ ...base(), status: "downloading" }, true);
@@ -355,46 +365,64 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
     label = `**${resolved.mangaTitle}** — ${resolved.chapterName}`;
     stage = "download";
     await post({ ...base(), status: "downloading" }, true);
-    // تُنزّل الصفحات وتُدمج عبر ملفات مؤقتة على القرص بدل الذاكرة؛ ذلك يمنع
+    // تُنزّل الصفحات وتُعالج عبر ملفات مؤقتة على القرص بدل الذاكرة؛ ذلك يمنع
     // قتل العملية بسبب نفاد الذاكرة (exit 137) في الفصول الطويلة.
     // صيغة الإخراج إعداد لكل سيرفر من أمر /الاعدادات، ولمن لم يخصص يعمل
     // بالإعداد العام من لوحة التحكم؛ الافتراضي في الحالين PNG بضغط أقصى بلا أي فقدان.
     const outputConfig = await getEffectiveImageOutputConfig(job.requestedInGuildId);
-    const mergeSession = await openChapterMergeSession(
-      resolved.pages,
-      async event => {
-        if (event.phase === "downloading") {
-          await post({
-            ...base(),
-            status: "downloading",
-            progress: { done: event.done, total: event.total },
-          });
-        } else {
-          stage = "merge";
-          await post({
-            ...base(),
-            status: "downloading",
-            progress: { done: event.done, total: event.total },
-          });
-        }
-      },
-      outputConfig
-    );
+    const downloadEvents: MergeProgressListener = async event => {
+      if (event.phase === "downloading") {
+        await post({
+          ...base(),
+          status: "downloading",
+          progress: { done: event.done, total: event.total },
+        });
+      } else {
+        stage = "merge";
+        await post({
+          ...base(),
+          status: "downloading",
+          progress: { done: event.done, total: event.total },
+        });
+      }
+    };
+    // المسار المدمج: صفحات الفصل تُدمج في صور طويلة بصيغة إعدادات السيرفر.
+    // المسار المعطّل: تُنزّل الصفحات فقط وتُرفع كما هي بأصلها دون أي إعادة
+    // ترميز (فك تشويش GigaViewer يبقى شغالًا لأنه جزء من التنزيل)، وأمر /دمج
+    // لا يتأثر بهذا الإعداد إطلاقًا.
+    let uploadItems: Array<{ filePath: string; mimeType: string }>;
+    let cleanupTemp: () => Promise<void>;
+    if (mergeEnabled) {
+      const mergeSession = await openChapterMergeSession(resolved.pages, downloadEvents, outputConfig);
+      uploadItems = mergeSession.images.map(image => ({
+        filePath: image.filePath,
+        mimeType: image.mimeType,
+      }));
+      cleanupTemp = mergeSession.cleanup;
+    } else {
+      const pagesSession = await openChapterPagesSession(resolved.pages, downloadEvents);
+      uploadItems = pagesSession.pages.map(page => ({
+        filePath: page.filePath,
+        mimeType: page.mimeType,
+      }));
+      cleanupTemp = pagesSession.cleanup;
+    }
     try {
-      const mergedImages = mergeSession.images;
-      if (!mergedImages.length)
-        throw new Error("تعذر دمج صفحات الفصل في صور قابلة للرفع.");
-      mergedCount = mergedImages.length;
+      if (!uploadItems.length)
+        throw new Error("تعذر تجهيز صفحات الفصل لرفعها.");
+      mergedCount = uploadItems.length;
       await setJobChapterDetails(job.id, {
         sourceChapterId: resolved.sourceChapterId,
         mangaTitle: resolved.mangaTitle,
         chapterTitle: resolved.chapterName,
-        totalPages: mergedImages.length,
+        totalPages: uploadItems.length,
       });
       await addJobAttempt(
         job.id,
         "downloading",
-        `سُحبت ${resolved.pages.length} صفحة ودمجت في ${mergedImages.length} صور طويلة — ${imageOutputDescription(outputConfig)}.`
+        mergeEnabled
+          ? `سُحبت ${resolved.pages.length} صفحة ودمجت في ${uploadItems.length} صور طويلة — ${imageOutputDescription(outputConfig)}.`
+          : `سُحبت ${resolved.pages.length} صفحة وستُرفع كما هي بدون دمج — الدمج معطّل من إعدادات هذا السيرفر.`
       );
 
       const drive = new GoogleDriveClient();
@@ -425,9 +453,9 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
         true
       );
 
-      for (let offset = 0; offset < mergedImages.length; offset += 1) {
-        const mergedImage = mergedImages[offset];
-        if (!mergedImage) continue;
+      for (let offset = 0; offset < uploadItems.length; offset += 1) {
+        const uploadItem = uploadItems[offset];
+        if (!uploadItem) continue;
         const latest = await getChapterJob(job.id);
         if (latest?.cancelRequested) {
           await addJobAttempt(
@@ -448,10 +476,10 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
         }
         const pageNumber = offset + 1;
         await drive.uploadMergedPageFile(
-          mergedImage.filePath,
+          uploadItem.filePath,
           folder.id,
           pageNumber,
-          mergedImage.mimeType
+          uploadItem.mimeType
         );
         await updateJobUploadProgress(job.id, pageNumber);
         await post({
@@ -465,7 +493,9 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
       await addJobAttempt(
         job.id,
         "completed",
-        `اكتمل رفع ${mergedCount} صورة طويلة مدمجة إلى Google Drive.`
+        mergeEnabled
+          ? `اكتمل رفع ${mergedCount} صورة طويلة مدمجة إلى Google Drive.`
+          : `اكتمل رفع ${mergedCount} صفحة كما هي إلى Google Drive بدون دمج.`
       );
       await saveIntegrationHealth(
         "job-worker",
@@ -478,7 +508,7 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
         driveUrl: folder.url,
       });
     } finally {
-      await mergeSession.cleanup();
+      await cleanupTemp();
     }
   } catch (error) {
     const message = describeError(error);

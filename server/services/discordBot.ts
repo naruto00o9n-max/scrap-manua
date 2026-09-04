@@ -23,12 +23,14 @@ import {
   getBlockedSources,
   getChapterJob,
   getEffectiveImageOutputConfig,
+  getGuildChapterMergeEnabled,
   getGuildImageOutputOverride,
   getSetting,
   getSourceBySuwayomiId,
   listActiveDiscordRoleIds,
   listSources,
   saveSource,
+  saveGuildChapterMergeEnabled,
   saveGuildImageOutputConfig,
   saveIntegrationHealth,
   setDiscordProgressMessage,
@@ -103,6 +105,8 @@ export type JobNotice = {
   pageCount?: number;
   /** عدد الصور الطويلة الناتجة بعد الدمج. */
   mergedCount?: number;
+  /** دمج الصفحات معطّل من إعدادات السيرفر — صف القائمة يظهر كمتخطى. */
+  mergeDisabled?: boolean;
   driveUrl?: string | null;
 };
 
@@ -211,7 +215,7 @@ const commandPayload = [
     ),
   new SlashCommandBuilder()
     .setName("الاعدادات")
-    .setDescription("إعدادات صيغة الصور لهذا السيرفر - للمالك والإدارة")
+    .setDescription("إعدادات هذا السيرفر - صيغة الصور ودمج الصفحات")
     .addStringOption(option =>
       option
         .setName("الصيغة")
@@ -235,6 +239,12 @@ const commandPayload = [
       option
         .setName("اللوحة")
         .setDescription("تقليل ألوان PNG (حجم أصغر مع فقدان غير محسوس) - اختياري")
+        .setRequired(false)
+    )
+    .addBooleanOption(option =>
+      option
+        .setName("الدمج")
+        .setDescription("تفعيل أو تعطيل دمج صفحات /فصل في صور طويلة - اختياري")
         .setRequired(false)
     ),
   new SlashCommandBuilder()
@@ -327,6 +337,10 @@ function checklistLines(notice: JobNotice): string[] {
   const current = notice.stage ? STAGE_ORDER.indexOf(notice.stage) : -1;
   return STAGE_ORDER.map((stage, index) => {
     const label = STAGE_LABELS[stage];
+    // الدمج المعطّل من إعدادات السيرفر يظهر كمتخطى دائمًا حتى بعد الاكتمال.
+    if (stage === "merge" && notice.mergeDisabled) {
+      return `⊘ ${label} — معطّل من الإعدادات`;
+    }
     if (notice.status === "completed" || index < current) {
       return `✓ ${label}${stageSuffixDone(notice, stage)}`;
     }
@@ -492,10 +506,10 @@ export function buildHelpComponents(
     text(
       [
         "### 🔹 /الاعدادات",
-        "إعدادات صيغة الصور المدمجة — لكل سيرفر إعداده الخاص، والافتراضي PNG بلا أي فقدان.",
-        "**1.** نفّذ `/الاعدادات` لتفتح لوحة تفاعلية: اختر الصيغة (PNG/JPG/WebP) والجودة وتقليل ألوان PNG من القوائم ثم اضغط «حفظ إعدادات هذا السيرفر».",
-        "**2.** أو اضبطها سريعًا من خانات الأمر نفسه: `/الاعدادات` مع «الصيغة» و«الجودة» و«اللوحة» — تُحفظ فورًا.",
-        "**3.** الإعداد يخص هذا السيرفر وحده ولا يمس بقية السيرفرات، وزر «العودة إلى الافتراضي العام» يعيد ما تديره لوحة التحكم. الإعداد الجديد يطبق على عمليات /فصل و/دمج الجديدة فقط.",
+        "إعدادات السحب لهذا السيرفر: صيغة الصور المدمجة، وحالة دمج الصفحات في /فصل — والافتراضي PNG بلا أي فقدان والدمج مفعّل.",
+        "**1.** نفّذ `/الاعدادات` لتفتح لوحة تفاعلية: اختر الصيغة (PNG/JPG/WebP) والجودة وتقليل ألوان PNG وحالة الدمج من القوائم ثم اضغط «حفظ إعدادات هذا السيرفر».",
+        "**2.** أو اضبطها سريعًا من خانات الأمر نفسه: `/الاعدادات` مع «الصيغة» و«الجودة» و«اللوحة» و«الدمج» — تُحفظ فورًا.",
+        "**3.** الإعداد يخص هذا السيرفر وحده ولا يمس بقية السيرفرات، وزر «العودة إلى الافتراضي العام» يعيد كل شيء إلى الأصل. تعطيل الدمج يجعل /فصل يرفع صفحات الفصل كما هي بدون دمجها في صور طويلة، وأمر /دمج لا يتأثر به.",
         "-# الأمر متاح للمالك ولمن يملك صلاحية الإدارة (Administrator) في السيرفر.",
       ].join("\n")
     ),
@@ -2773,7 +2787,8 @@ async function replyHelp(interaction: any) {
 }
 
 // ============================================================
-// أمر /الاعدادات: صيغة الصور المدمجة — لكل سيرفر إعداده، والافتراضي PNG.
+// أمر /الاعدادات: صيغة الصور المدمجة وحالة دمج /فصل — لكل سيرفر إعداده،
+// والافتراضي PNG والدمج مفعّل.
 // متاح للمالك ولصاحب صلاحية الإدارة (Administrator) في السيرفر. الإعداد
 // المخصص للسيرفر يُخزن في appSettings منفصلًا ويسبق الافتراضي العام المدير
 // من لوحة التحكم، فلا يتأثر سيرفر بتغيير سيرفر.
@@ -2838,6 +2853,8 @@ type SettingsDraft = {
   format: ImageOutputConfig["format"] | null;
   quality: number | null;
   palette: boolean | null;
+  /** حالة دمج الصفحات المختارة — الناقص يعني بدون تغيير. */
+  merge: boolean | null;
 };
 
 type SettingsPanelState = {
@@ -2849,6 +2866,8 @@ type SettingsPanelState = {
   /** ما كان مطبقًا لحظة فتح اللوحة — للعرض فقط. */
   effectiveAtOpen: ImageOutputConfig;
   overrideAtOpen: ImageOutputConfig | null;
+  /** حالة دمج الصفحات لحظة فتح اللوحة. */
+  mergeAtOpen: boolean;
   draft: SettingsDraft;
   saved: boolean;
   /** رسالة نجاح آخر عملية (حفظ/إعادة) تظهر كسطر تحت البطاقة. */
@@ -2881,6 +2900,16 @@ export const SETTINGS_PALETTE_OPTIONS = [
   { label: "تعطيل تقليل ألوان PNG", value: "off" },
 ];
 
+export const SETTINGS_MERGE_OPTIONS = [
+  { label: "تفعيل الدمج — صفحات الفصل تُدمج في صور طويلة (الافتراضي)", value: "on" },
+  { label: "تعطيل الدمج — رفع صفحات الفصل كما هي بدون دمج", value: "off" },
+];
+
+/** وصف عربي لحالة الدمج — يظهر في البطاقة وسجل الحفظ. */
+export function mergeStateLabel(enabled: boolean): string {
+  return enabled ? "مفعّل" : "معطّل";
+}
+
 /** بنية عرض لوحة الإعدادات — نقية وتُستخدم في الرسم والاختبار. */
 export type SettingsPanelView = {
   guildName: string;
@@ -2888,10 +2917,13 @@ export type SettingsPanelView = {
   override: ImageOutputConfig | null;
   /** الإعداد المطبق فعليًا (تخصيص السيرفر أو الافتراضي العام). */
   effective: ImageOutputConfig;
+  /** حالة دمج الصفحات المطبقة فعليًا على هذا السيرفر. */
+  mergeEnabled: boolean;
   draft: {
     format: ImageOutputConfig["format"] | null;
     quality: number | null;
     palette: boolean | null;
+    merge: boolean | null;
   };
   saved: boolean;
   feedback: string | null;
@@ -2904,11 +2936,13 @@ export function buildSettingsPanelView(state: SettingsPanelState): SettingsPanel
   const hasDraft =
     state.draft.format !== null ||
     state.draft.quality !== null ||
-    state.draft.palette !== null;
+    state.draft.palette !== null ||
+    state.draft.merge !== null;
   return {
     guildName: state.guildName,
     override: state.overrideAtOpen,
     effective: state.effectiveAtOpen,
+    mergeEnabled: state.mergeAtOpen,
     draft: state.draft,
     saved: state.saved,
     feedback: state.feedback,
@@ -2937,6 +2971,16 @@ export function buildSettingsPanelView(state: SettingsPanelState): SettingsPanel
               : "تقليل ألوان PNG: تعطيل",
         options: SETTINGS_PALETTE_OPTIONS,
       },
+      {
+        customId: `settings:merge:${state.requesterId}`,
+        placeholder:
+          state.draft.merge === null
+            ? "دمج الصفحات — بدون تغيير…"
+            : state.draft.merge
+              ? "دمج الصفحات: تفعيل"
+              : "دمج الصفحات: تعطيل",
+        options: SETTINGS_MERGE_OPTIONS,
+      },
     ],
   };
 }
@@ -2948,6 +2992,7 @@ export function buildSettingsPanelComponents(
   const lines: string[] = [
     `**السيرفر:** ${view.guildName}`,
     `**الصيغة المطبقة حاليًا:** ${formatLabelOf(view.effective.format)} — ${imageOutputDescription(view.effective)}`,
+    `**دمج الصفحات في /فصل:** ${mergeStateLabel(view.mergeEnabled)}${view.mergeEnabled ? "" : " — الصفحات تُرفع كما هي بدون دمج"}`,
     `**المصدر:** ${view.override ? "إعدادات هذا السيرفر" : "الافتراضي العام من لوحة التحكم (لم يُخصص لهذا السيرفر إعداد بعد)"}`,
   ];
   const draftLines: string[] = [];
@@ -2955,9 +3000,11 @@ export function buildSettingsPanelComponents(
   if (view.draft.quality !== null) draftLines.push(`الجودة: **${view.draft.quality}**`);
   if (view.draft.palette !== null)
     draftLines.push(`تقليل ألوان PNG: **${view.draft.palette ? "تفعيل" : "تعطيل"}**`);
+  if (view.draft.merge !== null)
+    draftLines.push(`دمج الصفحات: **${mergeStateLabel(view.draft.merge)}**`);
 
   const body: Raw[] = [
-    headerBlock("## ⚙️ إعدادات صيغة الصور", [], avatar),
+    headerBlock("## ⚙️ إعدادات هذا السيرفر", [], avatar),
     separator(2),
     text(lines.join("\n")),
   ];
@@ -2998,7 +3045,7 @@ export function buildSettingsPanelComponents(
   body.push(
     text(
       [
-        "-# الإعداد يخص هذا السيرفر وحده ويطبق على عمليات /فصل و/دمج الجديدة.",
+        "-# الإعداد يخص هذا السيرفر وحده — الصيغة تنطبق على /فصل و/دمج، وحالة الدمج على /فصل فقط.",
         "-# الجودة تنطبق على JPG/WebP وتقليل ألوان PNG — وPNG البسيط بلا أي فقدان لا يتأثر بها.",
         "-# ZEUS",
       ].join("\n")
@@ -3049,8 +3096,12 @@ async function replySettings(interaction: any) {
     const formatChoice = interaction.options.getString("الصيغة", false);
     const qualityChoice = interaction.options.getInteger("الجودة", false);
     const paletteChoice = interaction.options.getBoolean("اللوحة", false);
+    const mergeChoice = interaction.options.getBoolean("الدمج", false);
     const hasOptions =
-      formatChoice !== null || qualityChoice !== null || paletteChoice !== null;
+      formatChoice !== null ||
+      qualityChoice !== null ||
+      paletteChoice !== null ||
+      mergeChoice !== null;
     if (hasOptions) {
       // المسار السريع: الخيارات تُدمج فوق الإعداد المطبق حاليًا وتُحفظ فورًا.
       const current = await getEffectiveImageOutputConfig(guildId);
@@ -3062,15 +3113,20 @@ async function replySettings(interaction: any) {
           palette: paletteChoice,
         })
       );
+      const mergeEnabled =
+        mergeChoice === null
+          ? await getGuildChapterMergeEnabled(guildId)
+          : await saveGuildChapterMergeEnabled(guildId, mergeChoice);
       await interaction.editReply(
         panelPayload(
           buildSettingsPanelComponents({
             guildName: interaction.guild?.name ?? "هذا السيرفر",
             override: saved,
             effective: saved,
-            draft: { format: null, quality: null, palette: null },
+            mergeEnabled,
+            draft: { format: null, quality: null, palette: null, merge: null },
             saved: true,
-            feedback: `✅ تم حفظ إعدادات هذا السيرفر: ${formatLabelOf(saved.format)} — ${imageOutputDescription(saved)}.`,
+            feedback: `✅ تم حفظ إعدادات هذا السيرفر: ${formatLabelOf(saved.format)} — ${imageOutputDescription(saved)} — دمج الصفحات: ${mergeStateLabel(mergeEnabled)}.`,
             hasDraft: false,
             selects: [],
           })
@@ -3084,12 +3140,14 @@ async function replySettings(interaction: any) {
     if (previous?.messageId) {
       // لوحة سابقة حية: تُحدّث في مكانها بدل إنشاء ثانية.
       try {
-        const [override, effective] = await Promise.all([
+        const [override, effective, mergeEnabled] = await Promise.all([
           getGuildImageOutputOverride(guildId),
           getEffectiveImageOutputConfig(guildId),
+          getGuildChapterMergeEnabled(guildId),
         ]);
         previous.overrideAtOpen = override;
         previous.effectiveAtOpen = effective;
+        previous.mergeAtOpen = mergeEnabled;
         previous.saved = false;
         previous.feedback = null;
         await redrawSettingsPanel(interaction, previous);
@@ -3106,9 +3164,10 @@ async function replySettings(interaction: any) {
         activeSettingsPanels.delete(panelKey);
       }
     }
-    const [override, effective] = await Promise.all([
+    const [override, effective, mergeEnabled] = await Promise.all([
       getGuildImageOutputOverride(guildId),
       getEffectiveImageOutputConfig(guildId),
+      getGuildChapterMergeEnabled(guildId),
     ]);
     const state: SettingsPanelState = {
       guildId,
@@ -3118,7 +3177,8 @@ async function replySettings(interaction: any) {
       messageId: null,
       effectiveAtOpen: effective,
       overrideAtOpen: override,
-      draft: { format: null, quality: null, palette: null },
+      mergeAtOpen: mergeEnabled,
+      draft: { format: null, quality: null, palette: null, merge: null },
       saved: false,
       feedback: null,
     };
@@ -3170,6 +3230,8 @@ async function handleSettingsSelectMenu(interaction: any) {
     if (Number.isFinite(quality)) state.draft.quality = Math.min(100, Math.max(40, Math.round(quality)));
   } else if (kind === "pal" && (value === "on" || value === "off")) {
     state.draft.palette = value === "on";
+  } else if (kind === "merge" && (value === "on" || value === "off")) {
+    state.draft.merge = value === "on";
   }
   state.saved = false;
   try {
@@ -3207,19 +3269,27 @@ async function handleSettingsButton(interaction: any) {
           palette: state.draft.palette,
         })
       );
+      const mergeEnabled =
+        state.draft.merge === null
+          ? state.mergeAtOpen
+          : await saveGuildChapterMergeEnabled(guildId, state.draft.merge);
       state.effectiveAtOpen = saved;
       state.overrideAtOpen = saved;
+      state.mergeAtOpen = mergeEnabled;
       state.saved = true;
-      state.draft = { format: null, quality: null, palette: null };
-      state.feedback = `✅ تم حفظ إعدادات هذا السيرفر: ${formatLabelOf(saved.format)} — ${imageOutputDescription(saved)}.`;
+      state.draft = { format: null, quality: null, palette: null, merge: null };
+      state.feedback = `✅ تم حفظ إعدادات هذا السيرفر: ${formatLabelOf(saved.format)} — ${imageOutputDescription(saved)} — دمج الصفحات: ${mergeStateLabel(mergeEnabled)}.`;
     } else if (action === "reset") {
       await clearGuildImageOutputConfig(guildId);
+      // الإعادة تشمل الدمج: يعود إلى حالته الافتراضية (مفعّل).
+      await saveGuildChapterMergeEnabled(guildId, true);
       const effective = await getEffectiveImageOutputConfig(guildId);
       state.effectiveAtOpen = effective;
       state.overrideAtOpen = null;
+      state.mergeAtOpen = true;
       state.saved = false;
-      state.draft = { format: null, quality: null, palette: null };
-      state.feedback = "↩ عاد هذا السيرفر إلى الافتراضي العام المدير من لوحة التحكم.";
+      state.draft = { format: null, quality: null, palette: null, merge: null };
+      state.feedback = "↩ عاد هذا السيرفر إلى الافتراضي: صيغة الصور العامة من لوحة التحكم، والدمج مفعّل.";
     }
     await redrawSettingsPanel(interaction, state);
   } catch (error) {

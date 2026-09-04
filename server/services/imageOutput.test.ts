@@ -8,6 +8,7 @@ import {
   imageOutputExtension,
   mergeChapterPages,
   normalizeImageOutputConfig,
+  openChapterPagesSession,
   type ImageOutputConfig,
 } from "./imageMerging";
 
@@ -102,6 +103,39 @@ describe("merged image output formats", () => {
     expect(imageOutputDescription({ format: "png", quality: 90, pngPalette: true })).toBe("PNG بتقليل الألوان (جودة 90)");
     expect(imageOutputDescription({ format: "jpeg", quality: 88, pngPalette: false })).toBe("JPG بجودة 88");
     expect(imageOutputDescription({ format: "webp", quality: 85, pngPalette: false })).toBe("WebP بجودة 85");
+  });
+});
+
+describe("pages session without merging", () => {
+  it("downloads pages as-is keeping their real mime types and dimensions", async () => {
+    const buffers = [await image(400, 600, "#101010"), await image(300, 200, "#202020")];
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(buffers.shift(), { status: 200, headers: { "content-type": "image/png" } })));
+    try {
+      const session = await openChapterPagesSession(["https://pages.test/a", "https://pages.test/b"]);
+      try {
+        expect(session.pages).toHaveLength(2);
+        expect(session.pages[0]!.mimeType).toBe("image/png");
+        expect(session.pages[0]!.width).toBe(400);
+        expect(session.pages[0]!.height).toBe(600);
+        expect(session.pages[1]!.mimeType).toBe("image/png");
+        expect(session.pages[1]!.width).toBe(300);
+        // لا دمج: كل ملف صفحة مستقل كما نزّله الموقع (لا صور طويلة).
+        for (const page of session.pages) {
+          const metadata = await sharp(page.filePath).metadata();
+          expect(metadata.format).toBe("png");
+        }
+      } finally {
+        await session.cleanup();
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("returns an empty session for an empty page list", async () => {
+    const session = await openChapterPagesSession([]);
+    expect(session.pages).toEqual([]);
+    await session.cleanup();
   });
 });
 
