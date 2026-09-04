@@ -12,7 +12,7 @@ import {
   sharingPolicyFromMode,
   type DriveSharingPolicy,
 } from "./googleDrive";
-import { openLocalImageMergeSession } from "./imageMerging";
+import { openLocalImageMergeSession, type ImageOutputConfig } from "./imageMerging";
 
 // سقوف الأحمان: كل التنزيلات تُكتب على القرص عبر بث مباشر ولا تُحمَّل في الذاكرة،
 // وبهذا يبقي ذروة الاستهلاك منخفضة كما في عامل الفصول (درس خطأ exit 137).
@@ -134,6 +134,8 @@ export type ManualMergeCancelToken = { cancelled: boolean };
 export type ManualMergeHandlers = {
   onEvent?: (event: ManualMergeEvent) => Promise<void> | void;
   isCancelled?: () => boolean;
+  /** صيغة الإخراج المطبقة — تُقرأ من إعداد السيرفر في أمر /دمج بدل الافتراضي العام. */
+  outputConfig?: ImageOutputConfig;
 };
 
 export type ManualMergeResult = {
@@ -264,8 +266,9 @@ export async function runManualMerge(
 
     checkCancelled();
     // الدمج بنفس خوارزمية الفصول: أكبر عرض، مجموعات 11000–14000px، بلا قصّ.
-    // صيغة الإخراج إعداد مالك من اللوحة — نفس ما يستخدمه عامل الفصول.
-    const outputConfig = await getImageOutputConfig();
+    // صيغة الإخراج إعداد لكل سيرفر من أمر /الاعدادات — ولمن لم يخصص يعمل
+    // بالإعداد العام من اللوحة.
+    const outputConfig = handlers.outputConfig ?? (await getImageOutputConfig());
     const session = await openLocalImageMergeSession(
       imagePaths,
       async event => {

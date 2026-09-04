@@ -8,6 +8,7 @@ import {
   Events,
   GatewayIntentBits,
   MessageFlags,
+  PermissionFlagsBits,
   REST,
   Routes,
   SlashCommandBuilder,
@@ -18,15 +19,17 @@ import { ZEUS_AVATAR_BASE64 } from "../assets/zeusAvatar";
 import {
   addJobAttempt,
   cancelChapterJob,
+  clearGuildImageOutputConfig,
   getBlockedSources,
   getChapterJob,
-  getImageOutputConfig,
+  getEffectiveImageOutputConfig,
+  getGuildImageOutputOverride,
   getSetting,
   getSourceBySuwayomiId,
   listActiveDiscordRoleIds,
   listSources,
   saveSource,
-  saveImageOutputConfig,
+  saveGuildImageOutputConfig,
   saveIntegrationHealth,
   setDiscordProgressMessage,
   setSetting,
@@ -207,12 +210,12 @@ const commandPayload = [
         .setRequired(true)
     ),
   new SlashCommandBuilder()
-    .setName("setting")
-    .setDescription("إعدادات صيغة الصور المدمجة - للمالك فقط")
+    .setName("الاعدادات")
+    .setDescription("إعدادات صيغة الصور لهذا السيرفر - للمالك والإدارة")
     .addStringOption(option =>
       option
         .setName("الصيغة")
-        .setDescription("صيغة إخراج الصور المدمجة - اختياري")
+        .setDescription("صيغة إخراج الصور المدمجة لهذا السيرفر - اختياري")
         .setRequired(false)
         .addChoices(
           { name: "PNG - بلا أي فقدان (الافتراضي)", value: "png" },
@@ -488,11 +491,12 @@ export function buildHelpComponents(
     separator(),
     text(
       [
-        "### 🔹 /setting",
-        "إعداد صيغة الصور المدمجة — للمالك فقط.",
-        "**1.** نفّذ `/setting` بدون خيارات لعرض الإعداد الحالي.",
-        "**2.** لتغييره اختر الصيغة من خانة «الصيغة»: PNG بلا أي فقدان (الافتراضي)، أو JPG أو WebP الأصغر بكثير مع فقدان غير ملحوظ، واضبط الجودة من خانة «الجودة» إن أردت.",
-        "**3.** يُطبق الإعداد على كل عمليات /فصل و/دمج الجديدة بعد الحفظ — الفصول المسحوبة سابقًا لا تتأثر.",
+        "### 🔹 /الاعدادات",
+        "إعدادات صيغة الصور المدمجة — لكل سيرفر إعداده الخاص، والافتراضي PNG بلا أي فقدان.",
+        "**1.** نفّذ `/الاعدادات` لتفتح لوحة تفاعلية: اختر الصيغة (PNG/JPG/WebP) والجودة وتقليل ألوان PNG من القوائم ثم اضغط «حفظ إعدادات هذا السيرفر».",
+        "**2.** أو اضبطها سريعًا من خانات الأمر نفسه: `/الاعدادات` مع «الصيغة» و«الجودة» و«اللوحة» — تُحفظ فورًا.",
+        "**3.** الإعداد يخص هذا السيرفر وحده ولا يمس بقية السيرفرات، وزر «العودة إلى الافتراضي العام» يعيد ما تديره لوحة التحكم. الإعداد الجديد يطبق على عمليات /فصل و/دمج الجديدة فقط.",
+        "-# الأمر متاح للمالك ولمن يملك صلاحية الإدارة (Administrator) في السيرفر.",
       ].join("\n")
     ),
     separator(),
@@ -962,7 +966,7 @@ function messageCard(message: any): CardTarget {
   };
 }
 
-type Requester = { id: string; username: string; channelId: string };
+type Requester = { id: string; username: string; channelId: string; guildId?: string };
 
 async function startChapterFromUrl(
   target: CardTarget,
@@ -977,6 +981,7 @@ async function startChapterFromUrl(
       discordId: requester.id,
       displayName: requester.username,
       channelId: requester.channelId,
+      guildId: requester.guildId,
     },
   });
   if (!created) {
@@ -1108,7 +1113,8 @@ type MergeRequest =
 async function startManualMerge(
   target: MergeCardTarget,
   request: MergeRequest,
-  requester: Requester
+  requester: Requester,
+  outputConfig?: ImageOutputConfig
 ) {
   const mergeId = randomUUID();
   const token: ManualMergeCancelToken = { cancelled: false };
@@ -1173,6 +1179,8 @@ async function startManualMerge(
           }
         },
         isCancelled: () => token.cancelled,
+        // صيغة إخراج السيرفر إن وُجدت — وإلا يقرأ runManualMerge الافتراضي العام.
+        ...(outputConfig ? { outputConfig } : {}),
       }
     );
     imageCount = result.imageCount;
@@ -1246,7 +1254,9 @@ async function replyMerge(interaction: any) {
       id: interaction.user.id,
       username: interaction.user.username,
       channelId: interaction.channelId,
+      guildId: interaction.guildId ?? undefined,
     };
+    const guildOutput = await getEffectiveImageOutputConfig(requester.guildId).catch(() => undefined);
 
     // بلا ملف ولا رابط: لوحة طلب المدخلات بنفس نمط /فصل التفاعلي.
     if (!attachment && !rawUrl) {
@@ -1286,7 +1296,8 @@ async function replyMerge(interaction: any) {
       await startManualMerge(
         mergeInteractionCard(interaction),
         { type: "zip", url: attachment.url, name: attachment.name ?? "أرشيف" },
-        requester
+        requester,
+        guildOutput
       );
       return;
     }
@@ -1306,7 +1317,8 @@ async function replyMerge(interaction: any) {
     await startManualMerge(
       mergeInteractionCard(interaction),
       { type: "drive", id: link.id },
-      requester
+      requester,
+      guildOutput
     );
   } catch (error) {
     const detail =
@@ -2675,8 +2687,7 @@ async function handleSearchChapterPick(interaction: any) {
     return;
   }
   // استكمال بيانات مصدر مزامن بلا نطاق: يُشتق النطاق من رابط العمل ويُفعّل السحب المباشر.
-  if (session.suwayomiSourceId) {
-    try {
+  if (session.suwayomiSourceId) {    try {
       const row = await getSourceBySuwayomiId(session.suwayomiSourceId);
       if (row && row.origin === "suwayomi" && !row.allowDirectChapterLookup) {
         const derived = hostnameFromHomeUrl(chapterUrl);
@@ -2706,6 +2717,7 @@ async function handleSearchChapterPick(interaction: any) {
     id: interaction.user.id,
     username: interaction.user.username,
     channelId: interaction.channelId,
+    guildId: interaction.guildId ?? undefined,
   }).catch(async error => {
     console.warn("[Discord] Search grab failed", error);
     await editMessageContent(
@@ -2761,9 +2773,12 @@ async function replyHelp(interaction: any) {
 }
 
 // ============================================================
-// أمر /setting: إعداد صيغة الصور المدمجة من Discord مباشرة — للمالك فقط.
-// نفس الإعداد الذي تديره لوحة التحكم (appSettings: image_output_config)،
-// فأي تغيير من هنا يظهر في اللوحة والعكس صحيح.
+// أمر /الاعدادات: صيغة الصور المدمجة — لكل سيرفر إعداده، والافتراضي PNG.
+// متاح للمالك ولصاحب صلاحية الإدارة (Administrator) في السيرفر. الإعداد
+// المخصص للسيرفر يُخزن في appSettings منفصلًا ويسبق الافتراضي العام المدير
+// من لوحة التحكم، فلا يتأثر سيرفر بتغيير سيرفر.
+// التصميم: لوحة تفاعلية (قوائم للاختيار + حفظ/إعادة) عند التنفيذ بلا خيارات،
+// أو مسار سريع بالخيارات مباشرة لنفس الحفظ.
 // ============================================================
 
 export type SettingChoiceInput = {
@@ -2775,7 +2790,7 @@ export type SettingChoiceInput = {
   palette?: boolean | null;
 };
 
-/** يدمج اختيارات /setting الجزئية فوق الإعداد الحالي — دالة نقية قابلة للاختبار. */
+/** يدمج اختيارات /الاعدادات الجزئية فوق الإعداد الحالي — دالة نقية قابلة للاختبار. */
 export function mergeImageOutputChoice(
   current: ImageOutputConfig,
   choice: SettingChoiceInput
@@ -2799,86 +2814,424 @@ function formatLabelOf(format: ImageOutputConfig["format"]): string {
   return "PNG";
 }
 
-/** بطاقة /setting: الإعداد الحالي + خطوات التغيير — تُستخدم للعرض والحفظ معًا. */
-export function buildSettingComponents(
-  config: ImageOutputConfig,
+/**
+ * صلاحية إدارة إعدادات السيرفر: المالك، أو مالك السيرفر نفسه، أو أي عضو
+ * يملك صلاحية الإدارة (Administrator) في هذا السيرفر.
+ */
+export function canManageSettings(interaction: any): boolean {
+  if (isOwner(interaction.user?.id)) return true;
+  if (!interaction.inGuild?.()) return false;
+  if (interaction.guildOwnerId && interaction.guildOwnerId === interaction.user?.id)
+    return true;
+  try {
+    return Boolean(
+      interaction.memberPermissions?.has?.(PermissionFlagsBits.Administrator)
+    );
+  } catch {
+    return false;
+  }
+}
+
+// ----- لوحة الإعدادات التفاعلية -----
+
+type SettingsDraft = {
+  format: ImageOutputConfig["format"] | null;
+  quality: number | null;
+  palette: boolean | null;
+};
+
+type SettingsPanelState = {
+  guildId: string;
+  guildName: string;
+  requesterId: string;
+  channelId: string;
+  messageId: string | null;
+  /** ما كان مطبقًا لحظة فتح اللوحة — للعرض فقط. */
+  effectiveAtOpen: ImageOutputConfig;
+  overrideAtOpen: ImageOutputConfig | null;
+  draft: SettingsDraft;
+  saved: boolean;
+  /** رسالة نجاح آخر عملية (حفظ/إعادة) تظهر كسطر تحت البطاقة. */
+  feedback: string | null;
+};
+
+const SETTINGS_SESSION_TTL_MS = 30 * 60 * 1000;
+const activeSettingsPanels = new Map<string, SettingsPanelState>();
+
+function scheduleSettingsCleanup(settingsId: string) {
+  setTimeout(() => activeSettingsPanels.delete(settingsId), SETTINGS_SESSION_TTL_MS).unref?.();
+}
+
+/** خيارات قائمة الصيغة والجودة وتقليل الألوان — نقية للاختبار. */
+export const SETTINGS_FORMAT_OPTIONS = [
+  { label: "PNG — بلا أي فقدان (الافتراضي)", value: "png" },
+  { label: "JPG — أصغر بكثير مع فقدان غير ملحوظ", value: "jpeg" },
+  { label: "WebP — الأصغر عادةً مع فقدان غير ملحوظ", value: "webp" },
+];
+
+export const SETTINGS_QUALITY_OPTIONS = [100, 95, 90, 85, 80, 75, 70, 60, 50, 40].map(
+  quality => ({
+    label: String(quality),
+    value: String(quality),
+  })
+);
+
+export const SETTINGS_PALETTE_OPTIONS = [
+  { label: "تفعيل تقليل ألوان PNG", value: "on" },
+  { label: "تعطيل تقليل ألوان PNG", value: "off" },
+];
+
+/** بنية عرض لوحة الإعدادات — نقية وتُستخدم في الرسم والاختبار. */
+export type SettingsPanelView = {
+  guildName: string;
+  /** إعداد السيرفر المحفوظ (null = يستخدم الافتراضي العام). */
+  override: ImageOutputConfig | null;
+  /** الإعداد المطبق فعليًا (تخصيص السيرفر أو الافتراضي العام). */
+  effective: ImageOutputConfig;
+  draft: {
+    format: ImageOutputConfig["format"] | null;
+    quality: number | null;
+    palette: boolean | null;
+  };
+  saved: boolean;
+  feedback: string | null;
+  /** هل اختار المستخدم أي شيء لم يحفظه بعد — زر الحفظ يُفعّل معه. */
+  hasDraft: boolean;
+  selects: SearchSelectSpec[];
+};
+
+export function buildSettingsPanelView(state: SettingsPanelState): SettingsPanelView {
+  const hasDraft =
+    state.draft.format !== null ||
+    state.draft.quality !== null ||
+    state.draft.palette !== null;
+  return {
+    guildName: state.guildName,
+    override: state.overrideAtOpen,
+    effective: state.effectiveAtOpen,
+    draft: state.draft,
+    saved: state.saved,
+    feedback: state.feedback,
+    hasDraft,
+    selects: [
+      {
+        customId: `settings:fmt:${state.requesterId}`,
+        placeholder: state.draft.format
+          ? `الصيغة: ${formatLabelOf(state.draft.format)}`
+          : "اختر الصيغة…",
+        options: SETTINGS_FORMAT_OPTIONS,
+      },
+      {
+        customId: `settings:q:${state.requesterId}`,
+        placeholder:
+          state.draft.quality !== null ? `الجودة: ${state.draft.quality}` : "اختر الجودة…",
+        options: SETTINGS_QUALITY_OPTIONS,
+      },
+      {
+        customId: `settings:pal:${state.requesterId}`,
+        placeholder:
+          state.draft.palette === null
+            ? "تقليل ألوان PNG — بدون تغيير…"
+            : state.draft.palette
+              ? "تقليل ألوان PNG: تفعيل"
+              : "تقليل ألوان PNG: تعطيل",
+        options: SETTINGS_PALETTE_OPTIONS,
+      },
+    ],
+  };
+}
+
+export function buildSettingsPanelComponents(
+  view: SettingsPanelView,
   avatar: string | null = avatarUrl()
 ): APIMessageTopLevelComponent[] {
   const lines: string[] = [
-    `**الصيغة الحالية:** ${formatLabelOf(config.format)} — ${imageOutputDescription(config)}`,
+    `**السيرفر:** ${view.guildName}`,
+    `**الصيغة المطبقة حاليًا:** ${formatLabelOf(view.effective.format)} — ${imageOutputDescription(view.effective)}`,
+    `**المصدر:** ${view.override ? "إعدادات هذا السيرفر" : "الافتراضي العام من لوحة التحكم (لم يُخصص لهذا السيرفر إعداد بعد)"}`,
   ];
-  if (config.format === "png" && config.pngPalette) {
-    lines.push(`**تقليل ألوان PNG:** مفعّل (جودة ${config.quality})`);
-  }
-  if (config.format !== "png") {
-    lines.push(`**الجودة:** ${config.quality} من 100`);
-  }
+  const draftLines: string[] = [];
+  if (view.draft.format) draftLines.push(`الصيغة: **${formatLabelOf(view.draft.format)}**`);
+  if (view.draft.quality !== null) draftLines.push(`الجودة: **${view.draft.quality}**`);
+  if (view.draft.palette !== null)
+    draftLines.push(`تقليل ألوان PNG: **${view.draft.palette ? "تفعيل" : "تعطيل"}**`);
+
   const body: Raw[] = [
     headerBlock("## ⚙️ إعدادات صيغة الصور", [], avatar),
     separator(2),
     text(lines.join("\n")),
-    separator(),
+  ];
+  if (draftLines.length) {
+    body.push(separator());
+    body.push(text(`**اختياراتك:** ${draftLines.join(" — ")}\n-# اضغط «حفظ إعدادات هذا السيرفر» لتطبيقها.`));
+  }
+  if (view.feedback) {
+    body.push(separator());
+    body.push(text(view.feedback));
+  }
+  body.push(separator());
+  if (view.selects.length) {
+    // لوحة التفاعل: القوائم ثم زرا الحفظ والإعادة. بطاقة الحفظ السريع بلا
+    // قوائم تعرض ملخصها فقط دون أزرار.
+    for (const select of view.selects) body.push(buildSearchSelectRow(select));
+    const panelOwnerId = view.selects[0]!.customId.split(":")[2] ?? "";
+    body.push({
+      type: 1,
+      components: [
+        {
+          type: 2,
+          style: 3,
+          label: "حفظ إعدادات هذا السيرفر",
+          custom_id: `settings:save:${panelOwnerId}`,
+          disabled: !view.hasDraft,
+        },
+        {
+          type: 2,
+          style: 2,
+          label: "العودة إلى الافتراضي العام",
+          custom_id: `settings:reset:${panelOwnerId}`,
+        },
+      ],
+    });
+  }
+  body.push(separator());
+  body.push(
     text(
       [
-        "**1.** لتغيير الصيغة: نفّذ `/setting` واختر من خانة «الصيغة» — PNG بلا أي فقدان (الافتراضي)، وJPG وWebP أصغر بكثير مع فقدان غير ملحوظ.",
-        "**2.** لضبط الجودة (40–100) لصيغتي JPG/WebP أو لتقليل ألوان PNG: استخدم خانة «الجودة» وخانة «اللوحة».",
-        "**3.** الإعداد يُطبق على كل عمليات /فصل و/دمج الجديدة بعد الحفظ — الفصول السابقة لا تتأثر.",
+        "-# الإعداد يخص هذا السيرفر وحده ويطبق على عمليات /فصل و/دمج الجديدة.",
+        "-# الجودة تنطبق على JPG/WebP وتقليل ألوان PNG — وPNG البسيط بلا أي فقدان لا يتأثر بها.",
+        "-# ZEUS",
       ].join("\n")
-    ),
-    separator(),
-    text("-# ZEUS"),
-  ];
-  return [raw({ type: 17, accent_color: GOLD, components: body })];
+    )
+  );
+  return [raw({ type: 17, accent_color: view.saved ? GREEN : GOLD, components: body })];
 }
 
-async function replySetting(interaction: any) {
+function settingsPanelPayload(state: SettingsPanelState) {
+  return {
+    flags: MessageFlags.IsComponentsV2 as MessageFlags.IsComponentsV2,
+    components: buildSettingsPanelComponents(buildSettingsPanelView(state)),
+  };
+}
+
+async function redrawSettingsPanel(interaction: any, state: SettingsPanelState) {
+  const messageId = state.messageId ?? interaction.message?.id ?? null;
+  if (!messageId) return;
+  await editMessageContent(interaction.channelId, messageId, settingsPanelPayload(state));
+}
+
+async function replySettings(interaction: any) {
   await interaction.deferReply();
   try {
-    if (!isOwner(interaction.user.id)) {
+    if (!interaction.inGuild?.()) {
       await interaction.editReply(
         panelPayload(
           buildSearchCardComponents({
             state: "failed",
-            detail: "🔒 هذا الأمر للمالك فقط.",
+            detail: "الإعدادات تخص كل سيرفر على حدة — نفّذ `/الاعدادات` داخل السيرفر."
           })
         )
       );
       return;
     }
-    const current = await getImageOutputConfig();
+    if (!canManageSettings(interaction)) {
+      await interaction.editReply(
+        panelPayload(
+          buildSearchCardComponents({
+            state: "failed",
+            detail: "🔒 هذا الأمر للمالك ولمن يملك صلاحية الإدارة (Administrator) في السيرفر فقط."
+          })
+        )
+      );
+      return;
+    }
+    const guildId = String(interaction.guildId);
     const formatChoice = interaction.options.getString("الصيغة", false);
     const qualityChoice = interaction.options.getInteger("الجودة", false);
     const paletteChoice = interaction.options.getBoolean("اللوحة", false);
-    // بلا خيارات: عرض الإعداد الحالي فقط.
-    if (
-      formatChoice === null &&
-      qualityChoice === null &&
-      paletteChoice === null
-    ) {
-      await interaction.editReply(panelPayload(buildSettingComponents(current)));
+    const hasOptions =
+      formatChoice !== null || qualityChoice !== null || paletteChoice !== null;
+    if (hasOptions) {
+      // المسار السريع: الخيارات تُدمج فوق الإعداد المطبق حاليًا وتُحفظ فورًا.
+      const current = await getEffectiveImageOutputConfig(guildId);
+      const saved = await saveGuildImageOutputConfig(
+        guildId,
+        mergeImageOutputChoice(current, {
+          format: formatChoice,
+          quality: qualityChoice,
+          palette: paletteChoice,
+        })
+      );
+      await interaction.editReply(
+        panelPayload(
+          buildSettingsPanelComponents({
+            guildName: interaction.guild?.name ?? "هذا السيرفر",
+            override: saved,
+            effective: saved,
+            draft: { format: null, quality: null, palette: null },
+            saved: true,
+            feedback: `✅ تم حفظ إعدادات هذا السيرفر: ${formatLabelOf(saved.format)} — ${imageOutputDescription(saved)}.`,
+            hasDraft: false,
+            selects: [],
+          })
+        )
+      );
       return;
     }
-    const saved = await saveImageOutputConfig(
-      mergeImageOutputChoice(current, {
-        format: formatChoice,
-        quality: qualityChoice,
-        palette: paletteChoice,
-      })
-    );
-    await interaction.editReply(panelPayload(buildSettingComponents(saved)));
+    // بلا خيارات: لوحة الإعدادات التفاعلية — لوحة واحدة حية لكل عضو.
+    const panelKey = `${guildId}:${interaction.user.id}`;
+    const previous = activeSettingsPanels.get(panelKey);
+    if (previous?.messageId) {
+      // لوحة سابقة حية: تُحدّث في مكانها بدل إنشاء ثانية.
+      try {
+        const [override, effective] = await Promise.all([
+          getGuildImageOutputOverride(guildId),
+          getEffectiveImageOutputConfig(guildId),
+        ]);
+        previous.overrideAtOpen = override;
+        previous.effectiveAtOpen = effective;
+        previous.saved = false;
+        previous.feedback = null;
+        await redrawSettingsPanel(interaction, previous);
+        await interaction.editReply(
+          panelPayload(
+            buildSearchCardComponents({
+              state: "failed",
+              detail: "لوحة إعداداتك مفتوحة أعلاه — أكمل فيها."
+            })
+          )
+        );
+        return;
+      } catch {
+        activeSettingsPanels.delete(panelKey);
+      }
+    }
+    const [override, effective] = await Promise.all([
+      getGuildImageOutputOverride(guildId),
+      getEffectiveImageOutputConfig(guildId),
+    ]);
+    const state: SettingsPanelState = {
+      guildId,
+      guildName: interaction.guild?.name ?? "هذا السيرفر",
+      requesterId: interaction.user.id,
+      channelId: interaction.channelId,
+      messageId: null,
+      effectiveAtOpen: effective,
+      overrideAtOpen: override,
+      draft: { format: null, quality: null, palette: null },
+      saved: false,
+      feedback: null,
+    };
+    const sent = await interaction.editReply(settingsPanelPayload(state));
+    state.messageId = String(sent.id);
+    activeSettingsPanels.set(panelKey, state);
+    scheduleSettingsCleanup(`${panelKey}`);
   } catch (error) {
-    console.warn("[Discord] /setting failed", error);
+    console.warn("[Discord] /الاعدادات failed", error);
     await interaction
       .editReply(
         panelPayload(
           buildSearchCardComponents({
             state: "failed",
-            detail: "تعذر حفظ الإعداد الآن — أعد المحاولة بعد قليل.",
+            detail: "تعذر حفظ الإعداد الآن — أعد المحاولة بعد قليل."
           })
         )
       )
       .catch(() => undefined);
   }
+}
+
+/** نقطة الحفظ المشتركة بين المسار السريع ولوحة التفاعل. */
+function settingsPanelKey(guildId: string, requesterId: string): string {
+  return `${guildId}:${requesterId}`;
+}
+
+async function handleSettingsSelectMenu(interaction: any) {
+  const customId = String(interaction.customId);
+  if (!customId.startsWith("settings:")) return false;
+  const [, kind, requesterId] = customId.split(":");
+  const guildId = String(interaction.guildId ?? "");
+  const state = activeSettingsPanels.get(settingsPanelKey(guildId, requesterId));
+  if (!state || !canManageSettings(interaction)) {
+    await interaction
+      .reply({
+        content: "هذه اللوحة لصاحبها أو لمن يملك صلاحية الإدارة — نفّذ /الاعدادات من جديد.",
+        flags: MessageFlags.Ephemeral,
+      })
+      .catch(() => undefined);
+    return true;
+  }
+  await interaction.deferUpdate();
+  const value = interaction.values?.[0];
+  if (kind === "fmt" && (value === "png" || value === "jpeg" || value === "webp")) {
+    state.draft.format = value;
+  } else if (kind === "q" && value !== undefined) {
+    const quality = Number(value);
+    if (Number.isFinite(quality)) state.draft.quality = Math.min(100, Math.max(40, Math.round(quality)));
+  } else if (kind === "pal" && (value === "on" || value === "off")) {
+    state.draft.palette = value === "on";
+  }
+  state.saved = false;
+  try {
+    await redrawSettingsPanel(interaction, state);
+  } catch (error) {
+    console.warn("[Discord] settings select redraw failed", error);
+  }
+  return true;
+}
+
+async function handleSettingsButton(interaction: any) {
+  const customId = String(interaction.customId);
+  if (!customId.startsWith("settings:")) return false;
+  const [, action, requesterId] = customId.split(":");
+  const guildId = String(interaction.guildId ?? "");
+  const state = activeSettingsPanels.get(settingsPanelKey(guildId, requesterId));
+  if (!state || !canManageSettings(interaction)) {
+    await interaction
+      .reply({
+        content: "هذه اللوحة لصاحبها أو لمن يملك صلاحية الإدارة — نفّذ /الاعدادات من جديد.",
+        flags: MessageFlags.Ephemeral,
+      })
+      .catch(() => undefined);
+    return true;
+  }
+  await interaction.deferUpdate();
+  try {
+    if (action === "save") {
+      const current = await getEffectiveImageOutputConfig(guildId);
+      const saved = await saveGuildImageOutputConfig(
+        guildId,
+        mergeImageOutputChoice(current, {
+          format: state.draft.format,
+          quality: state.draft.quality,
+          palette: state.draft.palette,
+        })
+      );
+      state.effectiveAtOpen = saved;
+      state.overrideAtOpen = saved;
+      state.saved = true;
+      state.draft = { format: null, quality: null, palette: null };
+      state.feedback = `✅ تم حفظ إعدادات هذا السيرفر: ${formatLabelOf(saved.format)} — ${imageOutputDescription(saved)}.`;
+    } else if (action === "reset") {
+      await clearGuildImageOutputConfig(guildId);
+      const effective = await getEffectiveImageOutputConfig(guildId);
+      state.effectiveAtOpen = effective;
+      state.overrideAtOpen = null;
+      state.saved = false;
+      state.draft = { format: null, quality: null, palette: null };
+      state.feedback = "↩ عاد هذا السيرفر إلى الافتراضي العام المدير من لوحة التحكم.";
+    }
+    await redrawSettingsPanel(interaction, state);
+  } catch (error) {
+    console.warn("[Discord] settings button failed", error);
+    await interaction
+      .followUp({
+        content: "تعذر تنفيذ العملية الآن — أعد المحاولة.",
+        flags: MessageFlags.Ephemeral,
+      })
+      .catch(() => undefined);
+  }
+  return true;
 }
 
 async function replyChapter(interaction: any) {
@@ -2921,6 +3274,7 @@ async function replyChapter(interaction: any) {
       id: interaction.user.id,
       username: interaction.user.username,
       channelId: interaction.channelId,
+      guildId: interaction.guildId ?? undefined,
     });
   } catch (error) {
     const detail =
@@ -3045,8 +3399,12 @@ export async function startDiscordBot() {
   });
   client.on(Events.InteractionCreate, async interaction => {
     try {
-      if (interaction.isButton()) return void handleButton(interaction);
+      if (interaction.isButton()) {
+        if (await handleSettingsButton(interaction)) return;
+        return void handleButton(interaction);
+      }
       if (interaction.isStringSelectMenu()) {
+        if (await handleSettingsSelectMenu(interaction)) return;
         return void handleSearchSelectMenu(interaction);
       }
       if (!interaction.isChatInputCommand()) return;
@@ -3061,8 +3419,8 @@ export async function startDiscordBot() {
         await replySearch(interaction);
       else if (interaction.commandName === "نقل")
         await replyMove(interaction);
-      else if (interaction.commandName === "setting")
-        await replySetting(interaction);
+      else if (interaction.commandName === "الاعدادات")
+        await replySettings(interaction);
     } catch (error) {
       console.error("[Discord] Interaction handler failed", error);
       if (interaction.isRepliable()) {
@@ -3096,19 +3454,23 @@ export async function startDiscordBot() {
           id: message.author.id,
           username: message.author.username,
           channelId: message.channelId,
+          guildId: message.guildId ?? undefined,
         };
+        const guildOutput = await getEffectiveImageOutputConfig(requester.guildId).catch(() => undefined);
         try {
           if (archive) {
             await startManualMerge(
               card,
               { type: "zip", url: archive.url, name: archive.name ?? "أرشيف" },
-              requester
+              requester,
+              guildOutput
             );
           } else {
             await startManualMerge(
               card,
               { type: "drive", id: driveLink!.id },
-              requester
+              requester,
+              guildOutput
             );
           }
         } catch (error) {
@@ -3134,6 +3496,7 @@ export async function startDiscordBot() {
         id: message.author.id,
         username: message.author.username,
         channelId: message.channelId,
+        guildId: message.guildId ?? undefined,
       });
     } catch (error) {
       const detail =

@@ -359,6 +359,39 @@ export async function saveImageOutputConfig(config: ImageOutputConfig): Promise<
   return normalized;
 }
 
+// ===== إعدادات صيغة الصور لكل سيرفر (Discord guild) =====
+// لكل سيرفر إعداد مستقل يُدار من أمر /الاعدادات في ديسكورد، والافتراضي
+// هو PNG بلا أي فقدان. من لم يخصص إعدادًا يستخدم الافتراضي العام المدير
+// من لوحة التحكم (image_output_config) — بهذا تبقى اللوحة وسيط الافتراضي
+// والأمر وسيط التخصيص لكل سيرفر على حدة.
+const GUILD_IMAGE_OUTPUT_PREFIX = "image_output_guild:";
+
+/** إعداد صيغة الصور المطبق فعليًا على سيرفر: تخصيصه إن وُجد وإلا الافتراضي العام. */
+export async function getEffectiveImageOutputConfig(guildId?: string | null): Promise<ImageOutputConfig> {
+  if (guildId) {
+    const raw = await getSetting(GUILD_IMAGE_OUTPUT_PREFIX + guildId);
+    if (raw) return normalizeImageOutputConfig(raw);
+  }
+  return getImageOutputConfig();
+}
+
+/** تخصيص السيرفر وحده — null يعني لا تخصيص والمطبق هو الافتراضي العام. */
+export async function getGuildImageOutputOverride(guildId: string): Promise<ImageOutputConfig | null> {
+  const raw = await getSetting(GUILD_IMAGE_OUTPUT_PREFIX + guildId);
+  return raw ? normalizeImageOutputConfig(raw) : null;
+}
+
+export async function saveGuildImageOutputConfig(guildId: string, config: ImageOutputConfig): Promise<ImageOutputConfig> {
+  const normalized = normalizeImageOutputConfig(JSON.stringify(config));
+  await setSetting(GUILD_IMAGE_OUTPUT_PREFIX + guildId, JSON.stringify(normalized));
+  return normalized;
+}
+
+export async function clearGuildImageOutputConfig(guildId: string): Promise<void> {
+  const db = await requireDb();
+  await collections(db).appSettings.deleteOne({ key: GUILD_IMAGE_OUTPUT_PREFIX + guildId });
+}
+
 export async function listDiscordRoles() {
   const db = await requireDb();
   return (await collections(db).discordRoles.find().sort({ createdAt: -1 }).toArray()).map(stripMongoId);
@@ -392,6 +425,7 @@ export type QueueChapterJobInput = {
   requestedByDiscordId: string;
   requestedByName: string;
   requestedInChannelId?: string;
+  requestedInGuildId?: string;
 };
 
 type ChapterJobStore = {
@@ -445,6 +479,7 @@ function newChapterJob(input: QueueChapterJobInput): ChapterJob {
     requestedByDiscordId: input.requestedByDiscordId,
     requestedByName: input.requestedByName,
     requestedInChannelId: input.requestedInChannelId ?? null,
+    requestedInGuildId: input.requestedInGuildId ?? null,
     discordProgressMessageId: null,
     sourceChapterId: null,
     mangaTitle: null,
@@ -493,6 +528,7 @@ export async function createOrGetChapterJob(input: QueueChapterJobInput): Promis
         requestedByDiscordId: values.requestedByDiscordId,
         requestedByName: values.requestedByName,
         requestedInChannelId: values.requestedInChannelId ?? null,
+        requestedInGuildId: values.requestedInGuildId ?? null,
         canonicalUrl: values.canonicalUrl,
         createdAt: timestamp,
         updatedAt: timestamp,

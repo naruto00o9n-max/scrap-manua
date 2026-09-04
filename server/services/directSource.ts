@@ -10,10 +10,32 @@ import { getSetting, setSetting } from "../db";
 // الكوكي يُخزَّن في appSettings سرًا ولا يُعاد للواجهة أبدًا.
 // ============================================================
 
-/** المواقع المدعومة بالسحب المباشر حاليًا (بنية MangaThemesia بقارئ ts_reader). */
-export const SUPPORTED_DIRECT_SOURCES = ["rokaricomics.com"] as const;
+/** المواقع المدعومة بالسحب المباشر حاليًا. */
+export const SUPPORTED_DIRECT_SOURCES = ["rokaricomics.com", "shonenjumpplus.com"] as const;
 
 export type DirectSourceHostname = (typeof SUPPORTED_DIRECT_SOURCES)[number];
+
+/**
+ * نمط التوجيه لكل موقع:
+ * - «session-only»: الفصل المجاني يمر عبر المسار المعتاد، والمقفل (المدفوع)
+ *   وحده يُسحب مباشرة بجلية الموقع (سلوك rokari المعتمد).
+ * - «direct-first»: صفحة الفصل تُقرأ مباشرة أولًا دائمًا — المتاح مجانًا
+ *   تُستخدم صوره فورًا، والمدفوع يحتاج جلسة موثقة (بنية شونين جامب+).
+ */
+export type DirectSourceMode = "session-only" | "direct-first";
+
+const DIRECT_SOURCE_MODES: Record<(typeof SUPPORTED_DIRECT_SOURCES)[number], DirectSourceMode> = {
+  "rokaricomics.com": "session-only",
+  "shonenjumpplus.com": "direct-first",
+};
+
+export function directSourceMode(hostname: string | null | undefined): DirectSourceMode | null {
+  if (!hostname) return null;
+  const normalized = hostname.toLowerCase().replace(/^www\./, "");
+  return (SUPPORTED_DIRECT_SOURCES as readonly string[]).includes(normalized)
+    ? DIRECT_SOURCE_MODES[normalized as DirectSourceHostname] ?? null
+    : null;
+}
 
 export class DirectSourceError extends Error {
   constructor(message: string) {
@@ -144,12 +166,18 @@ export async function removeDirectSession(hostname: string): Promise<void> {
 const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-function chapterPageHeaders(cookie?: string): Record<string, string> {
+function chapterPageHeaders(chapterUrl: string, cookie?: string): Record<string, string> {
+  let referer = "https://rokaricomics.com/";
+  try {
+    referer = `${new URL(chapterUrl).origin}/`;
+  } catch {
+    /* رابط مرفوض قبل الوصول إلى هنا — يبقى المرجع الافتراضي */
+  }
   return {
     "user-agent": BROWSER_UA,
     accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "accept-language": "en-US,en;q=0.9",
-    referer: "https://rokaricomics.com/",
+    referer,
     ...(cookie ? { cookie } : {}),
   };
 }
@@ -160,7 +188,7 @@ async function fetchChapterHtml(chapterUrl: string, cookie?: string): Promise<st
     throw new DirectSourceError("السحب المباشر يقبل روابط HTTPS فقط.");
   }
   const response = await fetch(parsed, {
-    headers: chapterPageHeaders(cookie),
+    headers: chapterPageHeaders(chapterUrl, cookie),
     redirect: "follow",
     signal: AbortSignal.timeout(30_000),
   });
@@ -191,6 +219,69 @@ export function extractReaderImages(html: string): string[] {
     }
   }
   return [];
+}
+
+// ===== قارئ GigaViewer (شونين جامب+ ومنصات شوئيشا) =====
+
+export type GigaViewerEpisode = {
+  pages: string[];
+  mangaTitle: string;
+  chapterName: string;
+};
+
+/**
+ * يقرأ كتلة بيانات القارئ المدمجة في صفحة الفصل:
+ * <script id="episode-json" type="text/json" data-value="{...JSON مُهرّب HTML}">
+ * صفحات القارئ نوعها main وحدها تحمل روابط الصور، وعندما يكون الصف مشوشًا
+ * (choJuGiga = "baku") تُؤشر روابطه بـ #scramble ليفكّها أنبوب الدمج
+ * بنفس خوارزمية إضافة Mihon (قلب شبكة 4×4 من الكتل).
+ * يرجع null حين لا توجد كتلة episode-json أصلًا (ليست صفحة قارئ).
+ */
+export function extractGigaViewerEpisode(html: string): GigaViewerEpisode | null {
+  const marker = html.match(
+    /<script\s+id=["']?episode-json["']?\s+type=["']?text\/json["']?\s+data-value=["']([^"']*)["']/i
+  ) ?? html.match(/<script[^>]*id=["']?episode-json["']?[^>]*data-value=["']([^"']*)["']/i);
+  if (!marker) return null;
+  try {
+    const raw = marker[1]!
+      .replace(/&quot;/g, '"')
+      .replace(/&#0?39;/g, "'")
+      .replace(/&apos;/g, "'")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&amp;/g, "&");
+    const data = JSON.parse(raw) as {
+      readableProduct?: {
+        title?: string;
+        series?: { title?: string };
+        pageStructure?: {
+          choJuGiga?: string;
+          pages?: Array<{ type?: string; src?: string }>;
+        };
+      };
+    } | null;
+    const product = data?.readableProduct;
+    if (!product) return null;
+    const scrambled = product.pageStructure?.choJuGiga === "baku";
+    const pages = (product.pageStructure?.pages ?? [])
+      .filter(page => page.type === "main" && typeof page.src === "string" && /^https?:\/\//i.test(page.src))
+      .map(page => (scrambled ? `${page.src}#scramble` : page.src!));
+    const chapterName = product.title?.trim() || "";
+    const mangaTitle = product.series?.title?.trim() || "Shonen Jump+";
+    return { pages, mangaTitle, chapterName };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * علامة الفصل المقفل في GigaViewer: كتلة القارئ موجودة لكن بلا بنية صفحات
+ * — هذا بالضبط شكل الفصل المدفوع غير المشترى (يجيب Mihon برسالة الشراء).
+ */
+export function isGigaViewerLockedEpisode(html: string): boolean {
+  if (!/episode-json/i.test(html)) return false;
+  const episode = extractGigaViewerEpisode(html);
+  return !episode || episode.pages.length === 0;
 }
 
 /** علامات صفحة الفصل المقفل (مدفوع) — تظهر فقط حين لا توجد صور. */
@@ -239,22 +330,62 @@ export function parseMangaChapterTitle(pageTitle: string): { mangaTitle: string;
 }
 
 export type DirectProbeMode = "free" | "locked" | "unknown";
-export type DirectProbe = { mode: DirectProbeMode; images: string[] };
+export type DirectProbe = {
+  mode: DirectProbeMode;
+  /** الفصل كاملًا (العناوين والصور) حين يكون متاحًا مباشرة بلا جلسة. */
+  chapter: DirectChapterPages | null;
+};
+
+function chapterHost(chapterUrl: string): string {
+  try {
+    return new URL(chapterUrl).hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
 
 /**
- * فحص صفحة الفصل دون أي جلسة: فيه صور → مجاني (يمر عبر المسار المعتاد)،
- * مقفل بعلامات البيع → مدفوع (يُسحب بالجلسة)، وأي عطب أو حماية أخرى
- * → غير محسوم (المسار المعتاد آمنًا). الفحص قراءة فقط ولا يفشل السحب.
+ * فحص صفحة الفصل دون أي جلسة، واعي بالموقع:
+ * - GigaViewer (شونين جامب+): صور متاحة → مجاني مع جلبها فورًا، كتلة القارئ
+ *   بلا بنية صفحات → مدفوع، وأي عطب → غير محسوم.
+ * - MangaThemesia (rokari): صور → مجاني، علامات البيع → مدفوع، وإلا غير محسوم.
+ * الفحص قراءة فقط ولا يفشل السحب.
  */
 export async function probeDirectChapterPage(chapterUrl: string): Promise<DirectProbe> {
   try {
     const html = await fetchChapterHtml(chapterUrl);
+    const host = chapterHost(chapterUrl);
+    if (host === "shonenjumpplus.com") {
+      const episode = extractGigaViewerEpisode(html);
+      if (episode?.pages.length) {
+        return {
+          mode: "free",
+          chapter: {
+            mangaTitle: episode.mangaTitle,
+            chapterName: episode.chapterName || "الفصل",
+            pages: episode.pages,
+          },
+        };
+      }
+      if (isGigaViewerLockedEpisode(html)) return { mode: "locked", chapter: null };
+      return { mode: "unknown", chapter: null };
+    }
     const images = extractReaderImages(html);
-    if (images.length) return { mode: "free", images };
-    if (isLockedChapterHtml(html)) return { mode: "locked", images: [] };
-    return { mode: "unknown", images: [] };
+    if (images.length) {
+      const { mangaTitle, chapterName } = parseMangaChapterTitle(extractPageTitle(html));
+      return {
+        mode: "free",
+        chapter: {
+          mangaTitle: mangaTitle || "العمل",
+          chapterName: chapterName || "الفصل",
+          pages: images,
+        },
+      };
+    }
+    if (isLockedChapterHtml(html)) return { mode: "locked", chapter: null };
+    return { mode: "unknown", chapter: null };
   } catch {
-    return { mode: "unknown", images: [] };
+    return { mode: "unknown", chapter: null };
   }
 }
 
@@ -265,15 +396,36 @@ export type DirectChapterPages = {
 };
 
 /**
- * يجلب صفحات الفصل بحقن كوكي الجلسة الموثقة. صفحة الفصل المقفل تعيد قائمة
- * صورها فقط لصاحب الجلسة المصرح له — غياب الصور مع الكوكي يعني جلسة منتهية
- * أو فصلًا لم يُفتح في حساب الموقع، والرسالة توضح ذلك بدقة.
+ * يجلب صفحات الفصل بحقن كوكي الجلسة الموثقة، واعي بالموقع:
+ * - rokari (MangaThemesia): صور القارئ تُستخرج من ts_reader، وغيابها مع
+ *   علامات القفل يعني جلسة منتهية أو فصلًا لم يُفتح في حساب الموقع.
+ * - شونين جامب+ (GigaViewer): بلا بنية صفحات رغم الجلسة يعني جلسة منتهية
+ *   أو فصلًا غير مشترى/مستأجر في حساب الموقع.
  */
 export async function fetchDirectChapterWithSession(
   chapterUrl: string,
   cookie: string
 ): Promise<DirectChapterPages> {
   const html = await fetchChapterHtml(chapterUrl, cookie);
+  const host = chapterHost(chapterUrl);
+  if (host === "shonenjumpplus.com") {
+    const episode = extractGigaViewerEpisode(html);
+    if (!episode?.pages.length) {
+      if (/episode-json/i.test(html)) {
+        throw new DirectSourceError(
+          "الفصل ما يزال مقفلًا رغم الجلسة الموثقة — الجلسة منتهية أو الفصل غير مشترى/مستأجر في حسابك بالموقع. حدّث كوكي الجلسة من لوحة التحكم أو افتح الفصل في الموقع أولًا."
+        );
+      }
+      throw new DirectSourceError(
+        "تعذر قراءة صفحة الفصل من الموقع مباشرة — ربما غيّر الموقع بنية قارئه. أبلغ المالك."
+      );
+    }
+    return {
+      mangaTitle: episode.mangaTitle || "العمل",
+      chapterName: episode.chapterName || "الفصل",
+      pages: episode.pages,
+    };
+  }
   const pages = extractReaderImages(html);
   if (!pages.length) {
     if (isLockedChapterHtml(html)) {
