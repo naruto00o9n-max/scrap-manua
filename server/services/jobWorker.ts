@@ -1,7 +1,7 @@
 import {
   addJobAttempt,
   getChapterJob,
-  getImageOutputConfig,
+  getEffectiveImageOutputConfig,
   getNextPendingChapterJob,
   getSetting,
   getSourceById,
@@ -32,10 +32,11 @@ import {
 import { getUsableSuwayomiToken } from "./settings";
 import {
   DirectSourceError,
+  directSourceMode,
   fetchDirectChapterWithSession,
   getDirectSessionCookie,
-  isDirectSourceSupported,
   probeDirectChapterPage,
+  type DirectProbe,
 } from "./directSource";
 import { SuwayomiClient, type SuwayomiChapter } from "./suwayomi";
 import { imageOutputDescription, openChapterMergeSession } from "./imageMerging";
@@ -180,6 +181,88 @@ async function resolveChapterViaSuwayomi(
   };
 }
 
+/** نوعا بطاقة المتابعة كما تستخدمه processChapterJob — لتمريرهما للمسارات الفرعية. */
+type ProgressBase = () => Omit<JobNotice, "status">;
+type ProgressPost = (notice: JobNotice, force?: boolean) => Promise<void>;
+
+/** يحوّل نتيجة الفحص المباشر إلى فصل مكتمل — أو null حين لا تحمل صورًا. */
+function chapterFromProbe(probe: DirectProbe, fallbackId: string): ResolvedChapter | null {
+  if (probe.mode !== "free" || !probe.chapter?.pages.length) return null;
+  return {
+    mangaTitle: probe.chapter.mangaTitle,
+    chapterName: probe.chapter.chapterName,
+    pages: probe.chapter.pages,
+    sourceChapterId: fallbackId,
+  };
+}
+
+/**
+ * المسار المباشر الأساسي (شونين جامب+): فحص واحد يكفي للمجاني — صوره تُعاد
+ * فورًا. المقفل يحتاج جلسة موثقة وإلا رُفض برسالة توضح السبب والخطوة المطلوبة.
+ * الفحص غير المحسوم يُعاد مرة واحدة قبل الاستسلام برسالة واضحة.
+ */
+async function resolveViaDirectFirst(
+  job: ChapterJob,
+  base: ProgressBase,
+  post: ProgressPost
+): Promise<ResolvedChapter | null> {
+  const attemptProbe = async (): Promise<DirectProbe> => probeDirectChapterPage(job.canonicalUrl);
+  let probe = await attemptProbe();
+  if (probe.mode === "unknown") {
+    await new Promise(resolve => setTimeout(resolve, 4_000));
+    probe = await attemptProbe();
+  }
+  const free = chapterFromProbe(probe, job.canonicalUrl);
+  if (free) {
+    await addJobAttempt(
+      job.id,
+      "downloading",
+      `فُتح الفصل من الموقع مباشرة — ${free.pages.length} صفحة.`
+    );
+    await post({ ...base(), status: "downloading" }, true);
+    return free;
+  }
+  if (probe.mode === "locked") {
+    const cookie = await getDirectSessionCookie(
+      new URL(job.canonicalUrl).hostname
+    );
+    if (!cookie) {
+      throw new DirectSourceError(
+        "هذا الفصل مدفوع في الموقع (يتطلب شراء أو اشتراك في الحساب) فلا تظهر صفحاته للزوار. لسحبه وثّق جلسة حسابك في الموقع من لوحة التحكم ثم أعد /فصل."
+      );
+    }
+    await addJobAttempt(
+      job.id,
+      "downloading",
+      "الفصل مدفوع — سيُسحب بجلية الموقع الموثقة من لوحة التحكم."
+    );
+    await post({ ...base(), status: "downloading" }, true);
+    return await resolveLockedWithSession(job, cookie);
+  }
+  throw new DirectSourceError(
+    "تعذر فتح صفحة الفصل من الموقع مباشرة الآن — قد يكون الموقع مشغولًا أو يحمي صفحته بتحقق. أعد /فصل بعد قليل."
+  );
+}
+
+/** جلب الفصل المقفل بحقن كوكي الجلسة الموثقة (rokari وشونين جامب+). */
+async function resolveLockedWithSession(
+  job: ChapterJob,
+  cookie: string
+): Promise<ResolvedChapter> {
+  const direct = await fetchDirectChapterWithSession(job.canonicalUrl, cookie);
+  await addJobAttempt(
+    job.id,
+    "downloading",
+    `فُتح الفصل بالجلسة الموثقة — ${direct.pages.length} صفحة.`
+  );
+  return {
+    mangaTitle: direct.mangaTitle,
+    chapterName: direct.chapterName,
+    pages: direct.pages,
+    sourceChapterId: job.canonicalUrl,
+  };
+}
+
 async function processChapterJob(job: ChapterJob): Promise<void> {
   // حالة المسار الحية لهذا الطلب؛ تُغذّي بطاقة Discord في كل تحديث.
   let stage: JobStage = "validate";
@@ -217,40 +300,30 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
     await post({ ...base(), status: "downloading" }, true);
 
     // ============================================================
-    // التوجيه الذكي بين مسارين دون أي خيار يدوي:
-    // • للمواقع التي وثّق المالك جلستها في اللوحة، تُفحص صفحة الفصل مباشرة
-    //   أولًا: الفصل المقفل (المدفوع) لا تعرفه إضافة الخادم أصلًا فيُسحب
-    //   بحقن كوكي الجلسة، والفصل المجاني يمر عبر المسار المعتاد كما هو.
-    // • لغير ذلك: المسار المعتاد فورًا — سلوك كل المصادر الأخرى لم يتغير.
+    // التوجيه الذكي حسب نمط الموقع — بلا أي خيار يدوي:
+    // • «direct-first» (شونين جامب+): الصفحة تُقرأ مباشرة أولًا دائمًا —
+    //   المتاح مجانًا تُستخدم صوره فورًا، والمدفوع بجلسة موثقة أو برفض واضح.
+    // • «session-only» (rokari): المسار المعتاد أساسًا، وفقط حين وثّق المالك
+    //   جلستها تُفحص الصفحة أولًا ليلتقط الفصل المقفل (المدفوع) بجلستها.
+    // • غير المدعوم: المسار المعتاد كما هو — سلوك كل المصادر الأخرى لم يتغير.
     // ============================================================
     let resolved: ResolvedChapter | null = null;
-    const sessionCookie = isDirectSourceSupported(source.hostname)
-      ? await getDirectSessionCookie(source.hostname)
-      : null;
-    if (sessionCookie) {
-      const probe = await probeDirectChapterPage(job.canonicalUrl);
-      if (probe.mode === "locked") {
-        await addJobAttempt(
-          job.id,
-          "downloading",
-          "الفصل محمي (مدفوع) — سيُسحب مباشرة بجلية الموقع الموثقة من لوحة التحكم."
-        );
-        await post({ ...base(), status: "downloading" }, true);
-        const direct = await fetchDirectChapterWithSession(
-          job.canonicalUrl,
-          sessionCookie
-        );
-        resolved = {
-          mangaTitle: direct.mangaTitle,
-          chapterName: direct.chapterName,
-          pages: direct.pages,
-          sourceChapterId: job.canonicalUrl,
-        };
-        await addJobAttempt(
-          job.id,
-          "downloading",
-          `فُتح الفصل بالجلسة الموثقة — ${direct.pages.length} صفحة.`
-        );
+    const mode = directSourceMode(source.hostname);
+    if (mode === "direct-first") {
+      resolved = await resolveViaDirectFirst(job, base, post);
+    } else if (mode === "session-only") {
+      const sessionCookie = await getDirectSessionCookie(source.hostname);
+      if (sessionCookie) {
+        const probe = await probeDirectChapterPage(job.canonicalUrl);
+        if (probe.mode === "locked") {
+          await addJobAttempt(
+            job.id,
+            "downloading",
+            "الفصل محمي (مدفوع) — سيُسحب مباشرة بجلية الموقع الموثقة من لوحة التحكم."
+          );
+          await post({ ...base(), status: "downloading" }, true);
+          resolved = await resolveLockedWithSession(job, sessionCookie);
+        }
       }
     }
     if (!resolved) {
@@ -263,12 +336,15 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
           );
         },
         onFinalFailure: async () => {
-          if (!sessionCookie && isDirectSourceSupported(source.hostname)) {
-            const probe = await probeDirectChapterPage(job.canonicalUrl);
-            if (probe.mode === "locked") {
-              throw new DirectSourceError(
-                "هذا الفصل مقفل (مدفوع) ولا يظهر في فصول الموقع المفهرسة. لسحبه وثّق جلسة الموقع من لوحة التحكم ثم أعد /فصل."
-              );
+          if (mode === "session-only") {
+            const sessionCookie = await getDirectSessionCookie(source.hostname);
+            if (!sessionCookie) {
+              const probe = await probeDirectChapterPage(job.canonicalUrl);
+              if (probe.mode === "locked") {
+                throw new DirectSourceError(
+                  "هذا الفصل مقفل (مدفوع) ولا يظهر في فصول الموقع المفهرسة. لسحبه وثّق جلسة الموقع من لوحة التحكم ثم أعد /فصل."
+                );
+              }
             }
           }
         },
@@ -281,10 +357,9 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
     await post({ ...base(), status: "downloading" }, true);
     // تُنزّل الصفحات وتُدمج عبر ملفات مؤقتة على القرص بدل الذاكرة؛ ذلك يمنع
     // قتل العملية بسبب نفاد الذاكرة (exit 137) في الفصول الطويلة.
-    // صيغة الإخراج إعداد مالك من اللوحة: الافتراضي PNG بضغط أقصى بلا أي فقدان.
-    // تنبيه: الإعداد يجب أن يُمرَّر هنا صراحة — إغفاله كان يجعل /فصل يتجاهل
-    // صيغة اللوحة (JPG/WebP) ويخرج PNG دائمًا بينما /دمج يحترم الإعداد.
-    const outputConfig = await getImageOutputConfig();
+    // صيغة الإخراج إعداد لكل سيرفر من أمر /الاعدادات، ولمن لم يخصص يعمل
+    // بالإعداد العام من لوحة التحكم؛ الافتراضي في الحالين PNG بضغط أقصى بلا أي فقدان.
+    const outputConfig = await getEffectiveImageOutputConfig(job.requestedInGuildId);
     const mergeSession = await openChapterMergeSession(
       resolved.pages,
       async event => {

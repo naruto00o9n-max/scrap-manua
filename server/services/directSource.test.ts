@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   cookieDisplayName,
+  directSourceMode,
+  extractGigaViewerEpisode,
   extractReaderImages,
+  isGigaViewerLockedEpisode,
   normalizeCookieHeader,
   parseMangaChapterTitle,
 } from "./directSource";
@@ -101,5 +104,111 @@ describe("cookieDisplayName", () => {
     expect(cookieDisplayName("wordpress_logged_in_abc123=Rios%7Ctoken; other=1")).toBe(
       "wordpress_logged_in_abc123…"
     );
+  });
+});
+
+// ===== GigaViewer (شونين جامب+) =====
+
+/** عينة مبسطة من كتلة episode-json كما ترد في صفحات shonenjumpplus.com. */
+function gigaHtml(dataValue: string): string {
+  return `<html><head><title>少年ジャンプ＋</title></head><body><script id='episode-json' type='text/json' data-value='${dataValue}'></script></body></html>`;
+}
+
+function gigaProductJson(product: Record<string, unknown>): string {
+  return gigaHtml(JSON.stringify({ readableProduct: product }).replace(/"/g, "&quot;"));
+}
+
+describe("extractGigaViewerEpisode", () => {
+  it("يستخرج صفحات main فقط من بنية الفصل المجاني مع مؤشر التشويش", () => {
+    const html = gigaProductJson({
+      title: "[第一話]ノイズリング",
+      series: { title: "ノイズリング" },
+      hasPurchased: false,
+      pageStructure: {
+        readingDirection: "rtl",
+        choJuGiga: "baku",
+        startPosition: "latter",
+        pages: [
+          { type: "cover", src: "https://cdn.example.com/cover" },
+          { type: "main", src: "https://cdn.example.com/p1" },
+          { type: "main", src: "https://cdn.example.com/p2" },
+          { type: "link" },
+          { type: "backMatter" },
+        ],
+      },
+    });
+    const episode = extractGigaViewerEpisode(html);
+    expect(episode).toEqual({
+      mangaTitle: "ノイズリング",
+      chapterName: "[第一話]ノイズリング",
+      pages: [
+        "https://cdn.example.com/p1#scramble",
+        "https://cdn.example.com/p2#scramble",
+      ],
+    });
+  });
+
+  it("لا يضيف مؤشر التشويش حين لا يكون choJuGiga هو baku", () => {
+    const html = gigaProductJson({
+      title: "فصل",
+      series: { title: "عمل" },
+      pageStructure: {
+        choJuGiga: "",
+        pages: [{ type: "main", src: "https://cdn.example.com/p1" }],
+      },
+    });
+    expect(extractGigaViewerEpisode(html)?.pages).toEqual(["https://cdn.example.com/p1"]);
+  });
+
+  it("يرجع null لصفحة بلا كتلة قارئ", () => {
+    expect(extractGigaViewerEpisode("<html><body>صفحة عادية</body></html>")).toBeNull();
+  });
+
+  it("يتعامل مع كتلة فاسدة بلا انهيار", () => {
+    expect(extractGigaViewerEpisode(gigaHtml("{بيانات غير سليمة"))).toBeNull();
+  });
+});
+
+describe("isGigaViewerLockedEpisode", () => {
+  it("يعتبر الفصل المدفوع غير المشترى مقفلًا (بلا pageStructure)", () => {
+    const html = gigaProductJson({
+      title: "[73話]群青のマグメル",
+      hasPurchased: false,
+      isPublic: false,
+    });
+    expect(isGigaViewerLockedEpisode(html)).toBe(true);
+  });
+
+  it("يعتبر بنية بلا صفحات main مقفلًا", () => {
+    const html = gigaProductJson({
+      title: "فصل",
+      pageStructure: { choJuGiga: "baku", pages: [{ type: "link" }] },
+    });
+    expect(isGigaViewerLockedEpisode(html)).toBe(true);
+  });
+
+  it("الفصل المجاني الصالح ليس مقفلًا", () => {
+    const html = gigaProductJson({
+      title: "فصل",
+      pageStructure: {
+        choJuGiga: "baku",
+        pages: [{ type: "main", src: "https://cdn.example.com/p1" }],
+      },
+    });
+    expect(isGigaViewerLockedEpisode(html)).toBe(false);
+  });
+
+  it("الصفحة بلا كتلة قارئ ليست «فصل مقفل» — فقط غير معروف", () => {
+    expect(isGigaViewerLockedEpisode("<html></html>")).toBe(false);
+  });
+});
+
+describe("directSourceMode", () => {
+  it("rokari يعتمد الجلسة فقط وشونين جامب+ يعتمد المباشر أولًا", () => {
+    expect(directSourceMode("rokaricomics.com")).toBe("session-only");
+    expect(directSourceMode("shonenjumpplus.com")).toBe("direct-first");
+    expect(directSourceMode("www.shonenjumpplus.com")).toBe("direct-first");
+    expect(directSourceMode("example.com")).toBeNull();
+    expect(directSourceMode(null)).toBeNull();
   });
 });

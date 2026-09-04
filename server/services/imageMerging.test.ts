@@ -159,3 +159,70 @@ describe("pickUniformWidth", () => {
     expect(pickUniformWidth([])).toBe(0);
   });
 });
+
+// ===== فك تشويش GigaViewer (شونين جامب+) =====
+
+describe("unscrambleGigaViewerPage", () => {
+  it("يعيد شبكة 4×4 المقلوبة إلى ترتيبها الأصلي", async () => {
+    const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const path = await import("node:path");
+    const { unscrambleGigaViewerPage } = await import("./imageMerging");
+
+    const divide = 4;
+    const multiple = 8;
+    const size = 256; // block = floor(256/32)*8 = 64
+    const block = Math.floor(size / (divide * multiple)) * multiple;
+
+    // الصورة الأصلية: كل كتلة (صف، عمود) بلون مميز عبر المنطقة الشبكية.
+    const base = sharp({ create: { width: size, height: size, channels: 3, background: "#000000" } });
+    const composites: Array<{ input: Buffer; left: number; top: number }> = [];
+    const blockColor = (row: number, col: number) => ({
+      r: 20 + row * 50,
+      g: 20 + col * 50,
+      b: 100 + row * 10 + col * 5,
+    });
+    for (let row = 0; row < divide; row += 1) {
+      for (let col = 0; col < divide; col += 1) {
+        const { r, g, b } = blockColor(row, col);
+        composites.push({
+          input: await sharp({ create: { width: block, height: block, channels: 3, background: { r, g, b } } }).png().toBuffer(),
+          left: col * block,
+          top: row * block,
+        });
+      }
+    }
+    const original = await base.composite(composites).png().toBuffer();
+
+    // نُنشئ النسخة «المشوشة» بنفس عملية القلب (القلب تناظري).
+    const scrambleComposites: Array<{ input: Buffer; left: number; top: number }> = [];
+    for (let e = 0; e < divide * divide; e += 1) {
+      const sourceCol = e % divide;
+      const sourceRow = Math.floor(e / divide);
+      const buf = await sharp(original).extract({ left: sourceCol * block, top: sourceRow * block, width: block, height: block }).toBuffer();
+      scrambleComposites.push({ input: buf, left: sourceRow * block, top: sourceCol * block });
+    }
+    const scrambled = await sharp(original).composite(scrambleComposites).png().toBuffer();
+
+    const dir = await mkdtemp(path.join(tmpdir(), "scramble-test-"));
+    try {
+      const filePath = path.join(dir, "page.img");
+      await writeFile(filePath, scrambled);
+      await unscrambleGigaViewerPage(filePath);
+
+      // نتحقق من مركز كل كتلة: يجب أن يعود إلى لونه الأصلي.
+      for (let row = 0; row < divide; row += 1) {
+        for (let col = 0; col < divide; col += 1) {
+          const raw = await sharp(filePath)
+            .extract({ left: col * block + block / 2, top: row * block + block / 2, width: 1, height: 1 })
+            .raw()
+            .toBuffer();
+          const { r, g, b } = blockColor(row, col);
+          expect([raw[0], raw[1], raw[2]]).toEqual([r, g, b]);
+        }
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

@@ -55,6 +55,8 @@ export type ChapterJob = {
   requestedByDiscordId: string;
   requestedByName: string;
   requestedInChannelId: string | null;
+  /** السيرفر الذي طُلب فيه الفصل — لإعدادات صيغة الصور الخاصة بكل سيرفر. */
+  requestedInGuildId?: string | null;
   discordProgressMessageId: string | null;
   sourceChapterId: string | null;
   mangaTitle: string | null;

@@ -150,6 +150,10 @@ function byteCappedStream(limit: number, label: string) {
 
 async function downloadPageToTemp(url: string, index: number, targetPath: string): Promise<void> {
   const parsed = new URL(url);
+  // روابط GigaViewer المشوشة تحمل فاصل #scramble — يُنزع قبل التنزيل لأنه
+  // مؤشر معالجة داخلي وليس جزءًا من عنوان الملف، ثم يُفك التشويش بعد الحفظ.
+  const needsUnscramble = parsed.hash === "#scramble";
+  if (needsUnscramble) parsed.hash = "";
   if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.hostname === "localhost") {
     throw new Error(`رابط الصفحة ${index} غير آمن.`);
   }
@@ -166,6 +170,7 @@ async function downloadPageToTemp(url: string, index: number, targetPath: string
       // تُكتب الصفحة على القرص مباشرة بدل الاحتفاظ بها في الذاكرة.
       const source = Readable.fromWeb(response.body as never);
       await pipeline(source, byteCappedStream(MAX_PAGE_SIZE_BYTES, `الصفحة ${index}`), createWriteStream(targetPath));
+      if (needsUnscramble) await unscrambleGigaViewerPage(targetPath);
       return;
     } catch (error) {
       lastError = error;
@@ -173,6 +178,44 @@ async function downloadPageToTemp(url: string, index: number, targetPath: string
     }
   }
   throw lastError instanceof Error ? lastError : new Error(`تعذر تنزيل الصفحة ${index}.`);
+}
+
+/** عدد كتل شبكة تشويش GigaViewer في كل بعد، ومضاعف محاذاة الكتلة بالبكسل. */
+export const GIGA_SCRAMBLE_DIVIDE_NUM = 4;
+export const GIGA_SCRAMBLE_MULTIPLE_NUM = 8;
+
+/**
+ * يفك تشويش صفحات GigaViewer (شونين جامب+) بنفس خوارزمية إضافة Mihon:
+ * الصورة مخزنة بقلب شبكة 4×4 من الكتل (كل كتلة بعرض/ارتفاع من مضاعفات 8
+ * حتى حافة الشبكة)، والفك هو قب الشبكة نفسه لأن القلب عملية تناظرية —
+ * الكتلة عند (صف، عمود) تُوضع عند (عمود، صف) بينما تبقى حواف الصورة
+ * خارج الشبكة كما هي فوق النسخة الأصلية المرسومة أولًا.
+ * الملف يُستبدل في مكانه بعد الفك.
+ */
+export async function unscrambleGigaViewerPage(filePath: string): Promise<void> {
+  const metadata = await sharp(filePath).metadata();
+  const width = metadata.width ?? 0;
+  const height = metadata.height ?? 0;
+  if (!width || !height) return;
+  const divide = GIGA_SCRAMBLE_DIVIDE_NUM;
+  const blockWidth = Math.floor(width / (divide * GIGA_SCRAMBLE_MULTIPLE_NUM)) * GIGA_SCRAMBLE_MULTIPLE_NUM;
+  const blockHeight = Math.floor(height / (divide * GIGA_SCRAMBLE_MULTIPLE_NUM)) * GIGA_SCRAMBLE_MULTIPLE_NUM;
+  if (blockWidth <= 0 || blockHeight <= 0) return;
+  const composites: Array<{ input: Buffer; left: number; top: number }> = [];
+  for (let e = 0; e < divide * divide; e += 1) {
+    const sourceCol = e % divide;
+    const sourceRow = Math.floor(e / divide);
+    // القلب: موضع المصدر (صف، عمود) يصبح (عمود، صف) في الوجهة.
+    const buffer = await sharp(filePath)
+      .extract({ left: sourceCol * blockWidth, top: sourceRow * blockHeight, width: blockWidth, height: blockHeight })
+      .toBuffer();
+    composites.push({ input: buffer, left: sourceRow * blockWidth, top: sourceCol * blockHeight });
+  }
+  const unscrambled = await sharp(filePath).composite(composites).toBuffer();
+  await sharp(unscrambled).toFile(`${filePath}.unscrambled`);
+  // الاستبدال الذري: ملف جديد ثم إعادة تسمية فوق الأصل.
+  const { rename } = await import("node:fs/promises");
+  await rename(`${filePath}.unscrambled`, filePath);
 }
 
 async function downloadPagesToTemp(

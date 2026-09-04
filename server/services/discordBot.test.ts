@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { ENV } from "../_core/env";
 import {
   buildHelpComponents,
   buildJobCard,
@@ -9,7 +10,8 @@ import {
   buildSearchCardComponents,
   buildSearchPageNavRow,
   buildSearchSessionView,
-  buildSettingComponents,
+  buildSettingsPanelComponents,
+  canManageSettings,
   buildSourcesComponents,
   chaptersCount,
   foldersCount,
@@ -98,12 +100,12 @@ const manageSource = {
 describe("Discord ZEUS chapter experience", () => {
   it("registers Arabic-only commands", () => {
     const names = getRegisteredDiscordCommands().map(command => command.name);
-    expect(names).toEqual(["فصل", "دمج", "مواقع", "بحث", "نقل", "setting", "مساعدة"]);
+    expect(names).toEqual(["فصل", "دمج", "مواقع", "بحث", "نقل", "الاعدادات", "مساعدة"]);
   });
 
-  it("registers the owner-only setting command with image format options", () => {
+  it("registers the guild settings command with image format options", () => {
     const setting = getRegisteredDiscordCommands().find(
-      command => command.name === "setting"
+      command => command.name === "الاعدادات"
     );
     expect(setting).toBeTruthy();
     const options = (setting?.options ?? []).map(option => option.name);
@@ -1200,34 +1202,98 @@ describe("image format /setting command", () => {
     expect(mergeImageOutputChoice(current, { format: "" }).format).toBe("png");
   });
 
-  it("renders the setting card with the current format details", () => {
-    const [container] = buildSettingComponents(
-      { format: "jpeg", quality: 85, pngPalette: false },
+  it("renders the settings panel with the effective config and its source", () => {
+    const [container] = buildSettingsPanelComponents(
+      {
+        guildName: "سيرفر الاختبار",
+        override: null,
+        effective: { format: "jpeg", quality: 85, pngPalette: false },
+        draft: { format: null, quality: null, palette: null },
+        saved: false,
+        feedback: null,
+        hasDraft: false,
+        selects: [],
+      },
       null
     ) as unknown as [ComponentShape];
     const texts = collectTexts([container]).join("\n");
     expect(texts).toContain("JPG");
     expect(texts).toContain("85");
-    expect(texts).toContain("الصيغة الحالية");
+    expect(texts).toContain("الصيغة المطبقة حاليًا");
+    expect(texts).toContain("الافتراضي العام من لوحة التحكم");
   });
 
-  it("renders the lossless PNG card without a quality line", () => {
-    const [container] = buildSettingComponents(
-      { format: "png", quality: 88, pngPalette: false },
+  it("marks a guild with its own override as self-configured", () => {
+    const [container] = buildSettingsPanelComponents(
+      {
+        guildName: "سيرفر الاختبار",
+        override: { format: "webp", quality: 90, pngPalette: false },
+        effective: { format: "webp", quality: 90, pngPalette: false },
+        draft: { format: null, quality: null, palette: null },
+        saved: false,
+        feedback: null,
+        hasDraft: false,
+        selects: [],
+      },
       null
     ) as unknown as [ComponentShape];
     const texts = collectTexts([container]).join("\n");
-    expect(texts).toContain("PNG");
-    expect(texts).not.toContain("الجودة:");
-    expect(texts).not.toContain("مفعّل");
+    expect(texts).toContain("إعدادات هذا السيرفر");
   });
 
-  it("renders the palette PNG card with its quality", () => {
-    const [container] = buildSettingComponents(
-      { format: "png", quality: 90, pngPalette: true },
+  it("renders chosen draft values and the save hint", () => {
+    const [container] = buildSettingsPanelComponents(
+      {
+        guildName: "سيرفر الاختبار",
+        override: null,
+        effective: { format: "png", quality: 88, pngPalette: false },
+        draft: { format: "jpeg", quality: 90, palette: true },
+        saved: false,
+        feedback: null,
+        hasDraft: true,
+        selects: [
+          { customId: "settings:fmt:u1", placeholder: "الصيغة: JPG", options: [] },
+        ],
+      },
       null
     ) as unknown as [ComponentShape];
     const texts = collectTexts([container]).join("\n");
-    expect(texts).toContain("مفعّل (جودة 90)");
+    expect(texts).toContain("اختياراتك");
+    expect(texts).toContain("حفظ إعدادات هذا السيرفر");
+  });
+});
+
+describe("settings command permissions", () => {
+  const baseInteraction = {
+    user: { id: "user-1" },
+    inGuild: () => true,
+    guildOwnerId: "owner-2",
+    memberPermissions: { has: () => false },
+  };
+
+  it("allows the platform owner when configured", () => {
+    // معرف المالك يُقرأ من البيئة عند تحميل الوحدة — إن لم يُعد فحالة
+    // المالك تغطيها اختبارات النشر، والبقية هنا تعتمد صلاحيات السيرفر.
+    const ownerId = ENV.ownerDiscordUserId;
+    if (!ownerId) return;
+    expect(canManageSettings({ ...baseInteraction, user: { id: ownerId } })).toBe(true);
+    expect(canManageSettings(baseInteraction)).toBe(false);
+  });
+
+  it("allows the guild owner and administrators", () => {
+    expect(canManageSettings({ ...baseInteraction, user: { id: "owner-2" } })).toBe(true);
+    expect(
+      canManageSettings({
+        ...baseInteraction,
+        memberPermissions: { has: () => true },
+      })
+    ).toBe(true);
+  });
+
+  it("rejects regular members and non-guild usage", () => {
+    expect(canManageSettings(baseInteraction)).toBe(false);
+    expect(
+      canManageSettings({ ...baseInteraction, inGuild: () => false })
+    ).toBe(false);
   });
 });
