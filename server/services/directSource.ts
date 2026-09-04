@@ -37,19 +37,38 @@ type DirectSessions = Record<string, DirectSessionEntry>;
 const DIRECT_SESSIONS_KEY = "direct_source_sessions";
 
 /**
- * يقبل كوكي واحدًا (name=value) أو سطر Cookie كاملًا بعدة أزواج، ويعيده
- * مطبعًا كترويسة Cookie نظيفة. يرفض الفارغ والطويل والحامل لأسطر جديدة.
+ * يقبل كوكيًا واحدًا بأي صيغة عملية:
+ * - «name=value» (صيغة ترويسة Cookie)
+ * - «name value» كما يظهر السطر في نافذة أدوات المطور (مفصول بمسافة أو Tab)
+ * - سطر Cookie كاملًا بعدة أزواج «a=1; b=2» وبخيار «Cookie: » المسبق
+ * ويعيده مطبعًا كترويسة Cookie نظيفة. يرفض الفارغ والطويل والحامل لأسطر جديدة.
  */
 export function normalizeCookieHeader(input: string): string | null {
   const cleaned = input.trim().replace(/^cookie\s*:\s*/i, "");
   if (!cleaned || cleaned.length > 4000 || /[\r\n]/.test(cleaned)) return null;
   const pairs = cleaned
     .split(";")
-    .map(pair => pair.trim())
+    .map(pair => {
+      const trimmed = pair.trim();
+      if (!trimmed) return "";
+      // أدوات المطور تعرض «الاسم القيمة» بمسافة بدلًا من = — نحوّلها للصيغة
+      // القياسية شرط أن يكون الاسم رمز كوكي صالحًا (ASCII) لا نصًا اعتباطيًا
+      if (!trimmed.includes("=") && /\s/.test(trimmed)) {
+        const separator = trimmed.search(/\s/);
+        const name = trimmed.slice(0, separator);
+        if (/^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/.test(name)) {
+          return `${name}=${trimmed.slice(separator).replace(/^\s+/, "")}`;
+        }
+        return trimmed;
+      }
+      // إزالة المسافات الزائدة حول أول = فاصلة
+      return trimmed.replace(/\s*=\s*/, "=");
+    })
     .filter(pair => {
       const eq = pair.indexOf("=");
       return eq > 0 && !/\s/.test(pair.slice(0, eq));
-    });
+    })
+    .map(pair => `${pair.slice(0, pair.indexOf("="))}=${pair.slice(pair.indexOf("=") + 1)}`);
   if (!pairs.length) return null;
   return Array.from(new Set(pairs)).join("; ");
 }
