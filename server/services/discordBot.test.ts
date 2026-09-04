@@ -16,7 +16,10 @@ import {
   buildSearchCardComponents,
   buildSearchPageNavRow,
   buildSearchSessionView,
-  buildSettingsPanelComponents,
+  buildSettingsHubComponents,
+  buildSettingsSavedComponents,
+  buildSettingsSectionComponents,
+  buildSettingsSectionView,
   canManageSettings,
   buildSourcesComponents,
   chaptersCount,
@@ -41,6 +44,7 @@ import {
   stripHtmlTags,
   type SearchSession,
 } from "./discordBot";
+import { resolveMergeDimensions } from "./imageMerging";
 
 type ComponentShape = {
   type: number;
@@ -1301,50 +1305,134 @@ describe("merge section choices (mergeMergeChoice)", () => {
   });
 });
 
-describe("settings panel sections", () => {
-  const baseView = {
+describe("settings hub and section interfaces", () => {
+  const hubView = {
     guildName: "سيرفر الاختبار",
+    requesterId: "u1",
     override: null,
     effective: { format: "png" as const, quality: 88, pngPalette: false },
     mergeConfig: { enabled: true, heightCap: null, width: null },
     effectiveMergeDimensions: { heightCap: 15000, width: 1200 },
+  };
+
+  const baseState = {
+    section: "format" as const,
+    guildId: "g1",
+    guildName: "سيرفر الاختبار",
+    requesterId: "u1",
+    channelId: "c1",
+    messageId: null,
+    overrideAtOpen: null,
+    effectiveAtOpen: { format: "png" as const, quality: 88, pngPalette: false },
+    mergeAtOpen: { enabled: true, heightCap: null, width: null },
     draft: { format: null, quality: null, palette: null, merge: null, height: null, width: null },
     saved: false,
     feedback: null,
-    hasDraft: false,
-    selects: [],
   };
 
-  it("splits the panel into a format section and a merge section", () => {
-    const [container] = buildSettingsPanelComponents(
-      baseView,
-      null
-    ) as unknown as [ComponentShape];
+  it("hub explains the command and its sections with a section select menu", () => {
+    const [container] = buildSettingsHubComponents(hubView, null) as unknown as [ComponentShape];
+    const flattened = flatten(container);
     const texts = collectTexts([container]).join("\n");
     expect(texts).toContain("## ⚙️ إعدادات هذا السيرفر");
-    expect(texts).toContain("🖼 **قسم صيغة الصور**");
-    expect(texts).toContain("🧩 **قسم دمج الصفحات**");
-    expect(texts).toContain("الصيغة المطبقة حاليًا");
-    expect(texts).toContain("**دمج الصفحات في /فصل:** مفعّل");
+    expect(texts).toContain("قسمين مستقلين");
+    expect(texts).toContain("**1. 🖼 قسم صيغة الصور**");
+    expect(texts).toContain("**2. 🧩 قسم دمج الصفحات**");
+    expect(texts).toContain("ستصلك رسالة جديدة خاصة به");
+    // القائمة تحت الشرح تفتح القسم المختار كرسالة جديدة.
+    const select = flattened.find(item => item.custom_id === "settings:sec:u1");
+    expect(select).toBeTruthy();
+    const options = (select?.options ?? []) as Array<{ label: string; value: string }>;
+    expect(options.map(option => option.value)).toEqual(["format", "merge"]);
+    expect(options.map(option => option.label)).toEqual(["قسم صيغة الصور", "قسم دمج الصفحات"]);
   });
 
-  it("shows the applied merge dimensions with their default source", () => {
-    const [container] = buildSettingsPanelComponents(
-      baseView,
+  it("hub shows the currently applied settings summary", () => {
+    const [container] = buildSettingsHubComponents(
+      { ...hubView, effective: { format: "jpeg", quality: 85, pngPalette: false } },
       null
     ) as unknown as [ComponentShape];
     const texts = collectTexts([container]).join("\n");
-    expect(texts).toContain("**أقصى ارتفاع للصورة المدمجة:** الافتراضي (15000px) — المطبق الآن 15000px");
-    expect(texts).toContain("**عرض الصورة المدمجة:** تلقائي حسب الصفحات — المطبق الآن 1200px");
+    expect(texts).toContain("JPG");
+    expect(texts).toContain("85");
+    expect(texts).toContain("الافتراضي العام من لوحة التحكم");
+    expect(texts).toContain("دمج الصفحات في /فصل: **مفعّل**");
+    expect(texts).toContain("أقصى الارتفاع: الافتراضي (15000px)");
   });
 
-  it("shows custom merge dimensions without the applied annotation", () => {
-    const [container] = buildSettingsPanelComponents(
-      {
-        ...baseView,
-        mergeConfig: { enabled: false, heightCap: 12000, width: 900 },
-        effectiveMergeDimensions: { heightCap: 12000, width: 900 },
-      },
+  it("format section is its own interface with its own selects and save/reset", () => {
+    const [container] = buildSettingsSectionComponents(
+      buildSettingsSectionView(baseState),
+      null
+    ) as unknown as [ComponentShape];
+    const flattened = flatten(container);
+    const texts = collectTexts([container]).join("\n");
+    expect(texts).toContain("## 🖼 قسم صيغة الصور");
+    expect(texts).toContain("**الصيغة المطبقة حاليًا:** PNG");
+    expect(texts).toContain("الافتراضي العام من لوحة التحكم");
+    const ids = flattened.map(item => item.custom_id).filter(Boolean);
+    expect(ids).toEqual(
+      expect.arrayContaining([
+        "settings:fmt:u1",
+        "settings:q:u1",
+        "settings:pal:u1",
+        "settings:fsave:u1",
+        "settings:freset:u1",
+      ])
+    );
+    // قوائم قسم الدمج وأزراره لا تظهر في واجهة قسم الصيغة.
+    for (const absent of [
+      "settings:mrg:u1",
+      "settings:hgt:u1",
+      "settings:wid:u1",
+      "settings:msave:u1",
+      "settings:mreset:u1",
+    ])
+      expect(ids).not.toContain(absent);
+    const save = flattened.find(item => item.custom_id === "settings:fsave:u1");
+    expect(save?.disabled).toBe(true);
+  });
+
+  it("merge section is its own interface with its own selects and save/reset", () => {
+    const [container] = buildSettingsSectionComponents(
+      buildSettingsSectionView({ ...baseState, section: "merge" }),
+      null
+    ) as unknown as [ComponentShape];
+    const flattened = flatten(container);
+    const texts = collectTexts([container]).join("\n");
+    expect(texts).toContain("## 🧩 قسم دمج الصفحات");
+    expect(texts).toContain("**دمج الصفحات في /فصل:** مفعّل");
+    expect(texts).toContain("**أقصى ارتفاع للصورة المدمجة:** الافتراضي (15000px)");
+    expect(texts).toContain("**عرض الصورة المدمجة:** تلقائي حسب الصفحات");
+    expect(texts).not.toContain("المطبق الآن");
+    const ids = flattened.map(item => item.custom_id).filter(Boolean);
+    expect(ids).toEqual(
+      expect.arrayContaining([
+        "settings:mrg:u1",
+        "settings:hgt:u1",
+        "settings:wid:u1",
+        "settings:msave:u1",
+        "settings:mreset:u1",
+      ])
+    );
+    // قوائم قسم الصيغة وأزراره لا تظهر في واجهة قسم الدمج.
+    for (const absent of [
+      "settings:fmt:u1",
+      "settings:q:u1",
+      "settings:pal:u1",
+      "settings:fsave:u1",
+      "settings:freset:u1",
+    ])
+      expect(ids).not.toContain(absent);
+  });
+
+  it("merge section shows custom dimensions without the applied annotation", () => {
+    const [container] = buildSettingsSectionComponents(
+      buildSettingsSectionView({
+        ...baseState,
+        section: "merge",
+        mergeAtOpen: { enabled: false, heightCap: 12000, width: 900 },
+      }),
       null
     ) as unknown as [ComponentShape];
     const texts = collectTexts([container]).join("\n");
@@ -1354,105 +1442,82 @@ describe("settings panel sections", () => {
     expect(texts).toContain("**دمج الصفحات في /فصل:** معطّل — الصفحات تُرفع كما هي بدون دمج");
   });
 
-  it("renders the settings panel with the effective config and its source", () => {
-    const [container] = buildSettingsPanelComponents(
-      {
-        ...baseView,
-        effective: { format: "jpeg", quality: 85, pngPalette: false },
-      },
+  it("format section marks a guild with its own override as self-configured", () => {
+    const [container] = buildSettingsSectionComponents(
+      buildSettingsSectionView({
+        ...baseState,
+        overrideAtOpen: { format: "webp", quality: 90, pngPalette: false },
+        effectiveAtOpen: { format: "webp", quality: 90, pngPalette: false },
+      }),
       null
     ) as unknown as [ComponentShape];
     const texts = collectTexts([container]).join("\n");
-    expect(texts).toContain("JPG");
-    expect(texts).toContain("85");
-    expect(texts).toContain("الافتراضي العام من لوحة التحكم");
+    expect(texts).toContain("**المصدر:** إعدادات هذا السيرفر");
   });
 
-  it("marks a guild with its own override as self-configured", () => {
-    const [container] = buildSettingsPanelComponents(
-      {
-        ...baseView,
-        override: { format: "webp", quality: 90, pngPalette: false },
-        effective: { format: "webp", quality: 90, pngPalette: false },
-      },
-      null
-    ) as unknown as [ComponentShape];
-    const texts = collectTexts([container]).join("\n");
-    expect(texts).toContain("إعدادات هذا السيرفر");
-  });
-
-  it("renders chosen draft values of both sections and the save hint", () => {
-    const [container] = buildSettingsPanelComponents(
-      {
-        ...baseView,
-        draft: {
-          format: "jpeg",
-          quality: 90,
-          palette: true,
-          merge: false,
-          height: "default",
-          width: 900,
-        },
-        hasDraft: true,
-        selects: [
-          { customId: "settings:fmt:u1", placeholder: "الصيغة: JPG", options: [] },
-        ],
-      },
+  it("renders format draft choices and enables its save button", () => {
+    const [container] = buildSettingsSectionComponents(
+      buildSettingsSectionView({
+        ...baseState,
+        draft: { format: "jpeg", quality: 90, palette: true, merge: null, height: null, width: null },
+      }),
       null
     ) as unknown as [ComponentShape];
     const texts = collectTexts([container]).join("\n");
     expect(texts).toContain("اختياراتك");
+    expect(texts).toContain("الصيغة: **JPG**");
+    expect(texts).toContain("الجودة: **90**");
+    expect(texts).toContain("تقليل ألوان PNG: **تفعيل**");
+    expect(texts).toContain("حفظ قسم الصيغة");
+    const save = flatten(container).find(item => item.custom_id === "settings:fsave:u1");
+    expect(save?.disabled).toBe(false);
+  });
+
+  it("renders merge draft choices and enables its save button", () => {
+    const [container] = buildSettingsSectionComponents(
+      buildSettingsSectionView({
+        ...baseState,
+        section: "merge",
+        draft: { format: null, quality: null, palette: null, merge: false, height: "default", width: 900 },
+      }),
+      null
+    ) as unknown as [ComponentShape];
+    const texts = collectTexts([container]).join("\n");
     expect(texts).toContain("دمج الصفحات: **معطّل**");
     expect(texts).toContain("أقصى الارتفاع: **الافتراضي (15000px)**");
     expect(texts).toContain("العرض: **900px**");
-    expect(texts).toContain("حفظ إعدادات هذا السيرفر");
+    expect(texts).toContain("حفظ قسم الدمج");
+    const save = flatten(container).find(item => item.custom_id === "settings:msave:u1");
+    expect(save?.disabled).toBe(false);
   });
 
-  it("exposes six selects for the two sections in the interactive panel", () => {
-    const state = {
-      guildId: "g1",
-      guildName: "سيرفر الاختبار",
-      requesterId: "u1",
-      channelId: "c1",
-      messageId: null,
-      effectiveAtOpen: { format: "png" as const, quality: 88, pngPalette: false },
-      overrideAtOpen: null,
-      mergeAtOpen: { enabled: true, heightCap: null, width: null },
-      draft: { format: null, quality: null, palette: null, merge: null, height: null, width: null },
-      saved: false,
-      feedback: null,
-    };
-    // buildSettingsPanelView غير مُصدَّر مباشرة هنا — نتحقق عبر المكوّنات.
-    const payload = buildSettingsPanelComponents(
-      {
-        guildName: state.guildName,
-        override: state.overrideAtOpen,
-        effective: state.effectiveAtOpen,
-        mergeConfig: state.mergeAtOpen,
-        effectiveMergeDimensions: { heightCap: 15000, width: 1200 },
-        draft: state.draft,
-        saved: false,
-        feedback: null,
-        hasDraft: false,
-        selects: [
-          { customId: "settings:fmt:u1", placeholder: "قسم الصيغة — اختر الصيغة…", options: [] },
-          { customId: "settings:q:u1", placeholder: "قسم الصيغة — اختر الجودة…", options: [] },
-          { customId: "settings:pal:u1", placeholder: "قسم الصيغة — تقليل ألوان PNG: بدون تغيير…", options: [] },
-          { customId: "settings:merge:u1", placeholder: "قسم الدمج — حالة الدمج: بدون تغيير…", options: [] },
-          { customId: "settings:height:u1", placeholder: "قسم الدمج — أقصى ارتفاع: بدون تغيير…", options: [] },
-          { customId: "settings:width:u1", placeholder: "قسم الدمج — عرض الصورة: بدون تغيير…", options: [] },
-        ],
-      },
-      null
-    ) as unknown as [ComponentShape];
-    const flattened = flatten(payload[0]);
-    const customIds = flattened.map(item => item.custom_id).filter(Boolean);
-    for (const expected of [
-      "settings:save:u1",
-      "settings:reset:u1",
-    ]) {
-      expect(customIds).toContain(expected);
-    }
+  it("saved quick-path card summarizes both sections", () => {
+    const [container] = buildSettingsSavedComponents([
+      "**السيرفر:** سيرفر الاختبار",
+      "🖼 **الصيغة:** JPG — جودة 85",
+      "🧩 **دمج الصفحات:** مفعّل",
+    ]) as unknown as [ComponentShape];
+    const texts = collectTexts([container]).join("\n");
+    expect(texts).toContain("## ✅ تم حفظ إعدادات هذا السيرفر");
+    expect(texts).toContain("اختر القسم من القائمة");
+  });
+});
+
+describe("merge settings reach the chapter command", () => {
+  it("saved merge choices are exactly what /فصل resolves into merge dimensions", () => {
+    // ما يحفظه قسم الدمج في /الاعدادات يمر بنفس دالتَي التطبيع والقراءة
+    // اللتين يستهلكهما /فصل (getGuildChapterMergeConfig → resolveMergeDimensions).
+    const saved = mergeMergeChoice({ enabled: true, heightCap: null, width: null }, {
+      enabled: false,
+      height: 12000,
+      width: 900,
+    });
+    expect(saved).toEqual({ enabled: false, heightCap: 12000, width: 900 });
+    expect(resolveMergeDimensions(saved)).toEqual({ heightCap: 12000, width: 900 });
+    // العودة إلى الافتراضي تعيد الأبعاد التي يطبقها /فصل بلا تخصيص.
+    const reset = mergeMergeChoice(saved, { height: "default", width: "auto" });
+    expect(reset).toEqual({ enabled: false, heightCap: null, width: null });
+    expect(resolveMergeDimensions(reset)).toEqual({ heightCap: 15000, width: null });
   });
 });
 

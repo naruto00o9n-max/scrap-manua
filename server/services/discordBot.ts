@@ -533,10 +533,10 @@ export function buildHelpComponents(
     text(
       [
         "### 🔹 /الاعدادات",
-        "إعدادات السحب لهذا السيرفر في قسمين مستقلين: **قسم صيغة الصور** و**قسم دمج الصفحات** — والافتراضي PNG بلا أي فقدان، والدمج مفعّل بسقف 15000px.",
-        "**1.** نفّذ `/الاعدادات` لتفتح لوحة تفاعلية مقسومة إلى قسمين: قسم الصيغة (PNG/JPG/WebP والجودة وتقليل ألوان PNG) وقسم الدمج (تفعيل/تعطيل الدمج + أقصى ارتفاع للصورة المدمجة + عرضها) — اختر ما تريد ثم اضغط «حفظ إعدادات هذا السيرفر».",
+        "إعدادات السحب لهذا السيرفر مقسومة إلى قسمين مستقلين لكل قسم واجهة: **قسم صيغة الصور** و**قسم دمج الصفحات** — والافتراضي PNG بلا أي فقدان، والدمج مفعّل بسقف 15000px وعرض تلقائي.",
+        "**1.** نفّذ `/الاعدادات` تظهر لك لوحة تشرح الأمر وقسميه وما فيهما، وتحتها قائمة اختر منها القسم — يُرسل لك فورًا رسالة جديدة خاصة بهذا القسم بقوائمه هوية (كل اختيار له قائمة) وزر حفظه، فتختار ما تريد ثم تضغط «حفظ القسم».",
         "**2.** أو اضبطها سريعًا من خانات الأمر نفسه: «الصيغة» و«الجودة» و«اللوحة» و«الدمج» و«الارتفاع» و«العرض» — تُحفظ فورًا.",
-        "**3.** الإعداد يخص هذا السيرفر وحده ولا يمس بقية السيرفرات، وزر «العودة إلى الافتراضي العام» يعيد كل شيء إلى الأصل. تعطيل الدمج يجعل /فصل يرفع صفحات الفصل كما هي بدون دمجها في صور طويلة، وأمر /دمج يتبع تخصيص الأبعاد نفسه.",
+        "**3.** الإعداد يخص هذا السيرفر وحده ولا يمس بقية السيرفرات، ولكل قسم زر «العودة إلى الافتراضي العام» يعيده إلى الأصل. تعطيل الدمج يجعل /فصل يرفع صفحات الفصل كما هي بدون دمجها في صور طويلة، وتخصيص أبعاد الدمج (الارتفاع والعرض) يُسلك فعليًا في كل طلب سحب ويتبعَه أمر /دمج أيضًا.",
         "-# الأمر متاح للمالك ولمن يملك صلاحية الإدارة (Administrator) ولأصحاب الأدوار المعتمدة من لوحة التحكم.",
       ].join("\n")
     ),
@@ -2822,13 +2822,16 @@ async function replyHelp(interaction: any) {
 }
 
 // ============================================================
-// أمر /الاعدادات: صيغة الصور المدمجة وحالة دمج /فصل — لكل سيرفر إعداده،
-// والافتراضي PNG والدمج مفعّل.
-// متاح للمالك ولصاحب صلاحية الإدارة (Administrator) في السيرفر. الإعداد
-// المخصص للسيرفر يُخزن في appSettings منفصلًا ويسبق الافتراضي العام المدير
-// من لوحة التحكم، فلا يتأثر سيرفر بتغيير سيرفر.
-// التصميم: لوحة تفاعلية (قوائم للاختيار + حفظ/إعادة) عند التنفيذ بلا خيارات،
-// أو مسار سريع بالخيارات مباشرة لنفس الحفظ.
+// أمر /الاعدادات: واجهتان — لوحة رئيسية تشرح الأمر وقسميه مع قائمة اختيار،
+// واختيار القسم يرسل رسالة جديدة مستقلة لذلك القسم بقوائمه وأزراره:
+// «قسم صيغة الصور» و«قسم دمج الصفحات» ولكل قسم حفظه وإعادته الخاصة.
+// لكل سيرفر إعداده، والافتراضي PNG والدمج مفعّل بسقف 15000px وعرض تلقائي.
+// متاح للمالك ولصاحب صلاحية الإدارة (Administrator) ولأصحاب الأدوار
+// المعتمدة من لوحة التحكم. الإعداد المخصص للسيرفر يُخزن في appSettings
+// منفصلًا ويسبق الافتراضي العام المدير من لوحة التحكم، فلا يتأثر سيرفر
+// بتغيير سيرفر. إعداد الدمج يُحفظ بنفس المفتاح (chapter_merge_guild:*)
+// الذي يقرؤه /فصل مع كل طلب، فيُسلك فعليًا. يبقى المسار السريع بالخيارات
+// مباشرة لنفس الحفظ.
 // ============================================================
 
 export type SettingChoiceInput = {
@@ -2939,7 +2942,7 @@ export async function canManageSettings(interaction: any): Promise<boolean> {
   }
 }
 
-// ----- لوحة الإعدادات التفاعلية -----
+// ----- واجهات /الاعدادات: لوحة الأقسام ثم رسالة مستقلة لكل قسم -----
 
 type SettingsDraft = {
   format: ImageOutputConfig["format"] | null;
@@ -2962,16 +2965,25 @@ const EMPTY_SETTINGS_DRAFT: SettingsDraft = {
   width: null,
 };
 
-type SettingsPanelState = {
+/** أقسام أمر /الاعدادات — لكل قسم واجهة رسالة مستقلة بقوائمه وأزراره. */
+export type SettingsSection = "format" | "merge";
+
+export const SETTINGS_SECTION_LABEL: Record<SettingsSection, string> = {
+  format: "قسم صيغة الصور",
+  merge: "قسم دمج الصفحات",
+};
+
+type SectionPanelState = {
+  section: SettingsSection;
   guildId: string;
   guildName: string;
   requesterId: string;
   channelId: string;
   messageId: string | null;
-  /** ما كان مطبقًا لحظة فتح اللوحة — للعرض فقط. */
+  /** ما كان مطبقًا لحظة فتح القسم — للعرض فقط. */
   effectiveAtOpen: ImageOutputConfig;
   overrideAtOpen: ImageOutputConfig | null;
-  /** إعداد دمج الصفحات لحظة فتح اللوحة (التفعيل + تخصيص الأبعاد). */
+  /** إعداد دمج الصفحات لحظة فتح القسم (التفعيل + تخصيص الأبعاد). */
   mergeAtOpen: ChapterMergeSettings;
   draft: SettingsDraft;
   saved: boolean;
@@ -2980,10 +2992,30 @@ type SettingsPanelState = {
 };
 
 const SETTINGS_SESSION_TTL_MS = 30 * 60 * 1000;
-const activeSettingsPanels = new Map<string, SettingsPanelState>();
+/** لوحة القسم الحية لكل (سيرفر، مستخدم، قسم) — قوائم القسم تعدّل لوحته فقط. */
+const activeSettingsSectionPanels = new Map<string, SectionPanelState>();
 
-function scheduleSettingsCleanup(settingsId: string) {
-  setTimeout(() => activeSettingsPanels.delete(settingsId), SETTINGS_SESSION_TTL_MS).unref?.();
+function settingsSectionPanelKey(
+  guildId: string,
+  requesterId: string,
+  section: SettingsSection
+): string {
+  return `${guildId}:${requesterId}:${section}`;
+}
+
+function scheduleSettingsCleanup(panelKey: string) {
+  setTimeout(() => activeSettingsSectionPanels.delete(panelKey), SETTINGS_SESSION_TTL_MS).unref?.();
+}
+
+/** هل اختار المستخدم شيئًا في هذا القسم لم يحفظه بعد؟ — نقية للاختبار. */
+export function sectionHasDraft(state: SectionPanelState): boolean {
+  if (state.section === "format")
+    return (
+      state.draft.format !== null ||
+      state.draft.quality !== null ||
+      state.draft.palette !== null
+    );
+  return state.draft.merge !== null || state.draft.height !== null || state.draft.width !== null;
 }
 
 /** خيارات قائمة الصيغة والجودة وتقليل الألوان — نقية للاختبار. */
@@ -3043,8 +3075,82 @@ export function mergeStateLabel(enabled: boolean): string {
   return enabled ? "مفعّل" : "معطّل";
 }
 
-/** بنية عرض لوحة الإعدادات — نقية وتُستخدم في الرسم والاختبار. */
-export type SettingsPanelView = {
+/**
+ * بنية لوحة أقسام /الاعدادات (الواجهة الأولى): شرح الأمر وقسميه، وما هو
+ * مطبق الآن، وقائمة اختيار تفتح رسالة جديدة للقسم المختار.
+ */
+export type SettingsHubView = {
+  guildName: string;
+  requesterId: string;
+  /** إعداد الصيغة المطبق فعليًا الآن (تخصيص السيرفر أو الافتراضي العام). */
+  effective: ImageOutputConfig;
+  /** تخصيص الصيغة المحفوظ للسيرفر (null = الافتراضي العام) — لسطر المصدر. */
+  override: ImageOutputConfig | null;
+  /** إعداد دمج هذا السيرفر الحالي. */
+  mergeConfig: ChapterMergeSettings;
+  effectiveMergeDimensions: MergeDimensions;
+};
+
+/** خيارا قائمة اختيار القسم في اللوحة الرئيسية — نقية للاختبار. */
+export const SETTINGS_SECTION_SELECT_OPTIONS = [
+  {
+    label: "قسم صيغة الصور",
+    description: "PNG/JPG/WebP + الجودة + تقليل ألوان PNG",
+    value: "format",
+  },
+  {
+    label: "قسم دمج الصفحات",
+    description: "تفعيل الدمج وتخصيص أبعاده كاملة في /فصل",
+    value: "merge",
+  },
+];
+
+export function buildSettingsHubComponents(
+  view: SettingsHubView,
+  avatar: string | null = avatarUrl()
+): APIMessageTopLevelComponent[] {
+  const body: Raw[] = [
+    headerBlock("## ⚙️ إعدادات هذا السيرفر", [], avatar),
+    separator(2),
+    text(
+      [
+        `هنا تدير إعدادات السحب لسيرفر **${view.guildName}**، والأمر مقسوم إلى **قسمين مستقلين** — اختر القسم من القائمة في الأسفل وستصلك رسالة جديدة خاصة به تديره بنفسها:`,
+        "",
+        "**1. 🖼 قسم صيغة الصور**",
+        "صيغة صور الإخراج المدمجة (PNG/JPG/WebP) وجودتها وتقليل ألوان PNG — تنطبق على صور /فصل و/دمج.",
+        "",
+        "**2. 🧩 قسم دمج الصفحات**",
+        "تفعيل دمج صفحات /فصل أو تعطيله، وتخصيصه تخصيصًا شاملًا: أقصى ارتفاع للصورة المدمجة وعرضها.",
+      ].join("\n")
+    ),
+    separator(),
+    text(
+      [
+        "**ما هو مطبق الآن في هذا السيرفر:**",
+        `الصيغة: **${formatLabelOf(view.effective.format)}** — ${imageOutputDescription(view.effective)} (${view.override ? "إعدادات هذا السيرفر" : "الافتراضي العام من لوحة التحكم"})`,
+        `دمج الصفحات في /فصل: **${mergeStateLabel(view.mergeConfig.enabled)}** — أقصى الارتفاع: ${mergeHeightLabel(view.mergeConfig.heightCap)} — العرض: ${mergeWidthLabel(view.mergeConfig.width)}`,
+      ].join("\n")
+    ),
+    separator(),
+    buildSearchSelectRow({
+      customId: `settings:sec:${view.requesterId}`,
+      placeholder: "اختر القسم الذي تريد إعداده…",
+      options: SETTINGS_SECTION_SELECT_OPTIONS,
+    }),
+    separator(),
+    text(
+      [
+        "-# الإعدادات تخص هذا السيرفر وحده — والافتراضي صيغة PNG بلا أي فقدان، والدمج مفعّل بسقف 15000px وعرض تلقائي حسب الصفحات.",
+        "-# ZEUS",
+      ].join("\n")
+    ),
+  ];
+  return [raw({ type: 17, accent_color: GOLD, components: body })];
+}
+
+/** بنية عرض لوحة قسم واحد — نقية وتُستخدم في الرسم والاختبار. */
+export type SettingsSectionView = {
+  section: SettingsSection;
   guildName: string;
   /** إعداد الصيغة المحفوظ للسيرفر (null = يستخدم الافتراضي العام). */
   override: ImageOutputConfig | null;
@@ -3057,20 +3163,75 @@ export type SettingsPanelView = {
   draft: SettingsDraft;
   saved: boolean;
   feedback: string | null;
-  /** هل اختار المستخدم أي شيء لم يحفظه بعد — زر الحفظ يُفعّل معه. */
+  /** هل اختار المستخدم شيئًا في هذا القسم لم يحفظه بعد — زر الحفظ يُفعّل معه. */
   hasDraft: boolean;
   selects: SearchSelectSpec[];
 };
 
-export function buildSettingsPanelView(state: SettingsPanelState): SettingsPanelView {
-  const hasDraft =
-    state.draft.format !== null ||
-    state.draft.quality !== null ||
-    state.draft.palette !== null ||
-    state.draft.merge !== null ||
-    state.draft.height !== null ||
-    state.draft.width !== null;
+export function buildSettingsSectionView(state: SectionPanelState): SettingsSectionView {
+  const selects: SearchSelectSpec[] =
+    state.section === "format"
+      ? [
+          {
+            customId: `settings:fmt:${state.requesterId}`,
+            placeholder: state.draft.format
+              ? `الصيغة: ${formatLabelOf(state.draft.format)}`
+              : "اختر صيغة الصور…",
+            options: SETTINGS_FORMAT_OPTIONS,
+          },
+          {
+            customId: `settings:q:${state.requesterId}`,
+            placeholder:
+              state.draft.quality !== null
+                ? `الجودة: ${state.draft.quality}`
+                : "اختر الجودة (لـ JPG/WebP وتقليل الألوان)…",
+            options: SETTINGS_QUALITY_OPTIONS,
+          },
+          {
+            customId: `settings:pal:${state.requesterId}`,
+            placeholder:
+              state.draft.palette === null
+                ? "تقليل ألوان PNG: بدون تغيير…"
+                : state.draft.palette
+                  ? "تقليل ألوان PNG: تفعيل"
+                  : "تقليل ألوان PNG: تعطيل",
+            options: SETTINGS_PALETTE_OPTIONS,
+          },
+        ]
+      : [
+          {
+            customId: `settings:mrg:${state.requesterId}`,
+            placeholder:
+              state.draft.merge === null
+                ? "حالة الدمج: بدون تغيير…"
+                : state.draft.merge
+                  ? "دمج الصفحات: تفعيل"
+                  : "دمج الصفحات: تعطيل",
+            options: SETTINGS_MERGE_OPTIONS,
+          },
+          {
+            customId: `settings:hgt:${state.requesterId}`,
+            placeholder:
+              state.draft.height === null
+                ? "أقصى ارتفاع للصورة المدمجة: بدون تغيير…"
+                : state.draft.height === "default"
+                  ? `أقصى ارتفاع: الافتراضي (${DEFAULT_MERGE_HEIGHT_CAP}px)`
+                  : `أقصى ارتفاع: ${state.draft.height}px`,
+            options: SETTINGS_MERGE_HEIGHT_OPTIONS,
+          },
+          {
+            customId: `settings:wid:${state.requesterId}`,
+            placeholder:
+              state.draft.width === null
+                ? "عرض الصورة المدمجة: بدون تغيير…"
+                : state.draft.width === "auto"
+                  ? "عرض الصورة: تلقائي حسب الصفحات"
+                  : `عرض الصورة: ${state.draft.width}px`,
+            options: SETTINGS_MERGE_WIDTH_OPTIONS,
+          },
+        ];
   return {
+    section: state.section,
     guildName: state.guildName,
     override: state.overrideAtOpen,
     effective: state.effectiveAtOpen,
@@ -3079,121 +3240,75 @@ export function buildSettingsPanelView(state: SettingsPanelState): SettingsPanel
     draft: state.draft,
     saved: state.saved,
     feedback: state.feedback,
-    hasDraft,
-    selects: [
-      // ===== قسم صيغة الصور =====
-      {
-        customId: `settings:fmt:${state.requesterId}`,
-        placeholder: state.draft.format
-          ? `الصيغة: ${formatLabelOf(state.draft.format)}`
-          : "قسم الصيغة — اختر الصيغة…",
-        options: SETTINGS_FORMAT_OPTIONS,
-      },
-      {
-        customId: `settings:q:${state.requesterId}`,
-        placeholder:
-          state.draft.quality !== null ? `الجودة: ${state.draft.quality}` : "قسم الصيغة — اختر الجودة…",
-        options: SETTINGS_QUALITY_OPTIONS,
-      },
-      {
-        customId: `settings:pal:${state.requesterId}`,
-        placeholder:
-          state.draft.palette === null
-            ? "قسم الصيغة — تقليل ألوان PNG: بدون تغيير…"
-            : state.draft.palette
-              ? "تقليل ألوان PNG: تفعيل"
-              : "تقليل ألوان PNG: تعطيل",
-        options: SETTINGS_PALETTE_OPTIONS,
-      },
-      // ===== قسم دمج الصفحات =====
-      {
-        customId: `settings:merge:${state.requesterId}`,
-        placeholder:
-          state.draft.merge === null
-            ? "قسم الدمج — حالة الدمج: بدون تغيير…"
-            : state.draft.merge
-              ? "دمج الصفحات: تفعيل"
-              : "دمج الصفحات: تعطيل",
-        options: SETTINGS_MERGE_OPTIONS,
-      },
-      {
-        customId: `settings:height:${state.requesterId}`,
-        placeholder:
-          state.draft.height === null
-            ? "قسم الدمج — أقصى ارتفاع: بدون تغيير…"
-            : state.draft.height === "default"
-              ? `أقصى ارتفاع: الافتراضي (${DEFAULT_MERGE_HEIGHT_CAP}px)`
-              : `أقصى ارتفاع: ${state.draft.height}px`,
-        options: SETTINGS_MERGE_HEIGHT_OPTIONS,
-      },
-      {
-        customId: `settings:width:${state.requesterId}`,
-        placeholder:
-          state.draft.width === null
-            ? "قسم الدمج — عرض الصورة: بدون تغيير…"
-            : state.draft.width === "auto"
-              ? "عرض الصورة: تلقائي حسب الصفحات"
-              : `عرض الصورة: ${state.draft.width}px`,
-        options: SETTINGS_MERGE_WIDTH_OPTIONS,
-      },
-    ],
+    hasDraft: sectionHasDraft(state),
+    selects,
   };
 }
 
-export function buildSettingsPanelComponents(
-  view: SettingsPanelView,
+export function buildSettingsSectionComponents(
+  view: SettingsSectionView,
   avatar: string | null = avatarUrl()
 ): APIMessageTopLevelComponent[] {
+  const isFormat = view.section === "format";
+  const ownerId = view.selects[0]!.customId.split(":")[2] ?? "";
+  const saveButtonLabel = isFormat ? "حفظ قسم الصيغة" : "حفظ قسم الدمج";
   const body: Raw[] = [
-    headerBlock("## ⚙️ إعدادات هذا السيرفر", [], avatar),
+    headerBlock(isFormat ? "## 🖼 قسم صيغة الصور" : "## 🧩 قسم دمج الصفحات", [], avatar),
     separator(2),
     text(`**السيرفر:** ${view.guildName}`),
   ];
 
-  // ===== قسم صيغة الصور =====
-  body.push(separator(2));
-  body.push(text(`🖼 **قسم صيغة الصور**\n-# تُطبق صيغة الإخراج على صور /فصل و/دمج المدمجة.`));
-  body.push(
-    text(
-      [
-        `**الصيغة المطبقة حاليًا:** ${formatLabelOf(view.effective.format)} — ${imageOutputDescription(view.effective)}`,
-        `**المصدر:** ${view.override ? "إعدادات هذا السيرفر" : "الافتراضي العام من لوحة التحكم (لم يُخصص لهذا السيرفر إعداد بعد)"}`,
-      ].join("\n")
-    )
-  );
+  if (isFormat) {
+    body.push(separator(2));
+    body.push(
+      text(`🖼 **قسم صيغة الصور**\n-# صيغة صور الإخراج المدمجة في /فصل و/دمج — الافتراضي PNG بلا أي فقدان.`)
+    );
+    body.push(
+      text(
+        [
+          `**الصيغة المطبقة حاليًا:** ${formatLabelOf(view.effective.format)} — ${imageOutputDescription(view.effective)}`,
+          `**المصدر:** ${view.override ? "إعدادات هذا السيرفر" : "الافتراضي العام من لوحة التحكم (لم يُخصص لهذا السيرفر إعداد بعد)"}`,
+        ].join("\n")
+      )
+    );
+  } else {
+    body.push(separator(2));
+    body.push(
+      text(`🧩 **قسم دمج الصفحات**\n-# يخص دمج صفحات /فصل في صور طويلة — أما /دمج فيتبع تخصيص الأبعاد نفسه دائمًا.`)
+    );
+    body.push(
+      text(
+        [
+          `**دمج الصفحات في /فصل:** ${mergeStateLabel(view.mergeConfig.enabled)}${view.mergeConfig.enabled ? "" : " — الصفحات تُرفع كما هي بدون دمج"}`,
+          `**أقصى ارتفاع للصورة المدمجة:** ${mergeHeightLabel(view.mergeConfig.heightCap)}`,
+          `**عرض الصورة المدمجة:** ${mergeWidthLabel(view.mergeConfig.width)}`,
+        ].join("\n")
+      )
+    );
+  }
 
-  // ===== قسم دمج الصفحات =====
-  body.push(separator(2));
-  body.push(text(`🧩 **قسم دمج الصفحات**\n-# يخص دمج صفحات /فصل في صور طويلة — أما /دمج فيتبع تخصيص الأبعاد نفسه دائمًا.`));
-  body.push(
-    text(
-      [
-        `**دمج الصفحات في /فصل:** ${mergeStateLabel(view.mergeConfig.enabled)}${view.mergeConfig.enabled ? "" : " — الصفحات تُرفع كما هي بدون دمج"}`,
-        `**أقصى ارتفاع للصورة المدمجة:** ${mergeHeightLabel(view.mergeConfig.heightCap)}${view.mergeConfig.heightCap === null ? ` — المطبق الآن ${view.effectiveMergeDimensions.heightCap}px` : ""}`,
-        `**عرض الصورة المدمجة:** ${mergeWidthLabel(view.mergeConfig.width)}${view.mergeConfig.width === null ? ` — المطبق الآن ${view.effectiveMergeDimensions.width}px` : ""}`,
-      ].join("\n")
-    )
-  );
-
-  // ===== الاختيارات المعلقة =====
+  // ===== الاختيارات المعلقة لهذا القسم =====
   const draftLines: string[] = [];
-  if (view.draft.format) draftLines.push(`الصيغة: **${formatLabelOf(view.draft.format)}**`);
-  if (view.draft.quality !== null) draftLines.push(`الجودة: **${view.draft.quality}**`);
-  if (view.draft.palette !== null)
-    draftLines.push(`تقليل ألوان PNG: **${view.draft.palette ? "تفعيل" : "تعطيل"}**`);
-  if (view.draft.merge !== null)
-    draftLines.push(`دمج الصفحات: **${mergeStateLabel(view.draft.merge)}**`);
-  if (view.draft.height !== null)
-    draftLines.push(
-      `أقصى الارتفاع: **${view.draft.height === "default" ? `الافتراضي (${DEFAULT_MERGE_HEIGHT_CAP}px)` : `${view.draft.height}px`}**`
-    );
-  if (view.draft.width !== null)
-    draftLines.push(
-      `العرض: **${view.draft.width === "auto" ? "تلقائي حسب الصفحات" : `${view.draft.width}px`}**`
-    );
+  if (isFormat) {
+    if (view.draft.format) draftLines.push(`الصيغة: **${formatLabelOf(view.draft.format)}**`);
+    if (view.draft.quality !== null) draftLines.push(`الجودة: **${view.draft.quality}**`);
+    if (view.draft.palette !== null)
+      draftLines.push(`تقليل ألوان PNG: **${view.draft.palette ? "تفعيل" : "تعطيل"}**`);
+  } else {
+    if (view.draft.merge !== null)
+      draftLines.push(`دمج الصفحات: **${mergeStateLabel(view.draft.merge)}**`);
+    if (view.draft.height !== null)
+      draftLines.push(
+        `أقصى الارتفاع: **${view.draft.height === "default" ? `الافتراضي (${DEFAULT_MERGE_HEIGHT_CAP}px)` : `${view.draft.height}px`}**`
+      );
+    if (view.draft.width !== null)
+      draftLines.push(
+        `العرض: **${view.draft.width === "auto" ? "تلقائي حسب الصفحات" : `${view.draft.width}px`}**`
+      );
+  }
   if (draftLines.length) {
     body.push(separator());
-    body.push(text(`**اختياراتك:** ${draftLines.join(" — ")}\n-# اضغط «حفظ إعدادات هذا السيرفر» لتطبيقها.`));
+    body.push(text(`**اختياراتك:** ${draftLines.join(" — ")}\n-# اضغط «${saveButtonLabel}» لتطبيقها.`));
   }
   if (view.feedback) {
     body.push(separator());
@@ -3201,36 +3316,34 @@ export function buildSettingsPanelComponents(
   }
 
   body.push(separator());
-  if (view.selects.length) {
-    // لوحة التفاعل: قوائم القسمين ثم زرا الحفظ والإعادة. بطاقة الحفظ
-    // السريع بلا قوائم تعرض ملخصها فقط دون أزرار.
-    for (const select of view.selects) body.push(buildSearchSelectRow(select));
-    const panelOwnerId = view.selects[0]!.customId.split(":")[2] ?? "";
-    body.push({
-      type: 1,
-      components: [
-        {
-          type: 2,
-          style: 3,
-          label: "حفظ إعدادات هذا السيرفر",
-          custom_id: `settings:save:${panelOwnerId}`,
-          disabled: !view.hasDraft,
-        },
-        {
-          type: 2,
-          style: 2,
-          label: "العودة إلى الافتراضي العام",
-          custom_id: `settings:reset:${panelOwnerId}`,
-        },
-      ],
-    });
-  }
+  // لوحة القسم: قوائمه هوية ثم زرا حفظه وإعادته الخاصان به.
+  for (const select of view.selects) body.push(buildSearchSelectRow(select));
+  body.push({
+    type: 1,
+    components: [
+      {
+        type: 2,
+        style: 3,
+        label: saveButtonLabel,
+        custom_id: isFormat ? `settings:fsave:${ownerId}` : `settings:msave:${ownerId}`,
+        disabled: !view.hasDraft,
+      },
+      {
+        type: 2,
+        style: 2,
+        label: "العودة إلى الافتراضي العام",
+        custom_id: isFormat ? `settings:freset:${ownerId}` : `settings:mreset:${ownerId}`,
+      },
+    ],
+  });
   body.push(separator());
   body.push(
     text(
       [
-        "-# الإعداد يخص هذا السيرفر وحده — قسم الصيغة ينطبق على /فصل و/دمج، وقسم الدمج على /فصل (الأبعاد تنطبق على الاثنين).",
-        "-# الجودة تنطبق على JPG/WebP وتقليل ألوان PNG — وPNG البسيط بلا أي فقدان لا يتأثر بها.",
+        isFormat
+          ? "-# الجودة تنطبق على JPG/WebP وتقليل ألوان PNG — وPNG البسيط بلا أي فقدان لا يتأثر بها."
+          : "-# تعطيل الدمج يجعل /فصل يرفع صفحات الفصل كما هي بدون دمجها في صور طويلة، وتخصيص الأبعاد هنا يتبعه /دمج أيضًا.",
+        "-# لاختيار قسم آخر نفّذ /الاعدادات من جديد واختره من القائمة.",
         "-# ZEUS",
       ].join("\n")
     )
@@ -3238,17 +3351,90 @@ export function buildSettingsPanelComponents(
   return [raw({ type: 17, accent_color: view.saved ? GREEN : GOLD, components: body })];
 }
 
-function settingsPanelPayload(state: SettingsPanelState) {
+/** بطاقة ملخص ما حُفظ للمسار السريع بالخيارات المباشرة. */
+export function buildSettingsSavedComponents(
+  lines: string[],
+  avatar: string | null = avatarUrl()
+): APIMessageTopLevelComponent[] {
+  const body: Raw[] = [
+    headerBlock("## ✅ تم حفظ إعدادات هذا السيرفر", [], avatar),
+    separator(2),
+    text(lines.join("\n")),
+    separator(),
+    text(
+      [
+        "-# لتعديلها بواجهة كاملة نفّذ /الاعدادات واختر القسم من القائمة.",
+        "-# ZEUS",
+      ].join("\n")
+    ),
+  ];
+  return [raw({ type: 17, accent_color: GREEN, components: body })];
+}
+
+function settingsSectionPanelPayload(state: SectionPanelState) {
   return {
     flags: MessageFlags.IsComponentsV2 as MessageFlags.IsComponentsV2,
-    components: buildSettingsPanelComponents(buildSettingsPanelView(state)),
+    components: buildSettingsSectionComponents(buildSettingsSectionView(state)),
   };
 }
 
-async function redrawSettingsPanel(interaction: any, state: SettingsPanelState) {
+async function redrawSettingsSectionPanel(interaction: any, state: SectionPanelState) {
   const messageId = state.messageId ?? interaction.message?.id ?? null;
   if (!messageId) return;
-  await editMessageContent(interaction.channelId, messageId, settingsPanelPayload(state));
+  await editMessageContent(interaction.channelId, messageId, settingsSectionPanelPayload(state));
+}
+
+/**
+ * يفتح واجهة القسم المطلوب: رسالة جديدة مستقلة له تحمل قوائمه وأزراره، أو
+ * تحديث لوحته الحية نفسها إن كانت مفتوحة — فلكل قسم واجهته الخاصة.
+ */
+async function openSettingsSectionPanel(interaction: any, section: SettingsSection) {
+  const guildId = String(interaction.guildId ?? "");
+  const panelKey = settingsSectionPanelKey(guildId, String(interaction.user.id), section);
+  const previous = activeSettingsSectionPanels.get(panelKey);
+  const [override, effective, mergeConfig] = await Promise.all([
+    getGuildImageOutputOverride(guildId),
+    getEffectiveImageOutputConfig(guildId),
+    getGuildChapterMergeConfig(guildId),
+  ]);
+  if (previous?.messageId) {
+    // لوحة القسم حية من قبل: تُحدّث في مكانها بدل إنشاء ثانية.
+    previous.overrideAtOpen = override;
+    previous.effectiveAtOpen = effective;
+    previous.mergeAtOpen = mergeConfig;
+    previous.saved = false;
+    previous.feedback = null;
+    try {
+      await editMessageContent(interaction.channelId, previous.messageId, settingsSectionPanelPayload(previous));
+      await interaction
+        .followUp({
+          content: `لوحة ${SETTINGS_SECTION_LABEL[section]} مفتوحة أعلاه — أكمل فيها.`,
+          flags: MessageFlags.Ephemeral,
+        })
+        .catch(() => undefined);
+      return;
+    } catch {
+      activeSettingsSectionPanels.delete(panelKey);
+    }
+  }
+  const state: SectionPanelState = {
+    section,
+    guildId,
+    guildName: interaction.guild?.name ?? "هذا السيرفر",
+    requesterId: String(interaction.user.id),
+    channelId: interaction.channelId,
+    messageId: null,
+    effectiveAtOpen: effective,
+    overrideAtOpen: override,
+    mergeAtOpen: mergeConfig,
+    draft: { ...EMPTY_SETTINGS_DRAFT },
+    saved: false,
+    feedback: null,
+  };
+  const sent = await interaction.followUp(settingsSectionPanelPayload(state));
+  state.messageId = String(sent.id);
+  activeSettingsSectionPanels.set(panelKey, state);
+  scheduleSettingsCleanup(panelKey);
 }
 
 async function replySettings(interaction: any) {
@@ -3312,74 +3498,34 @@ async function replySettings(interaction: any) {
       );
       await interaction.editReply(
         panelPayload(
-          buildSettingsPanelComponents({
-            guildName: interaction.guild?.name ?? "هذا السيرفر",
-            override: saved,
-            effective: saved,
-            mergeConfig: savedMerge,
-            effectiveMergeDimensions: resolveMergeDimensions(savedMerge),
-            draft: { ...EMPTY_SETTINGS_DRAFT },
-            saved: true,
-            feedback: `✅ تم حفظ إعدادات هذا السيرفر: ${formatLabelOf(saved.format)} — ${imageOutputDescription(saved)} — دمج الصفحات: ${mergeStateLabel(savedMerge.enabled)} — الارتفاع: ${mergeHeightLabel(savedMerge.heightCap)} — العرض: ${mergeWidthLabel(savedMerge.width)}.`,
-            hasDraft: false,
-            selects: [],
-          })
+          buildSettingsSavedComponents([
+            `**السيرفر:** ${interaction.guild?.name ?? "هذا السيرفر"}`,
+            `🖼 **الصيغة:** ${formatLabelOf(saved.format)} — ${imageOutputDescription(saved)}`,
+            `🧩 **دمج الصفحات:** ${mergeStateLabel(savedMerge.enabled)} — أقصى الارتفاع: ${mergeHeightLabel(savedMerge.heightCap)} — العرض: ${mergeWidthLabel(savedMerge.width)}`,
+          ])
         )
       );
       return;
     }
-    // بلا خيارات: لوحة الإعدادات التفاعلية — لوحة واحدة حية لكل عضو.
-    const panelKey = `${guildId}:${interaction.user.id}`;
-    const previous = activeSettingsPanels.get(panelKey);
-    if (previous?.messageId) {
-      // لوحة سابقة حية: تُحدّث في مكانها بدل إنشاء ثانية.
-      try {
-        const [override, effective, mergeConfig] = await Promise.all([
-          getGuildImageOutputOverride(guildId),
-          getEffectiveImageOutputConfig(guildId),
-          getGuildChapterMergeConfig(guildId),
-        ]);
-        previous.overrideAtOpen = override;
-        previous.effectiveAtOpen = effective;
-        previous.mergeAtOpen = mergeConfig;
-        previous.saved = false;
-        previous.feedback = null;
-        await redrawSettingsPanel(interaction, previous);
-        await interaction.editReply(
-          panelPayload(
-            buildSearchCardComponents({
-              state: "failed",
-              detail: "لوحة إعداداتك مفتوحة أعلاه — أكمل فيها."
-            })
-          )
-        );
-        return;
-      } catch {
-        activeSettingsPanels.delete(panelKey);
-      }
-    }
+    // بلا خيارات: لوحة أقسام /الاعدادات — شرح الأمر وما فيه، وتحته قائمة
+    // اختيار القسم؛ اختيار القسم يرسل رسالة جديدة خاصة بهذا القسم.
     const [override, effective, mergeConfig] = await Promise.all([
       getGuildImageOutputOverride(guildId),
       getEffectiveImageOutputConfig(guildId),
       getGuildChapterMergeConfig(guildId),
     ]);
-    const state: SettingsPanelState = {
-      guildId,
-      guildName: interaction.guild?.name ?? "هذا السيرفر",
-      requesterId: interaction.user.id,
-      channelId: interaction.channelId,
-      messageId: null,
-      effectiveAtOpen: effective,
-      overrideAtOpen: override,
-      mergeAtOpen: mergeConfig,
-      draft: { ...EMPTY_SETTINGS_DRAFT },
-      saved: false,
-      feedback: null,
-    };
-    const sent = await interaction.editReply(settingsPanelPayload(state));
-    state.messageId = String(sent.id);
-    activeSettingsPanels.set(panelKey, state);
-    scheduleSettingsCleanup(`${panelKey}`);
+    await interaction.editReply(
+      panelPayload(
+        buildSettingsHubComponents({
+          guildName: interaction.guild?.name ?? "هذا السيرفر",
+          requesterId: interaction.user.id,
+          override,
+          effective,
+          mergeConfig,
+          effectiveMergeDimensions: resolveMergeDimensions(mergeConfig),
+        })
+      )
+    );
   } catch (error) {
     console.warn("[Discord] /الاعدادات failed", error);
     await interaction
@@ -3395,23 +3541,67 @@ async function replySettings(interaction: any) {
   }
 }
 
-/** نقطة الحفظ المشتركة بين المسار السريع ولوحة التفاعل. */
-function settingsPanelKey(guildId: string, requesterId: string): string {
-  return `${guildId}:${requesterId}`;
-}
+/** قوائم كل قسم — تُترجم إلى القسم الذي تعدّله لوحتها. */
+const SETTINGS_SELECT_SECTION: Record<string, SettingsSection> = {
+  fmt: "format",
+  q: "format",
+  pal: "format",
+  mrg: "merge",
+  hgt: "merge",
+  wid: "merge",
+};
+
+/** أزرار كل قسم — تُترجم إلى القسم الذي تخدمه. */
+const SETTINGS_BUTTON_SECTION: Record<string, SettingsSection> = {
+  fsave: "format",
+  freset: "format",
+  msave: "merge",
+  mreset: "merge",
+};
+
+const SETTINGS_ACCESS_DENIED_TEXT =
+  "هذه اللوحات لصاحبها أو لمن يملك صلاحية الإدارة أو دورًا معتمدًا من لوحة التحكم — نفّذ /الاعدادات من جديد.";
 
 async function handleSettingsSelectMenu(interaction: any) {
   const customId = String(interaction.customId);
   if (!customId.startsWith("settings:")) return false;
   const [, kind, requesterId] = customId.split(":");
   const guildId = String(interaction.guildId ?? "");
-  const state = activeSettingsPanels.get(settingsPanelKey(guildId, requesterId));
+
+  // قائمة لوحة الأقسام: اختيار القسم يفتح رسالة جديدة خاصة به.
+  if (kind === "sec") {
+    if (!(await canManageSettings(interaction))) {
+      await interaction
+        .reply({ content: SETTINGS_ACCESS_DENIED_TEXT, flags: MessageFlags.Ephemeral })
+        .catch(() => undefined);
+      return true;
+    }
+    await interaction.deferUpdate();
+    const value = interaction.values?.[0];
+    if (value === "format" || value === "merge") {
+      try {
+        await openSettingsSectionPanel(interaction, value);
+      } catch (error) {
+        console.warn("[Discord] settings section open failed", error);
+        await interaction
+          .followUp({
+            content: "تعذر فتح القسم الآن — أعد المحاولة بعد قليل.",
+            flags: MessageFlags.Ephemeral,
+          })
+          .catch(() => undefined);
+      }
+    }
+    return true;
+  }
+
+  const section = SETTINGS_SELECT_SECTION[kind];
+  if (!section) return true;
+  const state = activeSettingsSectionPanels.get(
+    settingsSectionPanelKey(guildId, requesterId, section)
+  );
   if (!state || !(await canManageSettings(interaction))) {
     await interaction
-      .reply({
-        content: "هذه اللوحة لصاحبها أو لمن يملك صلاحية الإدارة أو دورًا معتمدًا من لوحة التحكم — نفّذ /الاعدادات من جديد.",
-        flags: MessageFlags.Ephemeral,
-      })
+      .reply({ content: SETTINGS_ACCESS_DENIED_TEXT, flags: MessageFlags.Ephemeral })
       .catch(() => undefined);
     return true;
   }
@@ -3424,18 +3614,18 @@ async function handleSettingsSelectMenu(interaction: any) {
     if (Number.isFinite(quality)) state.draft.quality = Math.min(100, Math.max(40, Math.round(quality)));
   } else if (kind === "pal" && (value === "on" || value === "off")) {
     state.draft.palette = value === "on";
-  } else if (kind === "merge" && (value === "on" || value === "off")) {
+  } else if (kind === "mrg" && (value === "on" || value === "off")) {
     state.draft.merge = value === "on";
-  } else if (kind === "height" && value !== undefined) {
+  } else if (kind === "hgt" && value !== undefined) {
     // «default» يعني العودة إلى الافتراضي، وغيره رقم سقف الارتفاع.
     state.draft.height = value === "default" ? "default" : Number(value) || null;
-  } else if (kind === "width" && value !== undefined) {
+  } else if (kind === "wid" && value !== undefined) {
     // «auto» يعني اتباع الصفحات، وغيره رقم العرض.
     state.draft.width = value === "auto" ? "auto" : Number(value) || null;
   }
   state.saved = false;
   try {
-    await redrawSettingsPanel(interaction, state);
+    await redrawSettingsSectionPanel(interaction, state);
   } catch (error) {
     console.warn("[Discord] settings select redraw failed", error);
   }
@@ -3447,19 +3637,21 @@ async function handleSettingsButton(interaction: any) {
   if (!customId.startsWith("settings:")) return false;
   const [, action, requesterId] = customId.split(":");
   const guildId = String(interaction.guildId ?? "");
-  const state = activeSettingsPanels.get(settingsPanelKey(guildId, requesterId));
+  const section = SETTINGS_BUTTON_SECTION[action];
+  if (!section) return false;
+  const state = activeSettingsSectionPanels.get(
+    settingsSectionPanelKey(guildId, requesterId, section)
+  );
   if (!state || !(await canManageSettings(interaction))) {
     await interaction
-      .reply({
-        content: "هذه اللوحة لصاحبها أو لمن يملك صلاحية الإدارة أو دورًا معتمدًا من لوحة التحكم — نفّذ /الاعدادات من جديد.",
-        flags: MessageFlags.Ephemeral,
-      })
+      .reply({ content: SETTINGS_ACCESS_DENIED_TEXT, flags: MessageFlags.Ephemeral })
       .catch(() => undefined);
     return true;
   }
   await interaction.deferUpdate();
   try {
-    if (action === "save") {
+    if (action === "fsave") {
+      // قسم الصيغة فقط: تُدمج اختياراته فوق الإعداد الحالي وتُحفظ.
       const current = await getEffectiveImageOutputConfig(guildId);
       const saved = await saveGuildImageOutputConfig(
         guildId,
@@ -3469,7 +3661,23 @@ async function handleSettingsButton(interaction: any) {
           palette: state.draft.palette,
         })
       );
-      // قسم الدمج: تُدمج اختيارات التفعيل والأبعاد فوق الإعداد الحالي وتُحفظ معًا.
+      state.effectiveAtOpen = saved;
+      state.overrideAtOpen = saved;
+      state.saved = true;
+      state.draft = { ...EMPTY_SETTINGS_DRAFT };
+      state.feedback = `✅ تم حفظ قسم الصيغة: ${formatLabelOf(saved.format)} — ${imageOutputDescription(saved)} — ستنطبق على صور /فصل و/دمج القادمة.`;
+    } else if (action === "freset") {
+      // إعادة قسم الصيغة وحده: يعود إلى الافتراضي العام دون مساس بقسم الدمج.
+      await clearGuildImageOutputConfig(guildId);
+      const effective = await getEffectiveImageOutputConfig(guildId);
+      state.effectiveAtOpen = effective;
+      state.overrideAtOpen = null;
+      state.saved = false;
+      state.draft = { ...EMPTY_SETTINGS_DRAFT };
+      state.feedback = "↩ عاد قسم الصيغة إلى الافتراضي العام المدير من لوحة التحكم.";
+    } else if (action === "msave") {
+      // قسم الدمج فقط: يُحفظ بنفس المفتاح الذي يقرؤه /فصل مع كل طلب
+      // (chapter_merge_guild:{guildId}) — التفعيل والأبعاد تُسلك فعليًا.
       const savedMerge = await saveGuildChapterMergeConfig(
         guildId,
         mergeMergeChoice(state.mergeAtOpen, {
@@ -3478,26 +3686,20 @@ async function handleSettingsButton(interaction: any) {
           width: state.draft.width,
         })
       );
-      state.effectiveAtOpen = saved;
-      state.overrideAtOpen = saved;
       state.mergeAtOpen = savedMerge;
       state.saved = true;
       state.draft = { ...EMPTY_SETTINGS_DRAFT };
-      state.feedback = `✅ تم حفظ إعدادات هذا السيرفر: ${formatLabelOf(saved.format)} — ${imageOutputDescription(saved)} — دمج الصفحات: ${mergeStateLabel(savedMerge.enabled)} — الارتفاع: ${mergeHeightLabel(savedMerge.heightCap)} — العرض: ${mergeWidthLabel(savedMerge.width)}.`;
-    } else if (action === "reset") {
-      await clearGuildImageOutputConfig(guildId);
-      // الإعادة تشمل قسم الدمج كله: يعود إلى حالته الافتراضية
-      // (مفعّل، بسقف الارتفاع الافتراضي والعرض التلقائي).
+      state.feedback = `✅ تم حفظ قسم الدمج: دمج الصفحات ${mergeStateLabel(savedMerge.enabled)} — أقصى الارتفاع: ${mergeHeightLabel(savedMerge.heightCap)} — العرض: ${mergeWidthLabel(savedMerge.width)} — سيسلكه /فصل في طلباته القادمة.`;
+    } else if (action === "mreset") {
+      // إعادة قسم الدمج وحده إلى الافتراضي: مفعّل بسقف الارتفاع الافتراضي
+      // والعرض التلقائي — دون مساس بقسم الصيغة.
       await saveGuildChapterMergeConfig(guildId, { ...DEFAULT_CHAPTER_MERGE_SETTINGS });
-      const effective = await getEffectiveImageOutputConfig(guildId);
-      state.effectiveAtOpen = effective;
-      state.overrideAtOpen = null;
       state.mergeAtOpen = { ...DEFAULT_CHAPTER_MERGE_SETTINGS };
       state.saved = false;
       state.draft = { ...EMPTY_SETTINGS_DRAFT };
-      state.feedback = "↩ عاد هذا السيرفر إلى الافتراضي: صيغة الصور العامة من لوحة التحكم، والدمج مفعّل بسقف 15000px وعرض تلقائي حسب الصفحات.";
+      state.feedback = "↩ عاد قسم الدمج إلى الافتراضي: مفعّل بسقف 15000px وعرض تلقائي حسب الصفحات.";
     }
-    await redrawSettingsPanel(interaction, state);
+    await redrawSettingsSectionPanel(interaction, state);
   } catch (error) {
     console.warn("[Discord] settings button failed", error);
     await interaction
