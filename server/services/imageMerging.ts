@@ -476,6 +476,66 @@ export async function openLocalImageMergeSession(
 }
 
 /**
+ * ينزّل صفحات الفصل إلى ملفات مؤقتة على القرص **بدون أي دمج** — يستخدمه
+ * /فصل حين يكون دمج الصفحات معطّلًا في إعدادات السيرفر: تُرفع الصفحات
+ * كما هي بأصلها دون إعادة ترميز. فك تشويش GigaViewer يبقى شغالًا لأنه
+ * جزء من التنزيل نفسه، ونوع كل صورة يُقرأ من ملفها الفعلي.
+ * تنظيف الملفات المؤقتة يتم عبر cleanup() في كل الحالات.
+ */
+export type ChapterPageFile = {
+  filePath: string;
+  width: number;
+  height: number;
+  mimeType: string;
+};
+
+export type ChapterPagesSession = {
+  pages: ChapterPageFile[];
+  cleanup(): Promise<void>;
+};
+
+/** أنواع MIME المعروفة لصيغ الصور التي قد تخدمها مواقع المانهوا. */
+const MIME_BY_SHARP_FORMAT: Record<string, string> = {
+  jpeg: "image/jpeg",
+  png: "image/png",
+  webp: "image/webp",
+  gif: "image/gif",
+  avif: "image/avif",
+  tiff: "image/tiff",
+};
+
+export async function openChapterPagesSession(
+  pageUrls: string[],
+  onProgress?: MergeProgressListener
+): Promise<ChapterPagesSession> {
+  if (!pageUrls.length) {
+    return { pages: [], cleanup: async () => {} };
+  }
+  const dir = await mkdtemp(path.join(tmpdir(), "manga-pages-"));
+  try {
+    const pagePaths = await downloadPagesToTemp(pageUrls, dir, onProgress);
+    const pages: ChapterPageFile[] = [];
+    for (let index = 0; index < pagePaths.length; index += 1) {
+      const filePath = pagePaths[index]!;
+      const metadata = await sharp(filePath).metadata();
+      const width = metadata.width ?? 0;
+      const height = metadata.height ?? 0;
+      if (!width || !height) throw new Error(`تعذر قراءة أبعاد الصفحة ${index + 1}.`);
+      pages.push({
+        filePath,
+        width,
+        height,
+        mimeType: MIME_BY_SHARP_FORMAT[metadata.format ?? ""] ?? "image/jpeg",
+      });
+    }
+    return { pages, cleanup: () => rm(dir, { recursive: true, force: true }) };
+  } catch (error) {
+    await rm(dir, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+/**
  * ينزّل الصفحات إلى ملفات مؤقتة على القرص ثم يدمجها في صور طويلة تُكتب إلى
  * القرص فورًا، مجموعة واحدة في كل مرة. هذا يبقي ذروة استهلاك الذاكرة قريبة
  * من حجم مجموعة واحدة مهما كان عدد صفحات الفصل، بدل تحميل كل الصفحات وكل

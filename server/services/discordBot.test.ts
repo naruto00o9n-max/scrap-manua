@@ -109,7 +109,7 @@ describe("Discord ZEUS chapter experience", () => {
     );
     expect(setting).toBeTruthy();
     const options = (setting?.options ?? []).map(option => option.name);
-    expect(options).toEqual(["الصيغة", "الجودة", "اللوحة"]);
+    expect(options).toEqual(["الصيغة", "الجودة", "اللوحة", "الدمج"]);
     const formatChoice = (setting?.options ?? [])[0] as {
       choices?: Array<{ name: string; value: string }>;
     };
@@ -118,6 +118,15 @@ describe("Discord ZEUS chapter experience", () => {
       "jpeg",
       "webp",
     ]);
+  });
+
+  it("keeps the settings command description free of ownership wording", () => {
+    const setting = getRegisteredDiscordCommands().find(
+      command => command.name === "الاعدادات"
+    );
+    expect(setting?.description).toBe("إعدادات هذا السيرفر - صيغة الصور ودمج الصفحات");
+    expect(setting?.description).not.toContain("للمالك");
+    expect(setting?.description).not.toContain("الإدارة");
   });
 
   it("registers the move command with both folder link options required", () => {
@@ -433,6 +442,34 @@ describe("Discord ZEUS chapter experience", () => {
         button.custom_id?.startsWith("job:cancel:")
       )
     ).toBe(false);
+  });
+
+  it("shows the merge stage as skipped when guild settings disable merging", () => {
+    const running = collectTexts(
+      buildJobCard({
+        jobId: "job-3",
+        status: "downloading",
+        stage: "download",
+        pageCount: 34,
+        mergeDisabled: true,
+        progress: { done: 12, total: 34 },
+      }) as unknown as unknown[]
+    ).join("\n");
+    expect(running).toContain("⊘ دمج الصفحات — معطّل من الإعدادات");
+    expect(running).not.toContain("▸ دمج الصفحات");
+
+    // حتى بعد الاكتمال يبقى صف الدمج متخطى وليس ✓.
+    const done = collectTexts(
+      buildJobCard({
+        status: "completed",
+        stage: "upload",
+        pageCount: 34,
+        mergedCount: 34,
+        mergeDisabled: true,
+      }) as unknown as unknown[]
+    ).join("\n");
+    expect(done).toContain("⊘ دمج الصفحات — معطّل من الإعدادات");
+    expect(done).not.toContain("✓ دمج الصفحات");
   });
 
   it("renders failure in red with the failing stage marked", () => {
@@ -1208,7 +1245,8 @@ describe("image format /setting command", () => {
         guildName: "سيرفر الاختبار",
         override: null,
         effective: { format: "jpeg", quality: 85, pngPalette: false },
-        draft: { format: null, quality: null, palette: null },
+        mergeEnabled: true,
+        draft: { format: null, quality: null, palette: null, merge: null },
         saved: false,
         feedback: null,
         hasDraft: false,
@@ -1221,6 +1259,7 @@ describe("image format /setting command", () => {
     expect(texts).toContain("85");
     expect(texts).toContain("الصيغة المطبقة حاليًا");
     expect(texts).toContain("الافتراضي العام من لوحة التحكم");
+    expect(texts).toContain("**دمج الصفحات في /فصل:** مفعّل");
   });
 
   it("marks a guild with its own override as self-configured", () => {
@@ -1229,7 +1268,8 @@ describe("image format /setting command", () => {
         guildName: "سيرفر الاختبار",
         override: { format: "webp", quality: 90, pngPalette: false },
         effective: { format: "webp", quality: 90, pngPalette: false },
-        draft: { format: null, quality: null, palette: null },
+        mergeEnabled: false,
+        draft: { format: null, quality: null, palette: null, merge: null },
         saved: false,
         feedback: null,
         hasDraft: false,
@@ -1239,6 +1279,7 @@ describe("image format /setting command", () => {
     ) as unknown as [ComponentShape];
     const texts = collectTexts([container]).join("\n");
     expect(texts).toContain("إعدادات هذا السيرفر");
+    expect(texts).toContain("**دمج الصفحات في /فصل:** معطّل — الصفحات تُرفع كما هي بدون دمج");
   });
 
   it("renders chosen draft values and the save hint", () => {
@@ -1247,7 +1288,8 @@ describe("image format /setting command", () => {
         guildName: "سيرفر الاختبار",
         override: null,
         effective: { format: "png", quality: 88, pngPalette: false },
-        draft: { format: "jpeg", quality: 90, palette: true },
+        mergeEnabled: true,
+        draft: { format: "jpeg", quality: 90, palette: true, merge: false },
         saved: false,
         feedback: null,
         hasDraft: true,
@@ -1259,6 +1301,7 @@ describe("image format /setting command", () => {
     ) as unknown as [ComponentShape];
     const texts = collectTexts([container]).join("\n");
     expect(texts).toContain("اختياراتك");
+    expect(texts).toContain("دمج الصفحات: **معطّل**");
     expect(texts).toContain("حفظ إعدادات هذا السيرفر");
   });
 });

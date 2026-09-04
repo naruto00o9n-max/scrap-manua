@@ -392,6 +392,33 @@ export async function clearGuildImageOutputConfig(guildId: string): Promise<void
   await collections(db).appSettings.deleteOne({ key: GUILD_IMAGE_OUTPUT_PREFIX + guildId });
 }
 
+// ===== دمج صفحات /فصل لكل سيرفر =====
+// مفتاح مستقل لكل سيرفر: الدمج «مفعّل» افتراضيًا (لا يُخزن شيء). عند تعطيله
+// يرفع /فصل صفحات الفصل كما هي بدون دمجها في صور طويلة ولا إعادة ترميز،
+// وأمر /دمج لا يتأثر إطلاقًا لأنه أمر دمج بحد ذاته.
+const GUILD_CHAPTER_MERGE_PREFIX = "chapter_merge_guild:";
+
+/** هل دمج الصفحات مفعّل لهذا السيرفر؟ الافتراضي: مفعّل. */
+export async function getGuildChapterMergeEnabled(guildId?: string | null): Promise<boolean> {
+  if (!guildId) return true;
+  const raw = await getSetting(GUILD_CHAPTER_MERGE_PREFIX + guildId);
+  return raw !== "off";
+}
+
+/**
+ * يضبط حالة الدمج لسيرفر. التفعيل يحذف المفتاح ليبقى السيرفر تابعًا
+ * للافتراضي (مفعّل)، والتعطيل يخزن «off» صريحًا.
+ */
+export async function saveGuildChapterMergeEnabled(guildId: string, enabled: boolean): Promise<boolean> {
+  if (enabled) {
+    const db = await requireDb();
+    await collections(db).appSettings.deleteOne({ key: GUILD_CHAPTER_MERGE_PREFIX + guildId });
+    return true;
+  }
+  await setSetting(GUILD_CHAPTER_MERGE_PREFIX + guildId, "off");
+  return false;
+}
+
 export async function listDiscordRoles() {
   const db = await requireDb();
   return (await collections(db).discordRoles.find().sort({ createdAt: -1 }).toArray()).map(stripMongoId);
