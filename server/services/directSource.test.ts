@@ -4,9 +4,12 @@ import {
   directSourceMode,
   extractGigaViewerEpisode,
   extractReaderImages,
+  extractWaMangaEpisodeMeta,
+  extractWaMangaPages,
   isGigaViewerLockedEpisode,
   normalizeCookieHeader,
   parseMangaChapterTitle,
+  parseWaMangaTitle,
 } from "./directSource";
 
 describe("normalizeCookieHeader", () => {
@@ -210,5 +213,76 @@ describe("directSourceMode", () => {
     expect(directSourceMode("www.shonenjumpplus.com")).toBe("direct-first");
     expect(directSourceMode("example.com")).toBeNull();
     expect(directSourceMode(null)).toBeNull();
+  });
+
+  it("wamanga.ru يعتمد المباشر أولًا ويدعم النطاق بـ www", () => {
+    expect(directSourceMode("wamanga.ru")).toBe("direct-first");
+    expect(directSourceMode("www.wamanga.ru")).toBe("direct-first");
+  });
+});
+
+describe("extractWaMangaPages", () => {
+  const sample = [
+    '<img src="https://mc.yandex.ru/watch/1" alt="">',
+    '<img src="https://wamanga.ru/app/uploads/A/RklMRS0x==.webp" alt="«одн», глава 59, страница 1.000000000" class="reader-page svelte-tiaqfm auto-scale" crossorigin="anonymous" loading="eager">',
+    '<img class="reader-page svelte-tiaqfm" src="https://wamanga.ru/app/uploads/A/RklMRS0y==.webp" alt="«одн», глава 59, страница 2.000000000">',
+    '<img alt="غير مرتب" class="reader-page svelte-x" src="https://wamanga.ru/app/uploads/A/RklMRS0z==.webp">',
+    '<img src="https://wamanga.ru/app/uploads/A/cover.webp" alt="غلاف" class="cover-page">',
+  ].join("\n");
+
+  it("يستخرج صور reader-page فقط وبترتيب ظهورها مهما كان ترتيب الخصائص", () => {
+    expect(extractWaMangaPages(sample)).toEqual([
+      "https://wamanga.ru/app/uploads/A/RklMRS0x==.webp",
+      "https://wamanga.ru/app/uploads/A/RklMRS0y==.webp",
+      "https://wamanga.ru/app/uploads/A/RklMRS0z==.webp",
+    ]);
+  });
+
+  it("يتجاهل الصور ذات الروابط النسبية أو الفارغة ويعود بقائمة فارغة بلا قارئ", () => {
+    expect(extractWaMangaPages('<img class="reader-page" src="/app/uploads/x.webp">')).toEqual([]);
+    expect(extractWaMangaPages("<div>بلا صور</div>")).toEqual([]);
+  });
+});
+
+describe("extractWaMangaEpisodeMeta", () => {
+  const liveJsonLd = `
+  <script type="application/ld+json">[{"@context":"https://schema.org","@type":"ComicIssue","name":"Одноклассник - Глава 59","issueNumber":59,"url":"https://wamanga.ru/manhwa/odnoklassnik/glava-59","inLanguage":"ru","isAccessibleForFree":true,"numberOfPages":10,"isPartOf":{"@type":"ComicSeries","name":"Одноклассник","url":"https://wamanga.ru/manhwa/odnoklassnik"}},{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"WaManga"},{"@type":"ListItem","position":2,"name":"Одноклассник"},{"@type":"ListItem","position":3,"name":"Глава 59"}]}]</script>`;
+
+  it("يقرأ العمل من isPartOf والفصل من آخر عنصر في مسار التنقل وحالة الوصول", () => {
+    const meta = extractWaMangaEpisodeMeta(liveJsonLd);
+    expect(meta).toEqual({
+      mangaTitle: "Одноклассник",
+      chapterName: "Глава 59",
+      accessibleForFree: true,
+    });
+  });
+
+  it("يعتبر isAccessibleForFree=false فصلًا مدفوعًا ويسقط إلى اسم ComicIssue عند غياب المسار", () => {
+    const meta = extractWaMangaEpisodeMeta(
+      '<script type="application/ld+json">{"@type":"ComicIssue","name":"عمل - Глава 7","isAccessibleForFree":false,"isPartOf":{"name":"عمل"}}</script>'
+    );
+    expect(meta).toEqual({ mangaTitle: "عمل", chapterName: "عمل - Глава 7", accessibleForFree: false });
+  });
+
+  it("يرجع null للصفحة بلا JSON-Lد وللكتل التالفة", () => {
+    expect(extractWaMangaEpisodeMeta("<html></html>")).toBeNull();
+    expect(extractWaMangaEpisodeMeta('<script type="application/ld+json">{تالف</script>')).toBeNull();
+  });
+});
+
+describe("parseWaMangaTitle", () => {
+  it("يفصل العمل عن الفصل من عنوان صفحة WaManga ويرسم حرف الفصل", () => {
+    expect(parseWaMangaTitle("Одноклассник — глава 59 читать онлайн | WaManga")).toEqual({
+      mangaTitle: "Одноклассник",
+      chapterName: "Глава 59",
+    });
+  });
+
+  it("يتعامل مع الشرطة القصيرة وعناوين بلا نمط فصل", () => {
+    expect(parseWaMangaTitle("عمل - глава 3.5 читать онлайн | WaManga")).toEqual({
+      mangaTitle: "عمل",
+      chapterName: "Глава 3.5",
+    });
+    expect(parseWaMangaTitle("عمل فقط | WaManga")).toEqual({ mangaTitle: "عمل فقط", chapterName: "" });
   });
 });

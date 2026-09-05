@@ -11,7 +11,7 @@ import { getSetting, setSetting } from "../db";
 // ============================================================
 
 /** المواقع المدعومة بالسحب المباشر حاليًا. */
-export const SUPPORTED_DIRECT_SOURCES = ["rokaricomics.com", "shonenjumpplus.com"] as const;
+export const SUPPORTED_DIRECT_SOURCES = ["rokaricomics.com", "shonenjumpplus.com", "wamanga.ru"] as const;
 
 export type DirectSourceHostname = (typeof SUPPORTED_DIRECT_SOURCES)[number];
 
@@ -19,14 +19,17 @@ export type DirectSourceHostname = (typeof SUPPORTED_DIRECT_SOURCES)[number];
  * نمط التوجيه لكل موقع:
  * - «session-only»: الفصل المجاني يمر عبر المسار المعتاد، والمقفل (المدفوع)
  *   وحده يُسحب مباشرة بجلية الموقع (سلوك rokari المعتمد).
- * - «direct-first»: صفحة الفصل تُقرأ مباشرة أولًا دائمًا — المتاح مجانًا
- *   تُستخدم صوره فورًا، والمدفوع يحتاج جلسة موثقة (بنية شونين جامب+).
+ * - «direct-first»: صفحة الفصل تُقرأ مباشرة أولًا دائمًا ولا يمر الموقع عبر
+ *   خادم السحب إطلاقًا — المتاح مجانًا تُستخدم صوره فورًا، والمدفوع يحتاج
+ *   جلسة موثقة (شونين جامب+، وwamanga.ru بلا إضافة معروفة وفصوله متاحة
+ *   للزوار بلا قفل).
  */
 export type DirectSourceMode = "session-only" | "direct-first";
 
 const DIRECT_SOURCE_MODES: Record<(typeof SUPPORTED_DIRECT_SOURCES)[number], DirectSourceMode> = {
   "rokaricomics.com": "session-only",
   "shonenjumpplus.com": "direct-first",
+  "wamanga.ru": "direct-first",
 };
 
 export function directSourceMode(hostname: string | null | undefined): DirectSourceMode | null {
@@ -221,6 +224,122 @@ export function extractReaderImages(html: string): string[] {
   return [];
 }
 
+// ===== قارئ WaManga (wamanga.ru — تطبيق SvelteKit) =====
+
+export type WaMangaEpisodeMeta = {
+  mangaTitle: string;
+  chapterName: string;
+  /** حالة الوصول المعلنة في JSON-LD — null حين لا تُعلن. */
+  accessibleForFree: boolean | null;
+};
+
+/**
+ * يستخرج صور صفحات الفصل من قارئ WaManga بترتيبها الأصلي:
+ * الصفحة تحتوي <img class="reader-page …" src="https://wamanga.ru/app/uploads/…">
+ * بترتيب الصفحات نفسه، بلا أي تشويش أو حماية — والصور نفسها تنزل بلا ترويسات.
+ */
+export function extractWaMangaPages(html: string): string[] {
+  const images: string[] = [];
+  for (const match of Array.from(html.matchAll(/<img\b[^>]*>/gi))) {
+    const tag = match[0]!;
+    if (!/\bclass=["'][^"']*reader-page/.test(tag)) continue;
+    const src = tag.match(/\ssrc=["']([^"']+)["']/i)?.[1];
+    if (src && /^https?:\/\//i.test(src)) images.push(src);
+  }
+  return images;
+}
+
+/**
+ * يقرأ بيانات الفصل من JSON-LD المدمج في صفحة WaManga:
+ * كتلة ComicIssue تحمل اسم العمل (isPartOf.name) وحالة الوصول،
+ * وكتلة BreadcrumbList تحمل اسم الفصل وحده («Глава 59») في آخر عنصر.
+ * يرجع null حين لا توجد أي من الكتلتين (ليست صفحة قارئ).
+ */
+export function extractWaMangaEpisodeMeta(html: string): WaMangaEpisodeMeta | null {
+  type JsonLdBlock = {
+    "@type"?: string;
+    name?: unknown;
+    isAccessibleForFree?: unknown;
+    isPartOf?: { name?: unknown };
+    itemListElement?: Array<{ name?: unknown; position?: unknown }>;
+  };
+  const blocks: JsonLdBlock[] = [];
+  for (const match of Array.from(
+    html.matchAll(
+      /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi
+    )
+  )) {
+    try {
+      const parsed = JSON.parse(match[1]!.trim()) as unknown;
+      if (Array.isArray(parsed)) blocks.push(...(parsed as JsonLdBlock[]));
+      else blocks.push(parsed as JsonLdBlock);
+    } catch {
+      /* كتلة تالفة — نتابع إلى التي تليها */
+    }
+  }
+  const issue = blocks.find(block => block["@type"] === "ComicIssue");
+  const breadcrumb = blocks.find(block => block["@type"] === "BreadcrumbList");
+  if (!issue && !breadcrumb) return null;
+  const items = Array.isArray(breadcrumb?.itemListElement) ? breadcrumb.itemListElement : [];
+  const last = items.length ? items[items.length - 1] : undefined;
+  const mangaTitle =
+    typeof issue?.isPartOf?.name === "string" && issue.isPartOf.name.trim()
+      ? issue.isPartOf.name.trim()
+      : "";
+  // اسم الفصل من آخر عنصر في مسار التنقل أدق («Глава 59») من اسم ComicIssue
+  // المركب («Одноклассник - Глава 59»)، ويسقط إلى المركب عند غيابه.
+  const chapterName =
+    typeof last?.name === "string" && last.name.trim()
+      ? last.name.trim()
+      : typeof issue?.name === "string" && issue.name.trim()
+        ? issue.name.trim()
+        : "";
+  if (!mangaTitle && !chapterName) return null;
+  const accessible =
+    issue?.isAccessibleForFree === true
+      ? true
+      : issue?.isAccessibleForFree === false
+        ? false
+        : null;
+  return { mangaTitle, chapterName, accessibleForFree: accessible };
+}
+
+/**
+ * يفصل عنوان العمل عن اسم الفصل من عنوان صفحة WaManga كخطط بديلة عند غياب
+ * JSON-LD: «Одноклассник — глава 59 читать онлайн | WaManga»
+ * → العمل: Одноклассник، الفصل: Глава 59.
+ */
+export function parseWaMangaTitle(pageTitle: string): { mangaTitle: string; chapterName: string } {
+  const cleaned = pageTitle
+    .replace(/\s*\|\s*WaManga\s*$/i, "")
+    .replace(/\s*читать онлайн[\s\S]*$/i, "")
+    .trim();
+  const parts = cleaned.split(/\s+[—–-]\s+/);
+  if (parts.length >= 2) {
+    const chapterRaw = parts.pop()!.trim();
+    return {
+      mangaTitle: parts.join(" — ").trim(),
+      // \b لا يعمل مع الحروف السيريلية في JS — نستخدم lookahead على فراغ/نهاية
+      chapterName: chapterRaw.replace(/^(глава)(?=\s|$)/i, "Глава"),
+    };
+  }
+  return { mangaTitle: cleaned, chapterName: "" };
+}
+
+/** بيانات عرض مكتملة لفصل WaManga بعد دمج المصادر المتاحة. */
+function resolveWaMangaChapter(
+  html: string,
+  pages: string[]
+): { mangaTitle: string; chapterName: string; pages: string[] } {
+  const meta = extractWaMangaEpisodeMeta(html);
+  const parsed = parseWaMangaTitle(extractPageTitle(html));
+  return {
+    mangaTitle: meta?.mangaTitle || parsed.mangaTitle || "العمل",
+    chapterName: meta?.chapterName || parsed.chapterName || "الفصل",
+    pages,
+  };
+}
+
 // ===== قارئ GigaViewer (شونين جامب+ ومنصات شوئيشا) =====
 
 export type GigaViewerEpisode = {
@@ -355,6 +474,17 @@ export async function probeDirectChapterPage(chapterUrl: string): Promise<Direct
   try {
     const html = await fetchChapterHtml(chapterUrl);
     const host = chapterHost(chapterUrl);
+    if (host === "wamanga.ru") {
+      const pages = extractWaMangaPages(html);
+      if (pages.length) {
+        return { mode: "free", chapter: resolveWaMangaChapter(html, pages) };
+      }
+      // صفحة قارئ بلا صور: إن أعلن الموقع أن الفصل غير مجاني فهو مدفوع،
+      // وإلا فالحالة غير محسومة (عطب لحظي أو تغيّر بنية).
+      const meta = extractWaMangaEpisodeMeta(html);
+      if (meta?.accessibleForFree === false) return { mode: "locked", chapter: null };
+      return { mode: "unknown", chapter: null };
+    }
     if (host === "shonenjumpplus.com") {
       const episode = extractGigaViewerEpisode(html);
       if (episode?.pages.length) {
@@ -408,6 +538,22 @@ export async function fetchDirectChapterWithSession(
 ): Promise<DirectChapterPages> {
   const html = await fetchChapterHtml(chapterUrl, cookie);
   const host = chapterHost(chapterUrl);
+  if (host === "wamanga.ru") {
+    const pages = extractWaMangaPages(html);
+    if (!pages.length) {
+      const meta = extractWaMangaEpisodeMeta(html);
+      if (meta?.accessibleForFree === false) {
+        throw new DirectSourceError(
+          "الفصل ما يزال مقفلًا رغم الجلسة الموثقة — الجلسة منتهية أو الفصل غير مفتوح في حسابك بالموقع. حدّث كوكي الجلسة من لوحة التحكم أو افتح الفصل في الموقع أولًا."
+        );
+      }
+      throw new DirectSourceError(
+        "تعذر قراءة صفحات الفصل من صفحة الموقع مباشرة — ربما تغيّرت بنية القارئ. أبلغ المالك."
+      );
+    }
+    const chapter = resolveWaMangaChapter(html, pages);
+    return chapter;
+  }
   if (host === "shonenjumpplus.com") {
     const episode = extractGigaViewerEpisode(html);
     if (!episode?.pages.length) {
