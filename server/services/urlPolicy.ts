@@ -39,6 +39,9 @@ function normalizeHostname(hostname: string): string {
   // webtoons.com and www.webtoons.com serve the same catalog as m.webtoons.com,
   // so canonicalize them onto the registered source hostname.
   if (normalized === "webtoons.com") return "m.webtoons.com";
+  // Naver's mobile host serves the same catalog as the desktop host the
+  // extension and the registered source hostname use.
+  if (normalized === "m.comic.naver.com") return "comic.naver.com";
   return normalized;
 }
 

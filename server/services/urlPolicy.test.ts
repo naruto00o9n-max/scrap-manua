@@ -42,4 +42,17 @@ describe("validateChapterUrl", () => {
     expect(() => validateChapterUrl("https://chapters.example.com/login", [activeSource])).not.toThrowError();
     expect(() => validateChapterUrl("https://chapters.example.com/title/verify/15", [activeSource])).not.toThrowError();
   });
+
+  // رابط المالك للنافير على النطاق المحمول m.comic.naver.com — يطابق المصدر
+  // المسجل بنطاق الحاسوب comic.naver.com ويُطبّع الرابط الكانوني عليه.
+  it("canonicalizes Naver's mobile host onto the registered desktop hostname", () => {
+    const naverSource = { ...activeSource, hostname: "comic.naver.com" };
+    const result = validateChapterUrl(
+      "https://m.comic.naver.com/webtoon/detail?titleId=854757&no=1&week=tue&listSortOrder=DESC&listPage=1",
+      [naverSource]
+    );
+    expect(result.sourceId).toBe(1);
+    expect(result.hostname).toBe("comic.naver.com");
+    expect(result.canonicalUrl).toBe("https://comic.naver.com/webtoon/detail?titleId=854757&no=1&week=tue&listSortOrder=DESC&listPage=1");
+  });
 });

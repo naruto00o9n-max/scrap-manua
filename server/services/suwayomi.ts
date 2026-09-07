@@ -50,7 +50,16 @@ export type SuwayomiMangaDetails = {
   sourceId: string;
 };
 
-function normalizedUrl(value: string): string {
+/**
+ * مسار WEBTOON: مسار أعمال القرّاء القديم «/challenge/» والمسار القياسي
+ * «/canvas/» يخدمان نفس الفصول، والإضافة تخزّن روابطها على «canvas» —
+ * توحيدهما يمنع تفشل مطابقة الروابط حرفيًا (رابط المالك بصيغة challenge).
+ */
+function canonicalizeWebtoonsPath(pathname: string): string {
+  return pathname.replace(/(^|\/)challenge\//, "$1canvas/");
+}
+
+export function normalizedUrl(value: string): string {
   const parsed = new URL(value);
   parsed.hash = "";
   parsed.hostname = parsed.hostname.replace(/^www\./, "");
@@ -58,8 +67,17 @@ function normalizedUrl(value: string): string {
   // m.webtoons.com (the extension stores realUrl on www). Canonicalize them
   // onto one host so URL matching does not miss.
   if (parsed.hostname === "webtoons.com") parsed.hostname = "m.webtoons.com";
+  if (parsed.hostname === "m.webtoons.com" || parsed.hostname === "webtoons.com") {
+    parsed.pathname = canonicalizeWebtoonsPath(parsed.pathname);
+  }
+  // Naver serves the same catalog on comic.naver.com and m.comic.naver.com
+  // (the extension stores realUrl on the desktop host).
+  if (parsed.hostname === "m.comic.naver.com") parsed.hostname = "comic.naver.com";
   if (parsed.hostname === "comic.naver.com") {
+    // معرفات العرض فقط — لا تحدد الفصل
     parsed.searchParams.delete("week");
+    parsed.searchParams.delete("listSortOrder");
+    parsed.searchParams.delete("listPage");
   } else {
     parsed.search = "";
   }
@@ -74,8 +92,14 @@ function normalizedUrl(value: string): string {
  * هذا يغطي صيغ الروابط الشائعة بدل قاعدة /chapter/ الوحيدة التي كانت تُفشل
  * سحب مواقع كثيرة (comix.to وغيرها) بخطأ «لم يعثر Suwayomi على الفصل».
  */
+function isNaverHost(host: string): boolean {
+  return host === "comic.naver.com" || host === "m.comic.naver.com";
+}
+
 export function mangaUrlFromChapterUrl(chapterUrl: string): string | null {
   const parsed = new URL(chapterUrl);
+  // نافير يخدم نفس الفهرس على m.comic.naver.com — نطبعه على نطاق الإضافة
+  if (parsed.hostname === "m.comic.naver.com") parsed.hostname = "comic.naver.com";
   const host = parsed.hostname.replace(/^www\./, "");
   if (host === "comic.naver.com" && parsed.pathname === "/webtoon/detail") {
     const titleId = parsed.searchParams.get("titleId");
@@ -84,7 +108,7 @@ export function mangaUrlFromChapterUrl(chapterUrl: string): string | null {
   if ((host === "m.webtoons.com" || host === "webtoons.com") && /\/viewer\/?$/i.test(parsed.pathname)) {
     const titleNo = parsed.searchParams.get("title_no");
     if (!titleNo) return null;
-    const listPath = parsed.pathname.replace(/\/ep-[^/]+\/viewer\/?$/i, "/list");
+    const listPath = canonicalizeWebtoonsPath(parsed.pathname.replace(/\/ep-[^/]+\/viewer\/?$/i, "/list"));
     return `${parsed.origin}${listPath}?title_no=${encodeURIComponent(titleNo)}`;
   }
 
@@ -124,10 +148,22 @@ function numberFromDigits(input: string): number | null {
  */
 export function chapterNumberFromUrl(chapterUrl: string): number | null {
   let segments: string[];
+  let pathname = "";
+  let host = "";
+  let searchParams: URLSearchParams | null = null;
   try {
-    segments = new URL(chapterUrl).pathname.split("/").filter(Boolean);
+    const parsed = new URL(chapterUrl);
+    segments = parsed.pathname.split("/").filter(Boolean);
+    pathname = parsed.pathname;
+    host = parsed.hostname.replace(/^www\./, "");
+    searchParams = parsed.searchParams;
   } catch {
     return null;
+  }
+  // روابط نافير بلا علامة فصل في المسار: رقم الحلقة في معامل «no»
+  if (isNaverHost(host) && /\/(detail|list)$/.test(pathname)) {
+    const no = searchParams?.get("no");
+    if (no) return numberFromDigits(no);
   }
   for (let index = segments.length - 1; index >= 0; index -= 1) {
     const value = segments[index]!.toLowerCase();
@@ -144,7 +180,7 @@ export function chapterNumberFromUrl(chapterUrl: string): number | null {
 
 export async function naverTitleFromChapterUrl(chapterUrl: string): Promise<string | null> {
   const parsed = new URL(chapterUrl);
-  if (parsed.hostname.replace(/^www\./, "") !== "comic.naver.com" || parsed.pathname !== "/webtoon/detail") return null;
+  if (!isNaverHost(parsed.hostname.replace(/^www\./, "")) || parsed.pathname !== "/webtoon/detail") return null;
   const response = await fetch(parsed, { redirect: "error", signal: AbortSignal.timeout(10_000) });
   if (!response.ok) return null;
   const html = await response.text();
@@ -326,7 +362,7 @@ export class SuwayomiClient {
     const baseSearchQuery = sourceSearchQueryFromChapterUrl(chapterUrl);
     // Naver chapter URLs carry no readable slug, so derive the series title
     // from the chapter page itself before searching the source.
-    const isNaver = parsedChapterUrl.hostname.replace(/^www\./, "") === "comic.naver.com";
+    const isNaver = isNaverHost(parsedChapterUrl.hostname.replace(/^www\./, ""));
     const derivedQuery = isNaver ? await naverTitleFromChapterUrl(chapterUrl) : baseSearchQuery;
     if (!mangaUrl && !derivedQuery) {
       throw new SuwayomiError(
