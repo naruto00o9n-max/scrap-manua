@@ -6,10 +6,12 @@ import {
   extractReaderImages,
   extractWaMangaEpisodeMeta,
   extractWaMangaPages,
+  extractWebtoonsPages,
   isGigaViewerLockedEpisode,
   normalizeCookieHeader,
   parseMangaChapterTitle,
   parseWaMangaTitle,
+  parseWebtoonsTitle,
 } from "./directSource";
 
 describe("normalizeCookieHeader", () => {
@@ -219,6 +221,12 @@ describe("directSourceMode", () => {
     expect(directSourceMode("wamanga.ru")).toBe("direct-first");
     expect(directSourceMode("www.wamanga.ru")).toBe("direct-first");
   });
+
+  it("WEBTOON يعتمد المباشر أولًا على النطاقين webtoons.com وm.webtoons.com", () => {
+    expect(directSourceMode("webtoons.com")).toBe("direct-first");
+    expect(directSourceMode("m.webtoons.com")).toBe("direct-first");
+    expect(directSourceMode("www.webtoons.com")).toBe("direct-first");
+  });
 });
 
 describe("extractWaMangaPages", () => {
@@ -284,5 +292,53 @@ describe("parseWaMangaTitle", () => {
       chapterName: "Глава 3.5",
     });
     expect(parseWaMangaTitle("عمل فقط | WaManga")).toEqual({ mangaTitle: "عمل فقط", chapterName: "" });
+  });
+});
+
+// ===== WEBTOON (webtoons.com) =====
+
+describe("extractWebtoonsPages", () => {
+  const sample = [
+    '<img src="https://webtoon-phinf.pstatic.net/banner.jpg?type=q90" alt="banner" class="area">',
+    '<img class="_images" src="data:image/gif;base64,R0lGOD" data-url="https://webtoon-phinf.pstatic.net/20260816_214/p1.jpg?type=q90">',
+    '<img data-url="https://webtoon-phinf.pstatic.net/20260816_215/p2&amp;v=3.jpg?type=q90" class="wk _images" alt="page 2">',
+    '<img class="_images" src="https://webtoon-phinf.pstatic.net/20260816_216/p3.jpg?type=q90">',
+  ].join("\n");
+
+  it("يستخرج data-url من صور _images بترتيبها ويفك الكيانات ويسقط إلى src المطلق", () => {
+    expect(extractWebtoonsPages(sample)).toEqual([
+      "https://webtoon-phinf.pstatic.net/20260816_214/p1.jpg?type=q90",
+      "https://webtoon-phinf.pstatic.net/20260816_215/p2&v=3.jpg?type=q90",
+      "https://webtoon-phinf.pstatic.net/20260816_216/p3.jpg?type=q90",
+    ]);
+  });
+
+  it("يتجاهل الروابط النسبية ويعود بقائمة فارغة بلا قارئ", () => {
+    expect(extractWebtoonsPages('<img class="_images" data-url="/static/p1.jpg">')).toEqual([]);
+    expect(extractWebtoonsPages("<div>بلا صور</div>")).toEqual([]);
+  });
+});
+
+describe("parseWebtoonsTitle", () => {
+  it("يفصل العمل عن الفصل من عنوان الصفحة الحي بترتيبه «الفصل | العمل»", () => {
+    expect(parseWebtoonsTitle("Ep. 133 - 151 | Falling In Love With My Ex-fiance's Grandfather")).toEqual({
+      mangaTitle: "Falling In Love With My Ex-fiance's Grandfather",
+      chapterName: "Ep. 133 - 151",
+    });
+  });
+
+  it("يتعامل مع لاحقة العلامة العامة وصيغة og:title المزدوجة الترميز", () => {
+    expect(parseWebtoonsTitle("Ep. 5 | عمل جميل | WEBTOON")).toEqual({
+      mangaTitle: "عمل جميل",
+      chapterName: "Ep. 5",
+    });
+    expect(parseWebtoonsTitle("Falling In Love With My Ex-fiance&amp;#39;s Grandfather - Ep. 133")).toEqual({
+      mangaTitle: "Falling In Love With My Ex-fiance's Grandfather",
+      chapterName: "Ep. 133",
+    });
+  });
+
+  it("يعود بالعنوان كما هو عند غياب أي نمط", () => {
+    expect(parseWebtoonsTitle("عنوان فقط")).toEqual({ mangaTitle: "عنوان فقط", chapterName: "" });
   });
 });

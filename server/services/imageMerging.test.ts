@@ -1,8 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import sharp from "sharp";
 import {
-  effectiveMergeHeightCap,
-  FULL_RASTER_AREA_LIMIT,
   mergeChapterPages,
   normalizeChapterMergeSettings,
   normalizeMergeHeightCap,
@@ -11,7 +9,6 @@ import {
   PALETTE_AREA_LIMIT,
   pickUniformWidth,
   resolveGroupOutput,
-  splitGroupsByArea,
   WEBP_MAX_DIMENSION,
 } from "./imageMerging";
 
@@ -325,39 +322,41 @@ describe("unscrambleGigaViewerPage", () => {
   });
 });
 
+
 // ============================================================
 // ميزانيات ذاكرة الدمج — سبب قتل العملية 137 (OOM) في الإنتاج:
 // JPG/WebP وتقليل ألوان PNG تُحمّل الصورة كاملة في الذاكرة عند الترميز،
-// وWebP لا يقبل بعدًا أطول من 16383px. المجموعات الأطول من ميزانية الصيغة
-// تُقسم تلقائيًا، وغير القابلة للقسمة تُرمّز PNG بلا أي فقدان.
+// وWebP لا يقبل بعدًا أطول من 16383px. طلب المالك: لا تقسيم تلقائي —
+// المجموعات الأطول من ميزانية الصيغة تُحوَّل إلى PNG بلا أي فقدان
+// وتكمل دمجها صورة واحدة.
 // ============================================================
 describe("memory-safe merge budgets", () => {
-  it("effectiveMergeHeightCap: WebP يُقلّص السقف إلى 16000 والبقية تبقى كما هي", () => {
-    expect(effectiveMergeHeightCap(25000, "webp")).toBe(WEBP_MAX_DIMENSION);
-    expect(effectiveMergeHeightCap(30000, "webp")).toBe(WEBP_MAX_DIMENSION);
-    expect(effectiveMergeHeightCap(8000, "webp")).toBe(8000);
-    expect(effectiveMergeHeightCap(25000, "jpeg")).toBe(25000);
-    expect(effectiveMergeHeightCap(25000, "png")).toBe(25000);
+  it("resolveGroupOutput: مجموعة JPG أطول من الميزانية تُحوَّل PNG بلا أي تقسيم", () => {
+    const base = { format: "jpeg" as const, quality: 88, pngPalette: false };
+    // 2400×25000 (سقف المالك) = 60MP فوق ميزانية JPG — تُحوَّل PNG كاملة
+    const converted = resolveGroupOutput(base, 2400, 25000, 1);
+    expect(converted.output.format).toBe("png");
+    expect(converted.output.pngPalette).toBe(false);
+    expect(converted.note).toContain("JPG");
+    expect(converted.note).toContain("دون تقسيم");
+
+    // مجموعة عادية ضمن الميزانية تبقى JPG بلا ملاحظة (2400×4000 = 9.6MP)
+    const normal = resolveGroupOutput(base, 2400, 4000, 3);
+    expect(normal.output.format).toBe("jpeg");
+    expect(normal.note).toBeNull();
   });
 
-  it("splitGroupsByArea: يقسم مجموعة JPG الأطول من الميزانية ولا يمس PNG", () => {
-    const dims = Array.from({ length: 8 }, () => ({ width: 2400, height: 1300 }));
-    const groups = [[0, 1, 2, 3, 4, 5, 6, 7]];
-    const width = 2400;
-    const budgetHeight = Math.floor(FULL_RASTER_AREA_LIMIT / width);
+  it("resolveGroupOutput: مجموعة WebP أطول من حد 16000px تُحوَّل PNG كذلك", () => {
+    const base = { format: "webp" as const, quality: 88, pngPalette: false };
+    const converted = resolveGroupOutput(base, 1200, 25000, 1);
+    expect(converted.output.format).toBe("png");
+    expect(converted.note).toContain("WebP");
+    expect(converted.note).toContain("16000px");
 
-    const jpeg = splitGroupsByArea(groups, dims, width, "jpeg");
-    expect(jpeg.groups.length).toBeGreaterThan(1);
-    for (const group of jpeg.groups) {
-      const total = group.reduce((sum, index) => sum + dims[index]!.height!, 0);
-      expect(total).toBeLessThanOrEqual(budgetHeight);
-    }
-    expect(jpeg.notes[0]).toContain("JPG");
-
-    // PNG يبث ترميزه — المجموعة تبقى كما هي بلا أي ملاحظة
-    const png = splitGroupsByArea(groups, dims, width, "png");
-    expect(png.groups).toEqual(groups);
-    expect(png.notes).toEqual([]);
+    // WebP ضمن الحد والميزانية يبقى WebP بلا ملاحظة (1200×8000 = 9.6MP)
+    const normal = resolveGroupOutput(base, 1200, 8000, 2);
+    expect(normal.output.format).toBe("webp");
+    expect(normal.note).toBeNull();
   });
 
   it("resolveGroupOutput: يتخطى تقليل الألوان فوق ميزانيته ويعود بلا ملاحظة تحته", () => {
@@ -372,19 +371,7 @@ describe("memory-safe merge budgets", () => {
     expect(kept.note).toBeNull();
   });
 
-  it("resolveGroupOutput: صفحة واحدة أطول من ميزانية JPG تُرمّز PNG (القص ممنوع)", () => {
-    const base = { format: "jpeg" as const, quality: 88, pngPalette: false };
-    const result = resolveGroupOutput(base, 2400, 20000, 1);
-    expect(result.output.format).toBe("png");
-    expect(result.note).toContain("PNG");
-
-    // مجموعة عادية ضمن الميزانية تبقى JPG بلا ملاحظة (2400×4000 = 9.6MP)
-    const normal = resolveGroupOutput(base, 2400, 4000, 3);
-    expect(normal.output.format).toBe("jpeg");
-    expect(normal.note).toBeNull();
-  });
-
-  it("integration: JPG بصفحات عريضة 2400px يقسم المجموعة الطويلة ويسجل الملاحظة", async () => {
+  it("integration: JPG بمجموعة عريضة 2400px أطول من ميزانيته تخرج صورة PNG واحدة بلا تقسيم", async () => {
     const buffers: Buffer[] = [];
     for (let index = 0; index < 8; index += 1) {
       buffers.push(await image(2400, 1300, index % 2 ? "#101010" : "#202020"));
@@ -392,13 +379,14 @@ describe("memory-safe merge budgets", () => {
     const urls = buffers.map((_buffer, index) => `https://pages.test/${index + 1}`);
     vi.stubGlobal("fetch", vi.fn(async (_url: string) => new Response(buffers.shift(), { status: 200, headers: { "content-type": "image/png" } })));
 
+    // المجموعة الواحدة 10400px عند عرض 2400 تجاوزت ميزانية JPG فحُوّلت PNG
     const session = await openChapterMergeSession(urls, undefined, { format: "jpeg", quality: 88, pngPalette: false }, { heightCap: 25000, width: null });
     try {
-      // المجموعة الواحدة 10400px تجاوزت ميزانية JPG عند عرض 2400 (8333px) فقُسمت
-      expect(session.images.length).toBeGreaterThanOrEqual(2);
-      const budgetHeight = Math.floor(FULL_RASTER_AREA_LIMIT / 2400);
-      expect(session.images.every(item => item.height <= budgetHeight)).toBe(true);
-      expect(session.images.every(item => item.mimeType === "image/jpeg")).toBe(true);
+      expect(session.images).toHaveLength(1);
+      expect(session.images[0]!.height).toBe(10400);
+      expect(session.images[0]!.mimeType).toBe("image/png");
+      const metadata = await sharp(session.images[0]!.filePath).metadata();
+      expect(metadata.format).toBe("png");
       expect(session.notes.join("\n")).toContain("JPG");
     } finally {
       await session.cleanup();
@@ -406,18 +394,42 @@ describe("memory-safe merge budgets", () => {
     vi.unstubAllGlobals();
   });
 
-  it("integration: WebP يقلّص سقف 25000 إلى 16000 مع ملاحظة، وصوره ضمن الحد", async () => {
+  it("integration: JPG ضمن ميزانيته يبقى JPG بلا أي ملاحظات", async () => {
     const buffers: Buffer[] = [];
-    for (let index = 0; index < 5; index += 1) {
+    for (let index = 0; index < 4; index += 1) {
+      buffers.push(await image(1200, 2000, index % 2 ? "#101010" : "#202020"));
+    }
+    const urls = buffers.map((_buffer, index) => `https://pages.test/${index + 1}`);
+    vi.stubGlobal("fetch", vi.fn(async (_url: string) => new Response(buffers.shift(), { status: 200, headers: { "content-type": "image/png" } })));
+
+    // مجموعة واحدة 8000px عند عرض 1200 = 9.6MP ضمن الميزانية
+    const session = await openChapterMergeSession(urls, undefined, { format: "jpeg", quality: 88, pngPalette: false }, { heightCap: 25000, width: null });
+    try {
+      expect(session.images).toHaveLength(1);
+      expect(session.images[0]!.height).toBe(8000);
+      expect(session.images[0]!.mimeType).toBe("image/jpeg");
+      expect(session.notes).toEqual([]);
+    } finally {
+      await session.cleanup();
+    }
+    vi.unstubAllGlobals();
+  });
+
+  it("integration: WebP بفصل أطول من 16000px يخرج صورة PNG واحدة بلا تقسيم ولا تقليص سقف", async () => {
+    const buffers: Buffer[] = [];
+    for (let index = 0; index < 3; index += 1) {
       buffers.push(await image(1200, 8000, index % 2 ? "#101010" : "#202020"));
     }
     const urls = buffers.map((_buffer, index) => `https://pages.test/${index + 1}`);
     vi.stubGlobal("fetch", vi.fn(async (_url: string) => new Response(buffers.shift(), { status: 200, headers: { "content-type": "image/png" } })));
 
+    // 24000px فوق حد WebP الصارم رغم أن سقف المالك 25000 — صورة PNG واحدة
     const session = await openChapterMergeSession(urls, undefined, { format: "webp", quality: 88, pngPalette: false }, { heightCap: 25000, width: null });
     try {
-      expect(session.images.every(item => item.height <= WEBP_MAX_DIMENSION)).toBe(true);
-      expect(session.images.every(item => item.mimeType === "image/webp")).toBe(true);
+      expect(session.images).toHaveLength(1);
+      expect(session.images[0]!.height).toBe(24000);
+      expect(session.images[0]!.height).toBeGreaterThan(WEBP_MAX_DIMENSION);
+      expect(session.images[0]!.mimeType).toBe("image/png");
       expect(session.notes.join("\n")).toContain("WebP");
     } finally {
       await session.cleanup();

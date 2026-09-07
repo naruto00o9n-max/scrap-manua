@@ -34,8 +34,6 @@ export type ContentSource = {
   status: "active" | "disabled";
   documentedIntegrationUrl: string | null;
   allowDirectChapterLookup: boolean;
-  rejectLoginRequired: boolean;
-  rejectCaptchaRequired: boolean;
   notes: string | null;
   /** مصدر إضافة السجل: يدوي من اللوحة أو مزامنة تلقائية من Suwayomi. */
   origin?: "manual" | "suwayomi";

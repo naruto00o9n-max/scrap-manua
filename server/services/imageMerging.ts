@@ -12,6 +12,21 @@ sharp.cache(false);
 sharp.concurrency(1);
 
 const MAX_PAGE_SIZE_BYTES = 40 * 1024 * 1024;
+/** ترويسة User-Agent لتنزيل صفحات الفصل — بعض CDNs ترفض الطلبات المجردة (صور WEBTOON تعيد 403). */
+const PAGE_DOWNLOAD_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+/**
+ * ترويسة Referer للصور التي ترفض الروابط الساخنة: CDN نافير لصور WEBTOON
+ * (webtoon-phinf.pstatic.net) يعيد 403 لأي طلب بلا Referer من الموقع نفسه.
+ */
+function pageDownloadReferer(parsed: URL): string | null {
+  const host = parsed.hostname.toLowerCase();
+  if (host === "webtoon-phinf.pstatic.net" || host.endsWith(".pstatic.net")) {
+    return "https://www.webtoons.com/";
+  }
+  return null;
+}
 // سقف ارتفاع الصورة المدمجة الافتراضي: عتبة مستهدفة ~14000px مع هامش مرونة
 // يسمح بإغلاق المجموعة عندما ترفعها الصفحة التالية قليلًا فوق العتبة
 // (مثل 5000+5000+4316 = 14316 أو 5000+5000+4925 = 14925) بدل ترك صفحات
@@ -132,73 +147,25 @@ export function resolveMergeDimensions(settings: ChapterMergeSettings): MergeDim
 // PNG بلا لوحة يبث الصورة عبر libvips فتبقى الذاكرة محدودة مهما كان الطول،
 // أما JPG وWebP وتقليل ألوان PNG فتُحمّل الصورة كاملة في الذاكرة عند الترميز
 // (~7MB و6MB لكل ميغابكسل قياسًا حيًا)، وWebP لا يقبل بعدًا أطول من 16383px
-// أصلًا. لذلك تُطبق ميزانية مساحة بكسل لكل صيغة: المجموعات الأطول تُقسم
-// تلقائيًا إلى صور أقصر، والمجموعات غير القابلة للقسمة (صفحة واحدة أطول من
-// الميزانية) تُرمّز PNG بلا أي فقدان بدل موت العملية.
+// أصلًا. طلب المالك: **لا تقسيم تلقائي للصور** — المجموعات الأطول من ميزانية
+// صيغتها تُحوّل إلى PNG بلا أي فقدان وتكمل دمجها صورة واحدة متصلة،
+// وتقليل ألوان PNG يُتخطى للصور الطويلة.
 // ============================================================
 
 /** ميزانية المساحة للصيغ الحاملة للصورة كاملة في الذاكرة (JPG/WebP) — ~90-120MB ذروة لكل صورة. */
 export const FULL_RASTER_AREA_LIMIT = 12_000_000;
 /** ميزانية تقليل ألوان PNG فوقها تُتخطى ميزة اللوحة وتبقى PNG بلا أي فقدان. */
 export const PALETTE_AREA_LIMIT = 12_000_000;
-/** سقف أمان PNG الباثق (يبث عبر libvips) — 100MP تغطي أقصى إعداد مسموح (2400×30000). */
-export const STREAMING_PNG_AREA_LIMIT = 100_000_000;
 /** حد libwebp الصارم 16383px لكل بُعد — نستخدم هامشًا أدنى. */
 export const WEBP_MAX_DIMENSION = 16000;
 
 /**
- * السقف الفعلي للدمج حسب الصيغة: WebP لا يقبل أبعادًا أطول من 16383px
- * (حد مكتبة libwebp الصارم) فيُقلّص السقف المطلوب تلقائيًا إلى 16000px،
- * وبقية الصيغ تتبع السقف كما اختاره السيرفر.
- */
-export function effectiveMergeHeightCap(heightCap: number, format: ImageOutputFormat): number {
-  return format === "webp" ? Math.min(heightCap, WEBP_MAX_DIMENSION) : heightCap;
-}
-
-/**
- * يقسم مجموعات الدمج التي مساحتها تتجاوز ميزانية صيغة ترميزها الحاملة
- * للصورة كاملة في الذاكرة (JPG/WebP) إلى مجموعات متصلة أقصر ضمن الميزانية،
- * ويُرجع ملاحظات عربية تُعرض في سجل الطلب. PNG يبث ترميزه فلا يُقسم أبدًا
- * بسببه — تقسيمه يبقى محكومًا بسقف الارتفاع المختار فقط.
- * دالة نقية قابلة للاختبار.
- */
-export function splitGroupsByArea(
-  groups: number[][],
-  dimensions: Array<{ height?: number; width?: number }>,
-  width: number,
-  format: ImageOutputFormat
-): { groups: number[][]; notes: string[] } {
-  if (format !== "jpeg" && format !== "webp") return { groups, notes: [] };
-  const budgetHeight = Math.max(1000, Math.floor(FULL_RASTER_AREA_LIMIT / Math.max(1, width)));
-  const heights = dimensions.map(item => item?.height ?? 0);
-  const result: number[][] = [];
-  const notes: string[] = [];
-  let splitAny = false;
-  for (const group of groups) {
-    const total = group.reduce((sum, index) => sum + (heights[index] ?? 0), 0);
-    if (total <= budgetHeight) {
-      result.push(group);
-      continue;
-    }
-    // المجموعة تتجاوز الميزانية: تُقسم داخل حدودها إلى أجزاء متساوية قدر الإمكان
-    const parts = partitionSegmentEvenly(heights, group[0]!, group[group.length - 1]! + 1, budgetHeight);
-    result.push(...parts);
-    splitAny = true;
-  }
-  if (splitAny) {
-    const label = format === "jpeg" ? "JPG" : "WebP";
-    notes.push(
-      `صيغة ${label} تُحمّل الصورة كاملة في الذاكرة عند الترميز — الصور الأطول من ~${budgetHeight}px عند هذا العرض قُسمت تلقائيًا إلى صور أقصر حفاظًا على ذاكرة الخادم.`
-    );
-  }
-  return { groups: result, notes };
-}
-
-/**
- * يحدد ترميز كل صورة مدمجة على حدة مع ملاحظات الأمان:
+ * يحدد ترميز كل صورة مدمجة على حدة مع ملاحظات الأمان — **بلا أي تقسيم**:
  * - تقليل ألوان PNG فوق ميزانيته يُتخطى وتبقى الصورة PNG بلا أي فقدان.
- * - صورة غير قابلة للقسمة (صفحة واحدة أطول من ميزانية JPG/WebP — القص ممنوع)
- *   تُرمّز PNG بلا أي فقدان بدل موت العملية.
+ * - مجموعة أطول من ميزانية ذاكرة JPG/WebP (الصيغة تحمل الصورة كاملة عند
+ *   الترميز) تُحوَّل إلى PNG بلا أي فقدان وتكمل دمجها صورة واحدة — PNG
+ *   يبث ترميزه عبر libvips فتبقى الذاكرة آمنة مهما كان الطول.
+ * - مجموعة أطول من حد WebP الصارم (16383px لكل بُعد) تُحوَّل إلى PNG كذلك.
  * دالة نقية قابلة للاختبار.
  */
 export function resolveGroupOutput(
@@ -215,12 +182,18 @@ export function resolveGroupOutput(
         "تقليل ألوان PNG يتطلب تحميل الصورة كاملة في الذاكرة — تُخُطّي لهذه الصورة الطويلة وبقيت PNG بلا أي فقدان (بدون تقليل ألوان).",
     };
   }
-  if ((output.format === "jpeg" || output.format === "webp") && area > FULL_RASTER_AREA_LIMIT) {
-    // يصل إلى هنا فقط صفحة واحدة أطول من الميزانية (القص ممنوع) — نرمّزها PNG
+  if (output.format === "webp" && groupHeight > WEBP_MAX_DIMENSION) {
     return {
       output: { format: "png", quality: output.quality, pngPalette: false },
       note:
-        "توجد صفحة واحدة أطول من حد أمان صيغتها في الذاكرة (والقص ممنوع) — رُمّزت PNG بلا أي فقدان بدلًا من ذلك حفاظًا على استقرار الخادم.",
+        "صيغة WebP لا تدعم صورًا أطول من 16000px (حد مكتبة الترميز نفسها) — حُوّلت هذه الصورة إلى PNG بلا أي فقدان وأكملت الدمج صورة واحدة دون تقسيم.",
+    };
+  }
+  if ((output.format === "jpeg" || output.format === "webp") && area > FULL_RASTER_AREA_LIMIT) {
+    return {
+      output: { format: "png", quality: output.quality, pngPalette: false },
+      note:
+        `صيغة ${output.format === "jpeg" ? "JPG" : "WebP"} تُحمّل الصورة كاملة في الذاكرة عند الترميز — هذه الصورة الأطول من حد الأمان حُوّلت تلقائيًا إلى PNG بلا أي فقدان وأكملت الدمج صورة واحدة دون تقسيمها حفاظًا على ذاكرة الخادم.`,
     };
   }
   return { output, note: null };
@@ -339,7 +312,14 @@ async function downloadPageToTemp(url: string, index: number, targetPath: string
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const response = await fetch(parsed, { redirect: "error", signal: AbortSignal.timeout(30_000) });
+      const referer = pageDownloadReferer(parsed);
+      const response = await fetch(parsed, {
+        redirect: "error",
+        signal: AbortSignal.timeout(30_000),
+        headers: referer
+          ? { "user-agent": PAGE_DOWNLOAD_UA, referer }
+          : { "user-agent": PAGE_DOWNLOAD_UA },
+      });
       if (!response.ok) throw new Error(`تعذر تنزيل الصفحة ${index} (${response.status}).`);
       const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
       if (!contentType.startsWith("image/")) throw new Error(`الصفحة ${index} ليست صورة.`);
@@ -639,15 +619,10 @@ export async function openLocalImageMergeSession(
     if (!uniformWidth) throw new Error("تعذر تحديد عرض موحد لصفحات الفصل.");
     // العرض المستهدف: تخصيص السيرفر إن وُجد وإلا العرض الأكثر تكرارًا.
     const width = normalizeMergeWidth(dimensions?.width) ?? uniformWidth;
-    const requestedCap = normalizeMergeHeightCap(dimensions?.heightCap ?? DEFAULT_MERGE_HEIGHT_CAP);
-    // سقف WebP الفعلي: حد libwebp الصارم 16383px يُقلّصه تلقائيًا مع ملاحظة.
-    const heightCap = effectiveMergeHeightCap(requestedCap, output.format);
+    // سقف الارتفاع كما اختاره السيرفر لكل الصيغ — الصيغة التي لا تحتمل الطول
+    // (WebP فوق 16000px أو ميزانية JPG) تُحوّل صورها إلى PNG بدل تقليص السقف.
+    const heightCap = normalizeMergeHeightCap(dimensions?.heightCap ?? DEFAULT_MERGE_HEIGHT_CAP);
     const notes: string[] = [];
-    if (heightCap !== requestedCap) {
-      notes.push(
-        `صيغة WebP لا تدعم صورًا أطول من ${WEBP_MAX_DIMENSION}px (حد مكتبة الترميز نفسها) — قُلّص سقف الارتفاع المطلوب (${requestedCap}px) تلقائيًا إلى ${heightCap}px.`
-      );
-    }
 
     // توحيد العرض بالتحجير: الصفحات التي عرضها يساوي العرض المستهدف تبقى كما
     // هي بلا إعادة ترميز، وما خالفه يُحجّم فقط (يشمل تخصيص العرض المختلف
@@ -658,11 +633,9 @@ export async function openLocalImageMergeSession(
       ? { paths: pagePaths, dimensions: originalDimensions }
       : await scalePagesToUniformWidth(pagePaths, originalDimensions, width, path.join(dir, "scaled"));
 
-    // التجميع أصلًا بسقف الارتفاع، ثم تقسيم أمان الذاكرة لصيغ الترميز
-    // الحاملة للصورة كاملة في الذاكرة (JPG/WebP).
-    const grouped = groupPageIndexes(effectiveDimensions, heightCap);
-    const { groups, notes: areaNotes } = splitGroupsByArea(grouped, effectiveDimensions, width, output.format);
-    notes.push(...areaNotes);
+    // التجميع بسقف الارتفاع فقط — بلا أي تقسيم إضافي: المجموعات الأطول من
+    // ميزانية صيغة الترميز تُحوّل إلى PNG بلا أي فقدان داخل resolveGroupOutput.
+    const groups = groupPageIndexes(effectiveDimensions, heightCap);
 
     const images: MergedChapterFile[] = [];
     // التسلسل مقصود: تُرسم مجموعة واحدة في كل مرة وتُكتب إلى القرص فورًا.
@@ -670,7 +643,7 @@ export async function openLocalImageMergeSession(
       const group = groups[groupIndex]!;
       const groupHeight = group.reduce((sum, index) => sum + (effectiveDimensions[index]?.height ?? 0), 0);
       // ترميز كل صورة حسب ميزانية صيغتها: تخطي اللوحة أو تحويل الصورة
-      // غير القابلة للقسمة إلى PNG — مع ملاحظة لكل منها.
+      // الأطول من الميزانية إلى PNG بلا أي تقسيم — مع ملاحظة لكل منها.
       const { output: groupOutput, note } = resolveGroupOutput(output, width, groupHeight, group.length);
       if (note) notes.push(note);
       const extension = imageOutputExtension(groupOutput.format);

@@ -11,7 +11,13 @@ import { getSetting, setSetting } from "../db";
 // ============================================================
 
 /** المواقع المدعومة بالسحب المباشر حاليًا. */
-export const SUPPORTED_DIRECT_SOURCES = ["rokaricomics.com", "shonenjumpplus.com", "wamanga.ru"] as const;
+export const SUPPORTED_DIRECT_SOURCES = [
+  "rokaricomics.com",
+  "shonenjumpplus.com",
+  "wamanga.ru",
+  "webtoons.com",
+  "m.webtoons.com",
+] as const;
 
 export type DirectSourceHostname = (typeof SUPPORTED_DIRECT_SOURCES)[number];
 
@@ -21,8 +27,9 @@ export type DirectSourceHostname = (typeof SUPPORTED_DIRECT_SOURCES)[number];
  *   وحده يُسحب مباشرة بجلية الموقع (سلوك rokari المعتمد).
  * - «direct-first»: صفحة الفصل تُقرأ مباشرة أولًا دائمًا ولا يمر الموقع عبر
  *   خادم السحب إطلاقًا — المتاح مجانًا تُستخدم صوره فورًا، والمدفوع يحتاج
- *   جلسة موثقة (شونين جامب+، وwamanga.ru بلا إضافة معروفة وفصوله متاحة
- *   للزوار بلا قفل).
+ *   جلسة موثقة (شونين جامب+، وwamanga.ru وWEBTOON بلا إضافة معروفة وفصول
+ *   المجانية فيها متاحة للزوار — وWEBTOON يُرسل له كوكي تجاوز بوابة العمر
+ *   تلقائيًا، وصوره على CDN نافير تحتاج Referer يتكفل به أنبوب التنزيل).
  */
 export type DirectSourceMode = "session-only" | "direct-first";
 
@@ -30,6 +37,8 @@ const DIRECT_SOURCE_MODES: Record<(typeof SUPPORTED_DIRECT_SOURCES)[number], Dir
   "rokaricomics.com": "session-only",
   "shonenjumpplus.com": "direct-first",
   "wamanga.ru": "direct-first",
+  "webtoons.com": "direct-first",
+  "m.webtoons.com": "direct-first",
 };
 
 export function directSourceMode(hostname: string | null | undefined): DirectSourceMode | null {
@@ -432,6 +441,63 @@ export function extractPageTitle(html: string): string {
   return decodeEntities(raw).trim();
 }
 
+// ===== قارئ WEBTOON (webtoons.com وm.webtoons.com) =====
+
+/**
+ * كوكي تجاوز بوابة التحقق من العمر في WEBTOON — الموقع نفسه يضبطه بعد
+ * موافقة الزائر، وإرساله مقدمًا يفتح الفصول المقيدة بلا أي صفحة تحقق.
+ */
+export const WEBTOONS_AGE_COOKIE = "needAgeVerified=true";
+
+export function isWebtoonsHost(host: string): boolean {
+  return host === "webtoons.com" || host === "m.webtoons.com";
+}
+
+/**
+ * يستخرج صفحات قارئ WEBTOON بترتيبها الأصلي:
+ * <img class="_images" data-url="https://webtoon-phinf.pstatic.net/…">
+ * الروابط الحقيقية في data-url (src مجرد placeholder معطل)، والكيانات HTML
+ * تُفك قبل الإرجاع، وأي صورة بلا data-url تسقط إلى src إن كانت مطلقة.
+ * الصور نفسها ترفض الطلبات المجردة (403) وتكفيها ترويسة متصفح وReferer —
+ * يتكفل بها أنبوب التنزيل في imageMerging.
+ */
+export function extractWebtoonsPages(html: string): string[] {
+  const pages: string[] = [];
+  for (const match of Array.from(html.matchAll(/<img\b[^>]*>/gi))) {
+    const tag = match[0]!;
+    if (!/\bclass=["'][^"]*\b_images\b/.test(tag)) continue;
+    const raw = tag.match(/\sdata-url=["']([^"]+)["']/i)?.[1] ?? tag.match(/\ssrc=["']([^"]+)["']/i)?.[1];
+    const url = raw ? decodeEntities(raw) : "";
+    if (url && /^https?:\/\//i.test(url)) pages.push(url);
+  }
+  return pages;
+}
+
+/**
+ * يفصل عنوان العمل عن اسم الفصل من عنوان صفحة WEBTOON:
+ * «Ep. 133 - 151 | Falling In Love With My Ex-fiance's Grandfather»
+ * → العمل: Falling In Love…، الفصل: Ep. 133 - 151.
+ * يتعامل أيضًا مع لاحقة العلامة العامة «| WEBTOON» إن ظهرت، ومع صيغة
+ * og:title الاحتياطية «العمل - Ep. 133» (بترميز كيانات مزدوج أحيانًا).
+ */
+export function parseWebtoonsTitle(pageTitle: string): { mangaTitle: string; chapterName: string } {
+  // بعض الحقول (og:title) ترمّز الكيانات مرتين — فك ثانٍ غير ضار لعناوين نظيفة
+  const title = decodeEntities(decodeEntities(pageTitle)).trim();
+  const segments = title.split(/\s*\|\s*/).filter(Boolean);
+  if (segments.length >= 2) {
+    let mangaTitle = segments[segments.length - 1]!.trim();
+    let chapterName = segments.slice(0, -1).join(" | ").trim();
+    if (/^webtoon$/i.test(mangaTitle) && segments.length >= 3) {
+      mangaTitle = segments[segments.length - 2]!.trim();
+      chapterName = segments.slice(0, -2).join(" | ").trim();
+    }
+    if (mangaTitle && chapterName) return { mangaTitle, chapterName };
+  }
+  const dashed = title.match(/^(.+?)\s+-\s+(Ep\.\s*[\d.]+.*)$/i);
+  if (dashed?.[1] && dashed[2]) return { mangaTitle: dashed[1].trim(), chapterName: dashed[2].trim() };
+  return { mangaTitle: title, chapterName: "" };
+}
+
 /**
  * يفصل عنوان العمل عن اسم الفصل من عنوان الصفحة:
  * «Perfection is Everything Chapter 57 – rokari comics»
@@ -472,8 +538,9 @@ function chapterHost(chapterUrl: string): string {
  */
 export async function probeDirectChapterPage(chapterUrl: string): Promise<DirectProbe> {
   try {
-    const html = await fetchChapterHtml(chapterUrl);
     const host = chapterHost(chapterUrl);
+    // بوابة العمر في WEBTOON تُتجاوز بكوكي الموقع نفسه — يُرسل مقدمًا دائمًا.
+    const html = await fetchChapterHtml(chapterUrl, isWebtoonsHost(host) ? WEBTOONS_AGE_COOKIE : undefined);
     if (host === "wamanga.ru") {
       const pages = extractWaMangaPages(html);
       if (pages.length) {
@@ -498,6 +565,23 @@ export async function probeDirectChapterPage(chapterUrl: string): Promise<Direct
         };
       }
       if (isGigaViewerLockedEpisode(html)) return { mode: "locked", chapter: null };
+      return { mode: "unknown", chapter: null };
+    }
+    if (isWebtoonsHost(host)) {
+      const pages = extractWebtoonsPages(html);
+      if (pages.length) {
+        const { mangaTitle, chapterName } = parseWebtoonsTitle(extractPageTitle(html));
+        return {
+          mode: "free",
+          chapter: {
+            mangaTitle: mangaTitle || "العمل",
+            chapterName: chapterName || "الفصل",
+            pages,
+          },
+        };
+      }
+      // بلا صور: فصل مدفوع (Fast Pass) أو عطب لحظي — غير محسوم، والمحاولة
+      // تعاد مرة واحدة في العامل قبل أي رفض.
       return { mode: "unknown", chapter: null };
     }
     const images = extractReaderImages(html);
@@ -536,8 +620,11 @@ export async function fetchDirectChapterWithSession(
   chapterUrl: string,
   cookie: string
 ): Promise<DirectChapterPages> {
-  const html = await fetchChapterHtml(chapterUrl, cookie);
   const host = chapterHost(chapterUrl);
+  const html = await fetchChapterHtml(
+    chapterUrl,
+    isWebtoonsHost(host) && !cookie ? WEBTOONS_AGE_COOKIE : cookie
+  );
   if (host === "wamanga.ru") {
     const pages = extractWaMangaPages(html);
     if (!pages.length) {
@@ -570,6 +657,20 @@ export async function fetchDirectChapterWithSession(
       mangaTitle: episode.mangaTitle || "العمل",
       chapterName: episode.chapterName || "الفصل",
       pages: episode.pages,
+    };
+  }
+  if (isWebtoonsHost(host)) {
+    const pages = extractWebtoonsPages(html);
+    if (!pages.length) {
+      throw new DirectSourceError(
+        "تعذر قراءة صفحات الفصل من صفحة الموقع مباشرة — ربما تغيّرت بنية القارئ أو أن الفصل مدفوع في حساب الموقع. أبلغ المالك."
+      );
+    }
+    const { mangaTitle, chapterName } = parseWebtoonsTitle(extractPageTitle(html));
+    return {
+      mangaTitle: mangaTitle || "العمل",
+      chapterName: chapterName || "الفصل",
+      pages,
     };
   }
   const pages = extractReaderImages(html);

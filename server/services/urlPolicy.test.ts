@@ -6,8 +6,6 @@ const activeSource = {
   hostname: "chapters.example.com",
   status: "active" as const,
   allowDirectChapterLookup: true,
-  rejectLoginRequired: true,
-  rejectCaptchaRequired: true,
 };
 
 describe("validateChapterUrl", () => {
@@ -24,8 +22,6 @@ describe("validateChapterUrl", () => {
     ["https://localhost/title/15", "UNSAFE_HOST"],
     ["https://127.0.0.1/title/15", "UNSAFE_HOST"],
     ["https://unknown.example/title/15", "SOURCE_NOT_ALLOWED"],
-    ["https://chapters.example.com/login", "LOGIN_NOT_ALLOWED"],
-    ["https://chapters.example.com/title/15?captcha=1", "CAPTCHA_NOT_ALLOWED"],
   ])("rejects unsafe or unapproved links", (url, code) => {
     expect(() => validateChapterUrl(url, [activeSource])).toThrowError(UrlPolicyError);
     try { validateChapterUrl(url, [activeSource]); } catch (error) { expect((error as UrlPolicyError).code).toBe(code); }
@@ -33,5 +29,17 @@ describe("validateChapterUrl", () => {
 
   it("rejects a source until direct chapter lookup is explicitly enabled", () => {
     expect(() => validateChapterUrl("https://chapters.example.com/title/15", [{ ...activeSource, allowDirectChapterLookup: false }])).toThrowError(/غير مفعّل/);
+  });
+
+  // طلب المالك: لا رفض بسبب كلمات المسار — روابط WEBTOON تحمل «challenge»
+  // وهي أعمال قرّاء وليست صفحات تحقق، وكلمات الدخول في الرابط لا تعني شيئًا.
+  it("accepts challenge/captcha/login-sounding paths (WEBTOON-style links)", () => {
+    const webtoonsLike = validateChapterUrl(
+      "https://www.chapters.example.com/en/challenge/falling-in-love/ep-133/viewer?title_no=855089&episode_no=204&captcha=1",
+      [activeSource]
+    );
+    expect(webtoonsLike.hostname).toBe("chapters.example.com");
+    expect(() => validateChapterUrl("https://chapters.example.com/login", [activeSource])).not.toThrowError();
+    expect(() => validateChapterUrl("https://chapters.example.com/title/verify/15", [activeSource])).not.toThrowError();
   });
 });
