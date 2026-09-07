@@ -398,8 +398,8 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
     let cleanupTemp: () => Promise<void>;
     if (mergeEnabled) {
       const mergeSession = await openChapterMergeSession(resolved.pages, downloadEvents, outputConfig, mergeDimensions);
-      // ملاحظات أمان الذاكرة المطبقة أثناء الدمج (تقسيم الصور الأطول من
-      // ميزانية الصيغة، تخطي تقليل الألوان، تحويل الصفحات العملاقة إلى PNG)
+      // ملاحظات أمان الذاكرة المطبقة أثناء الدمج (تحويل الصور الأطول من
+      // ميزانية صيغتها إلى PNG بلا أي فقدان بدل تقسيمها، تخطي تقليل الألوان)
       // تُسجل في سجل محاولات الطلب ليبقى السبب مرئيًا لصاحب الطلب.
       for (const note of mergeSession.notes) {
         await addJobAttempt(job.id, "downloading", note);

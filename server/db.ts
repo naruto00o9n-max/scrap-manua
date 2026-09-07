@@ -241,8 +241,6 @@ function normalizeSource(input: SaveSourceInput, existing?: ContentSource): Cont
     status: input.status,
     documentedIntegrationUrl: input.documentedIntegrationUrl ?? null,
     allowDirectChapterLookup: input.allowDirectChapterLookup,
-    rejectLoginRequired: existing?.rejectLoginRequired ?? true,
-    rejectCaptchaRequired: existing?.rejectCaptchaRequired ?? true,
     notes: input.notes ?? null,
     origin: input.origin ?? existing?.origin ?? "manual",
     lang: input.lang ?? existing?.lang ?? null,

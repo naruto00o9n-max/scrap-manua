@@ -16,8 +16,6 @@ export type AllowedSourceForPolicy = {
   hostname: string;
   status: "active" | "disabled";
   allowDirectChapterLookup: boolean;
-  rejectLoginRequired: boolean;
-  rejectCaptchaRequired: boolean;
 };
 
 export type ValidatedChapterUrl = {
@@ -92,13 +90,9 @@ export function validateChapterUrl(input: string, allowedSources: AllowedSourceF
     throw new UrlPolicyError("SOURCE_NOT_READY", "هذا المصدر غير مفعّل أو لم يُتحقق من تكامله بعد.");
   }
 
-  const accessPath = `${parsed.pathname}${parsed.search}`.toLowerCase();
-  if (source.rejectLoginRequired && /(?:login|sign-in|signin|oauth|authenticate)/.test(accessPath)) {
-    throw new UrlPolicyError("LOGIN_NOT_ALLOWED", "يرفض النظام روابط تسجيل الدخول أو المصادقة للمصادر المصرح بها.");
-  }
-  if (source.rejectCaptchaRequired && /(?:captcha|challenge|verify)/.test(accessPath)) {
-    throw new UrlPolicyError("CAPTCHA_NOT_ALLOWED", "يرفض النظام الروابط التي تشير إلى CAPTCHA أو تحدي وصول.");
-  }
+  // طلب المالك: لا رفض لأي رابط بسبب كلمات في مساره (كابشا/تحقق/دخول) —
+  // روابط WEBTOON تحمل «challenge» في مسارها وهي أعمال القرّاء وليست صفحة
+  // تحقق، والمحاولة الفعلية للسحب هي التي تحسم نجاح الرابط أو فشله.
 
   const canonicalUrl = canonicalize(parsed);
   return {
