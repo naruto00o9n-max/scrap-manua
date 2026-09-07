@@ -3342,7 +3342,7 @@ export function buildSettingsSectionComponents(
       [
         isFormat
           ? "-# الجودة تنطبق على JPG/WebP وتقليل ألوان PNG — وPNG البسيط بلا أي فقدان لا يتأثر بها."
-          : "-# تعطيل الدمج يجعل /فصل يرفع صفحات الفصل كما هي بدون دمجها في صور طويلة، وتخصيص الأبعاد هنا يتبعه /دمج أيضًا.",
+          : "-# تعطيل الدمج يجعل /فصل يرفع صفحات الفصل كما هي بدون دمجها في صور طويلة، وتخصيص الأبعاد هنا يتبعه /دمج أيضًا.\n-# حماية الذاكرة: صور JPG/WebP الأطول من حد أمان تُقسم تلقائيًا إلى صور أقصر، وتقليل ألوان PNG يُتخطى للصور الطويلة، وWebP لا يدعم صورًا أطول من 16000px (يُقلّص السقف تلقائيًا) — وتظهر ملاحظات ذلك في سجل الطلب.",
         "-# لاختيار قسم آخر نفّذ /الاعدادات من جديد واختره من القائمة.",
         "-# ZEUS",
       ].join("\n")
@@ -3879,11 +3879,15 @@ export async function startDiscordBot() {
     try {
       if (interaction.isButton()) {
         if (await handleSettingsButton(interaction)) return;
-        return void handleButton(interaction);
+        // الانتظار إلزامي: وعد بلا انتظار يتحول إلى unhandled rejection
+        // يقتل العملية كاملة عند فشله (خطأ 10062 لتفاعل منتهٍ مثلًا).
+        await handleButton(interaction);
+        return;
       }
       if (interaction.isStringSelectMenu()) {
         if (await handleSettingsSelectMenu(interaction)) return;
-        return void handleSearchSelectMenu(interaction);
+        await handleSearchSelectMenu(interaction);
+        return;
       }
       if (!interaction.isChatInputCommand()) return;
       if (interaction.commandName === "مساعدة") await replyHelp(interaction);
