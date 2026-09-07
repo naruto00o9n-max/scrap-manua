@@ -519,6 +519,8 @@ export type DirectProbe = {
   mode: DirectProbeMode;
   /** الفصل كاملًا (العناوين والصور) حين يكون متاحًا مباشرة بلا جلسة. */
   chapter: DirectChapterPages | null;
+  /** السبب المرصود لعدم الحسم (رمز الاستجابة/رسالة العطب) — يظهر في سجل المحاولات. */
+  reason?: string;
 };
 
 function chapterHost(chapterUrl: string): string {
@@ -550,7 +552,7 @@ export async function probeDirectChapterPage(chapterUrl: string): Promise<Direct
       // وإلا فالحالة غير محسومة (عطب لحظي أو تغيّر بنية).
       const meta = extractWaMangaEpisodeMeta(html);
       if (meta?.accessibleForFree === false) return { mode: "locked", chapter: null };
-      return { mode: "unknown", chapter: null };
+      return { mode: "unknown", chapter: null, reason: "صفحة قارئ WaManga وصلت بلا صور ولا إعلان مدفوع" };
     }
     if (host === "shonenjumpplus.com") {
       const episode = extractGigaViewerEpisode(html);
@@ -565,7 +567,7 @@ export async function probeDirectChapterPage(chapterUrl: string): Promise<Direct
         };
       }
       if (isGigaViewerLockedEpisode(html)) return { mode: "locked", chapter: null };
-      return { mode: "unknown", chapter: null };
+      return { mode: "unknown", chapter: null, reason: "صفحة GigaViewer وصلت بلا بنية صفحات ولا علامة قفل" };
     }
     if (isWebtoonsHost(host)) {
       const pages = extractWebtoonsPages(html);
@@ -580,9 +582,14 @@ export async function probeDirectChapterPage(chapterUrl: string): Promise<Direct
           },
         };
       }
-      // بلا صور: فصل مدفوع (Fast Pass) أو عطب لحظي — غير محسوم، والمحاولة
-      // تعاد مرة واحدة في العامل قبل أي رفض.
-      return { mode: "unknown", chapter: null };
+      // بلا صور: فصل مدفوع (Fast Pass) أو عطب لحظي أو استجابة محمية للعنوان
+      // الشبكي للبوت — غير محسوم، والمحاولة تعاد مرة واحدة قبل الانتقال
+      // إلى مسار خادم السحب إن كان متاحًا.
+      return {
+        mode: "unknown",
+        chapter: null,
+        reason: "صفحة قارئ WEBTOON وصلت بلا أي صور (فصل مدفوع Fast Pass أو استجابة غير متوقعة من الموقع)",
+      };
     }
     const images = extractReaderImages(html);
     if (images.length) {
@@ -597,9 +604,13 @@ export async function probeDirectChapterPage(chapterUrl: string): Promise<Direct
       };
     }
     if (isLockedChapterHtml(html)) return { mode: "locked", chapter: null };
-    return { mode: "unknown", chapter: null };
-  } catch {
-    return { mode: "unknown", chapter: null };
+    return { mode: "unknown", chapter: null, reason: "لا صور قارئ ولا علامة قفل في الصفحة" };
+  } catch (error) {
+    return {
+      mode: "unknown",
+      chapter: null,
+      reason: error instanceof Error && error.message ? error.message : "عطب غير معروف أثناء فتح الصفحة",
+    };
   }
 }
 

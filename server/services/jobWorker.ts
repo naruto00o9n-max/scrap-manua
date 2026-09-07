@@ -204,12 +204,16 @@ function chapterFromProbe(probe: DirectProbe, fallbackId: string): ResolvedChapt
 }
 
 /**
- * المسار المباشر الأساسي (شونين جامب+): فحص واحد يكفي للمجاني — صوره تُعاد
- * فورًا. المقفل يحتاج جلسة موثقة وإلا رُفض برسالة توضح السبب والخطوة المطلوبة.
- * الفحص غير المحسوم يُعاد مرة واحدة قبل الاستسلام برسالة واضحة.
+ * المسار المباشر الأساسي (شونين جامب+، WaManga، WEBTOON): فحص واحد يكفي
+ * للمجاني — صوره تُعاد فورًا. المقفل يحتاج جلسة موثقة وإلا رُفض برسالة
+ * توضح السبب والخطوة المطلوبة. الفحص غير المحسوم (الموقع مشغول/يحجب/بنية
+ * متغيرة) لا يرفض فورًا: إن كان المصدر مربوطًا بإضافة مثبتة في خادم السحب
+ * يُنتقل تلقائيًا إلى المسار المعتاد (إرجاع null)، وإلا رفض واضح بالسبب
+ * المرصود.
  */
 async function resolveViaDirectFirst(
   job: ChapterJob,
+  source: ContentSource,
   base: ProgressBase,
   post: ProgressPost
 ): Promise<ResolvedChapter | null> {
@@ -246,8 +250,18 @@ async function resolveViaDirectFirst(
     await post({ ...base(), status: "downloading" }, true);
     return await resolveLockedWithSession(job, cookie);
   }
+  const observed = probe.reason ? ` (السبب المرصود: ${probe.reason})` : "";
+  if (source.suwayomiSourceId) {
+    await addJobAttempt(
+      job.id,
+      "downloading",
+      `لم تُحسم قراءة الفصل من الموقع مباشرة${observed} — تتم المحاولة الآن عبر خادم السحب والإضافة المثبتة.`
+    );
+    await post({ ...base(), status: "downloading" }, true);
+    return null;
+  }
   throw new DirectSourceError(
-    "تعذر فتح صفحة الفصل من الموقع مباشرة الآن — قد يكون الموقع مشغولًا أو يحمي صفحته بتحقق. أعد /فصل بعد قليل."
+    `تعذر فتح صفحة الفصل من الموقع مباشرة الآن${observed} — قد يكون الموقع مشغولًا أو يحمي صفحته بتحقق. أعد /فصل بعد قليل.`
   );
 }
 
@@ -315,8 +329,11 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
 
     // ============================================================
     // التوجيه الذكي حسب نمط الموقع — بلا أي خيار يدوي:
-    // • «direct-first» (شونين جامب+): الصفحة تُقرأ مباشرة أولًا دائمًا —
-    //   المتاح مجانًا تُستخدم صوره فورًا، والمدفوع بجلسة موثقة أو برفض واضح.
+    // • «direct-first» (شونين جامب+، WaManga، WEBTOON): الصفحة تُقرأ مباشرة
+    //   أولًا دائمًا — المتاح مجانًا تُستخدم صوره فورًا، والمدفوع بجلسة موثقة
+    //   أو برفض واضح. وحين لا تُحسم القراءة المباشرة (الموقع مشغول أو يحجب
+    //   طلبات البوت) يُنتقل تلقائيًا إلى خادم السحب إن كان المصدر مربوطًا
+    //   بإضافة مثبتة فيه — مساران مستقلان بدل رفض فوري.
     // • «session-only» (rokari): المسار المعتاد أساسًا، وفقط حين وثّق المالك
     //   جلستها تُفحص الصفحة أولًا ليلتقط الفصل المقفل (المدفوع) بجلستها.
     // • غير المدعوم: المسار المعتاد كما هو — سلوك كل المصادر الأخرى لم يتغير.
@@ -324,7 +341,7 @@ async function processChapterJob(job: ChapterJob): Promise<void> {
     let resolved: ResolvedChapter | null = null;
     const mode = directSourceMode(source.hostname);
     if (mode === "direct-first") {
-      resolved = await resolveViaDirectFirst(job, base, post);
+      resolved = await resolveViaDirectFirst(job, source, base, post);
     } else if (mode === "session-only") {
       const sessionCookie = await getDirectSessionCookie(source.hostname);
       if (sessionCookie) {
