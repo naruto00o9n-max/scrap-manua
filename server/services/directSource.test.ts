@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   cookieDisplayName,
   directSourceMode,
@@ -12,6 +12,7 @@ import {
   parseMangaChapterTitle,
   parseWaMangaTitle,
   parseWebtoonsTitle,
+  probeDirectChapterPage,
 } from "./directSource";
 
 describe("normalizeCookieHeader", () => {
@@ -340,5 +341,71 @@ describe("parseWebtoonsTitle", () => {
 
   it("يعود بالعنوان كما هو عند غياب أي نمط", () => {
     expect(parseWebtoonsTitle("عنوان فقط")).toEqual({ mangaTitle: "عنوان فقط", chapterName: "" });
+  });
+});
+
+describe("probeDirectChapterPage — السبب المرصود عند عدم الحسم", () => {
+  const webtoonsUrl = "https://m.webtoons.com/en/canvas/some-series/ep-1/viewer?title_no=1&episode_no=1";
+  const htmlHeaders = { "content-type": "text/html; charset=utf-8" };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("يبين رسالة العطب الشبكي في السبب المرصود", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("connect ECONNREFUSED 1.2.3.4:443");
+      })
+    );
+    const probe = await probeDirectChapterPage(webtoonsUrl);
+    expect(probe.mode).toBe("unknown");
+    expect(probe.reason).toContain("ECONNREFUSED");
+  });
+
+  it("يذكر رمز رفض الموقع في السبب (403 مثلًا)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("forbidden", { status: 403 }))
+    );
+    const probe = await probeDirectChapterPage(webtoonsUrl);
+    expect(probe.mode).toBe("unknown");
+    expect(probe.reason).toContain("403");
+  });
+
+  it("يفسر صفحة WEBTOON الخالية من الصور بسبب واضح ويرسل كوكي بوابة العمر", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response("<html><body>قارئ بلا صور</body></html>", { status: 200, headers: htmlHeaders })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const probe = await probeDirectChapterPage(webtoonsUrl);
+    expect(probe.mode).toBe("unknown");
+    expect(probe.reason).toContain("WEBTOON");
+    const init = fetchMock.mock.calls[0]?.[1] as { headers?: Record<string, string> } | undefined;
+    expect(init?.headers?.cookie).toBe("needAgeVerified=true");
+  });
+
+  it("يعيد الفصل المجاني من صفحة WEBTOON كاملة الصور", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          '<html><head><title>Ep. 1 | Some Series</title></head><body>' +
+            '<img class="_images" data-url="https://webtoon-phinf.pstatic.net/1.jpg">' +
+            '<img class="_images" data-url="https://webtoon-phinf.pstatic.net/2.jpg">' +
+            "</body></html>",
+          { status: 200, headers: htmlHeaders }
+        )
+      )
+    );
+    const probe = await probeDirectChapterPage(webtoonsUrl);
+    expect(probe.mode).toBe("free");
+    expect(probe.chapter?.pages).toEqual([
+      "https://webtoon-phinf.pstatic.net/1.jpg",
+      "https://webtoon-phinf.pstatic.net/2.jpg",
+    ]);
+    expect(probe.chapter?.mangaTitle).toBe("Some Series");
+    expect(probe.chapter?.chapterName).toBe("Ep. 1");
   });
 });
