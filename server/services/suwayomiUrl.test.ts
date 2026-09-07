@@ -23,6 +23,26 @@ describe("Suwayomi source lookup helpers", () => {
       .toBe("https://comic.naver.com/webtoon/list?titleId=799837");
   });
 
+  it("understands the owner's webtoons challenge link (canvas path + ep number)", () => {
+    // رابط المالك بعد تطبيع urlPolicy (نطاق m + مسار challenge) — الإضافة تخزن
+    // روابطها على www + canvas، فتوحيد المسار هو ما يجعل مطابقة العمل تُصيب.
+    const chapter = "https://m.webtoons.com/en/challenge/falling-in-love-with-my-ex-fiances-grandfather/ep-133/viewer?title_no=855089&episode_no=204";
+    expect(mangaUrlFromChapterUrl(chapter)).toBe(
+      "https://m.webtoons.com/en/canvas/falling-in-love-with-my-ex-fiances-grandfather/list?title_no=855089"
+    );
+    expect(chapterNumberFromUrl(chapter)).toBe(133);
+    // المسار القياسي canvas يبقى كما هو بلا أي تحويل
+    expect(mangaUrlFromChapterUrl(
+      "https://www.webtoons.com/en/canvas/falling-in-love-with-my-ex-fiances-grandfather/ep-1/viewer?title_no=855089&episode_no=72"
+    )).toBe("https://www.webtoons.com/en/canvas/falling-in-love-with-my-ex-fiances-grandfather/list?title_no=855089");
+  });
+
+  it("understands the owner's mobile Naver link (m.host, noise params, no= param)", () => {
+    const chapter = "https://m.comic.naver.com/webtoon/detail?titleId=854757&no=1&week=tue&listSortOrder=DESC&listPage=1";
+    expect(mangaUrlFromChapterUrl(chapter)).toBe("https://comic.naver.com/webtoon/list?titleId=854757");
+    expect(chapterNumberFromUrl(chapter)).toBe(1);
+  });
+
 
   it("derives the manga URL and chapter number from comix.to style links (user's failing case)", () => {
     const chapter = "https://comix.to/title/501vk-the-top-1-student-hides-her-regression/11302227-chapter-6";

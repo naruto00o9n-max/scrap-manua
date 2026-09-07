@@ -408,4 +408,20 @@ describe("probeDirectChapterPage — السبب المرصود عند عدم ا�
     expect(probe.chapter?.mangaTitle).toBe("Some Series");
     expect(probe.chapter?.chapterName).toBe("Ep. 1");
   });
+
+  it("يعيد المحاولة على نطاق www حين تستجيب m.webtoons.com بلا صور", async () => {
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      const body = url.startsWith("https://www.webtoons.com/")
+        ? '<html><head><title>Ep. 2 | Some Series</title></head><body><img class="_images" data-url="https://webtoon-phinf.pstatic.net/9.jpg"></body></html>'
+        : "<html><body>استجابة محمية بلا صور</body></html>";
+      return new Response(body, { status: 200, headers: htmlHeaders });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const probe = await probeDirectChapterPage("https://m.webtoons.com/en/canvas/some-series/ep-2/viewer?title_no=1&episode_no=2");
+    expect(probe.mode).toBe("free");
+    expect(probe.chapter?.pages).toEqual(["https://webtoon-phinf.pstatic.net/9.jpg"]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[1]?.[0]).startsWith("https://www.webtoons.com/")).toBe(true);
+  });
 });

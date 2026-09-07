@@ -570,9 +570,23 @@ export async function probeDirectChapterPage(chapterUrl: string): Promise<Direct
       return { mode: "unknown", chapter: null, reason: "صفحة GigaViewer وصلت بلا بنية صفحات ولا علامة قفل" };
     }
     if (isWebtoonsHost(host)) {
-      const pages = extractWebtoonsPages(html);
+      let pages = extractWebtoonsPages(html);
+      let pageTitle = extractPageTitle(html);
+      // m.webtoons.com قد يستجيب لبعض الشبكات باستجابة محمية/فارغة حيث يستجيب
+      // www.webtoons.com طبيعيًا — إعادة محاولة واحدة على نطاق www قبل عدم الحسم.
+      if (!pages.length && host === "m.webtoons.com") {
+        try {
+          const wwwUrl = new URL(chapterUrl);
+          wwwUrl.hostname = "www.webtoons.com";
+          const wwwHtml = await fetchChapterHtml(wwwUrl.toString(), WEBTOONS_AGE_COOKIE);
+          pages = extractWebtoonsPages(wwwHtml);
+          if (pages.length) pageTitle = extractPageTitle(wwwHtml);
+        } catch {
+          /* إعادة المحاولة فشلت — تبقى الحالة كما عُينت أولًا */
+        }
+      }
       if (pages.length) {
-        const { mangaTitle, chapterName } = parseWebtoonsTitle(extractPageTitle(html));
+        const { mangaTitle, chapterName } = parseWebtoonsTitle(pageTitle);
         return {
           mode: "free",
           chapter: {
