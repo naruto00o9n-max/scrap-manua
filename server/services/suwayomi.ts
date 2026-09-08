@@ -261,6 +261,52 @@ export class SuwayomiError extends Error {
   }
 }
 
+/**
+ * أعطال عابرة تستحق إعادة محاولة: برودة الخادم بعد خمول (Railway يوقف
+ * الخدمات الخاملة)، مهلة الشبكة، أخطاء DNS/اتصال، أو 5xx/429 عابرة.
+ * الأخطاء الحتمية (سياسة الروابط، رفض الإضافة لاستعلام) لا تطابق النمط.
+ */
+const TRANSIENT_FAILURE_PATTERN =
+  /تعذر الوصول|استجاب خادم السحب دون بيانات|timeout|timed ?out|fetch failed|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ETIMEDOUT|socket hang up|network|\b(?:429|5\d{2})\b/i;
+
+export function isTransientSuwayomiFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const message = error.message;
+  // كود حالة صريح 4xx (عدا 429) يعني خطأ حتميًا — مثل «تعذر الوصول إلى
+  // خادم السحب (404)» لعنوان خاطئ: إعادة المحاولة لن تغيّره
+  const statusMatch = message.match(/\((\d{3})\)/);
+  if (statusMatch) {
+    const status = Number(statusMatch[1]);
+    if (status >= 400 && status < 500 && status !== 429) return false;
+  }
+  return TRANSIENT_FAILURE_PATTERN.test(message);
+}
+
+/**
+ * يعيد محاولة العمليات العابرة الفشل بمهلات قصيرة بين المحاولات — يجعل الطلب
+ * الأول بعد خمول الخادم ينجح بدل رسالة فشل زائفة، والأخطاء غير العابرة تُرمى
+ * فورًا بلا إعادة.
+ */
+export async function withTransientRetry<T>(
+  operation: () => Promise<T>,
+  options: { attempts?: number; backoffMs?: number[]; isTransient?: (error: unknown) => boolean } = {},
+): Promise<T> {
+  const attempts = Math.max(1, options.attempts ?? 3);
+  const backoff = options.backoffMs ?? [2_000, 6_000];
+  const isTransient = options.isTransient ?? isTransientSuwayomiFailure;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts || !isTransient(error)) throw error;
+      await new Promise(resolve => setTimeout(resolve, backoff[attempt - 1] ?? backoff[backoff.length - 1]));
+    }
+  }
+  throw lastError;
+}
+
 export class SuwayomiClient {
   private readonly endpoint: string;
 
@@ -300,9 +346,13 @@ export class SuwayomiClient {
     await this.request<{ __typename: string }>("{ __typename }");
   }
 
-  async listInstalledSources(): Promise<SuwayomiSource[]> {
+  async listInstalledSources(timeoutMs = 30_000): Promise<SuwayomiSource[]> {
+    // مهلة أطول من الافتراضية: أول نداء بعد خمول خادم Railway يحتاج ثواني
+    // إضافية ليستيقظ الخادم، وفشلها كان سبب «تعذر قبول الرابط» الزائف.
     const result = await this.request<{ sources: { nodes: SuwayomiSource[] } }>(
       "{ sources(first: 100) { nodes { id name displayName homeUrl lang extension { name pkgName isInstalled } } } }",
+      undefined,
+      timeoutMs,
     );
     return result.sources.nodes.filter(source => source.extension?.isInstalled === true);
   }

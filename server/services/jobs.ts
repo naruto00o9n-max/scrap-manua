@@ -7,7 +7,7 @@ import {
 import { validateChapterUrl, type ValidatedChapterUrl } from "./urlPolicy";
 import { ENV } from "../_core/env";
 import { getUsableSuwayomiToken } from "./settings";
-import { SuwayomiClient } from "./suwayomi";
+import { SuwayomiClient, withTransientRetry } from "./suwayomi";
 import { isDirectSourceSupported } from "./directSource";
 import { UrlPolicyError } from "./urlPolicy";
 
@@ -22,6 +22,16 @@ export type ChapterRequest = {
 };
 
 export async function queueAuthorizedChapter(request: ChapterRequest) {
+  // الطلب الأول بعد خمول الخدمات كان يفشل برسالة زائفة (Suwayomi/DB يفيقان
+  // خلال ثواني) — ثلاث محاولات مع مهلات قصيرة تحسم البرودة، وسياسة الروابط
+  // (UrlPolicyError) حتمية فتُرمى من أول محاولة بلا إعادة.
+  return withTransientRetry(() => queueAuthorizedChapterOnce(request), {
+    attempts: 3,
+    backoffMs: [2_500, 7_000],
+  });
+}
+
+async function queueAuthorizedChapterOnce(request: ChapterRequest) {
   const sources = await getActiveSources();
   const validated: ValidatedChapterUrl = validateChapterUrl(request.chapterUrl, sources);
   const source = sources.find(item => item.id === validated.sourceId);

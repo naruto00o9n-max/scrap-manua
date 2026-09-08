@@ -62,7 +62,15 @@ function now() {
 
 async function getMongoClient(): Promise<MongoClient | null> {
   if (!ENV.mongodbUri) return null;
-  clientPromise ??= new MongoClient(ENV.mongodbUri).connect();
+  clientPromise ??= new MongoClient(ENV.mongodbUri, {
+    // إعادة المحاولة على مستوى المُشغّل + استبدال السوكيت الخامل قبل أن يقطعه
+    // Atlas — أول عملية بعد فترة خمول كانت تفشل بسوكيت ميت ثم تنجح في الثانية.
+    retryReads: true,
+    retryWrites: true,
+    maxIdleTimeMS: 240_000,
+    serverSelectionTimeoutMS: 30_000,
+    connectTimeoutMS: 20_000,
+  }).connect();
   try {
     return await clientPromise;
   } catch (error) {
