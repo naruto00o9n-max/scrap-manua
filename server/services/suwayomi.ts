@@ -208,6 +208,29 @@ export function sourceSearchQueryFromChapterUrl(chapterUrl: string): string | nu
 }
 
 /**
+ * استعلام بحث بصيغة رابط لعمل webtoons — إضافة webtoons تقبل رابط عمل
+ * www.webtoons.com كاستعلام بحث وتستخرج منه title_no ثم تجلب العمل مباشرة،
+ * ما يتجاوز بحث الموقع النصي الضبابي الذي يفشل مع كثير من أعمال canvas
+ * (بحث الموقع لا يعيد العمل الأصلي أصلًا بينما الرابط يحسمه فورًا).
+ * تعيد null لغير روابط webtoons أو الروابط بلا title_no.
+ */
+export function urlSearchQueryFromMangaUrl(mangaUrl: string): string | null {
+  try {
+    const parsed = new URL(mangaUrl);
+    const host = parsed.hostname.replace(/^www\./, "");
+    if (host !== "m.webtoons.com" && host !== "webtoons.com") return null;
+    const titleNo = parsed.searchParams.get("title_no");
+    if (!titleNo) return null;
+    parsed.protocol = "https:";
+    parsed.hostname = "www.webtoons.com";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+/**
  * صيغ بحث بديلة لاستعلام العمل: الاستعلام الأساسي ثم نفسه دون أول كلمة إذا
  * كانت تبدو معرّف موقع قصيرًا (مثل «501vk the top …» في comix.to) — تكرار
  * المعرّف في نص البحث يُفشل البحث عند بعض المواقع حتى لو كان العمل موجودًا.
@@ -388,7 +411,20 @@ export class SuwayomiClient {
     const queries = searchQueryVariants(derivedQuery);
     let manga: SuwayomiManga | undefined;
     let searchedAny = false;
+    // البحث برابط العمل أولًا عند الإمكان (webtoons) — الإضافة تحلل الرابط
+    // إلى معرّف العمل مباشرة، وهذا أضمن من البحث النصي الذي يفشل مع أعمال
+    // canvas؛ الإضافات غير الداعمة قد ترفض الرابط فيُستمر في البحث النصي.
+    const urlSearchQuery = mangaUrl ? urlSearchQueryFromMangaUrl(mangaUrl) : null;
+    if (urlSearchQuery) {
+      try {
+        const viaUrl = await this.searchSourceManga(sourceId, urlSearchQuery, 20_000);
+        manga = matchManga(viaUrl, queries);
+      } catch {
+        // إضافة لا تقبل الروابط كاستعلام بحث — نتابع بالمسار النصي العادي
+      }
+    }
     for (const query of queries) {
+      if (manga) break;
       const directManga = mangaUrl ? await this.findMangaByUrl(mangaUrl) : null;
       if (directManga) {
         manga = directManga;
@@ -412,6 +448,16 @@ export class SuwayomiClient {
         if (manga) break;
       }
       if (manga) break;
+    }
+    if (!manga && urlSearchQuery) {
+      // البحث النصي فشل والمطابقة بالرابط لم تنجح قبل قليل — إعادة المحاولة
+      // بالرابط بعد فهرسة الخادم لنتائج أولية قد تحسمها عند تقلّب استجابة الموقع.
+      try {
+        const retryViaUrl = await this.searchSourceManga(sourceId, urlSearchQuery, 20_000);
+        manga = matchManga(retryViaUrl, queries);
+      } catch {
+        // تجاهل — رسالة الخطأ أدناه توضح ما جرى
+      }
     }
     if (!manga) {
       if (!searchedAny) {
