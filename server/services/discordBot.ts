@@ -60,7 +60,7 @@ import {
   type SearchMatch,
 } from "./sourceSearch";
 import { hostnameFromHomeUrl, syncSourcesFromSuwayomi } from "./sourceSync";
-import { SuwayomiClient } from "./suwayomi";
+import { SuwayomiClient, withTransientRetry } from "./suwayomi";
 import { UrlPolicyError } from "./urlPolicy";
 import { getUsableSuwayomiToken } from "./settings";
 import { imageOutputDescription, resolveMergeDimensions, DEFAULT_CHAPTER_MERGE_SETTINGS, DEFAULT_MERGE_HEIGHT_CAP, MERGE_HEIGHT_CAP_MAX, MERGE_HEIGHT_CAP_MIN, MERGE_WIDTH_MAX, MERGE_WIDTH_MIN, type ChapterMergeSettings, type ImageOutputConfig, type MergeDimensions } from "./imageMerging";
@@ -2248,7 +2248,9 @@ export type SearchSession = {
   matchRealUrl?: string | null;
 };
 
-const SEARCH_SESSION_TTL_MS = 30 * 60 * 1000;
+// طلب المالك: نتائج البحث لا تنتهي عمليًا (أسبوع كامل) — القائمة والانتقاء
+// يبقيان صالحين بعد يوم أو أكثر، والانتهاء الوحيد هو إعادة تشغيل العملية.
+const SEARCH_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const activeSearchSessions = new Map<string, SearchSession>();
 
 function scheduleSearchSessionCleanup(searchId: string) {
@@ -2446,7 +2448,9 @@ async function replySearch(interaction: any) {
       ENV.suwayomiBaseUrl,
       getUsableSuwayomiToken()
     );
-    const installed = await suwayomi.listInstalledSources();
+    // إعادة محاولة عابرة: أول نداء بعد خمول خادم Suwayomi كان يقتل البحث
+    // برسالة فشل زائفة بينما الثانية تنجح — المحاولات هنا تحسم البرودة ذاتها.
+    const installed = await withTransientRetry(() => suwayomi.listInstalledSources());
     // المواقع التي عطّلها المالك (أو حذفها) لا تدخل البحث — قفل المالك يعلو
     // على المزامنة التلقائية.
     const [managedRows, blocked] = await Promise.all([
@@ -2488,11 +2492,15 @@ async function replySearch(interaction: any) {
     );
   } catch (error) {
     console.warn("[Discord] /بحث failed", error);
+    const reason =
+      error instanceof Error && error.message
+        ? `${error.message} — فشلت ثلاث محاولات متتالية، الخادم متعثر الآن غالبًا؛ أعد المحاولة بعد لحظات.`
+        : "تعذر تنفيذ البحث الآن — أعد المحاولة بعد قليل.";
     await interaction
       .editReply(
         searchCardPayload({
           state: "failed",
-          detail: "تعذر تنفيذ البحث الآن — أعد المحاولة بعد قليل.",
+          detail: reason,
         })
       )
       .catch(() => undefined);
@@ -2604,23 +2612,26 @@ async function runSearchFlow(
   await target.show(view.notice, view.select, view.nav);
 }
 
-async function isSearchSessionAllowed(session: SearchSession, interaction: any): Promise<boolean> {
-  if (!session) return false;
-  return isOwner(interaction.user.id) || session.requesterId === interaction.user.id;
+/**
+ * طلب المالك: نتائج البحث يتفاعل معها أي شخص — لا قيد لطالبها وحده.
+ * الجلسة المجهولة فقط (بعد إعادة تشغيل الخادم) غير قابلة للتفاعل.
+ */
+function isSearchSessionAllowed(session: SearchSession | undefined): session is SearchSession {
+  return Boolean(session);
 }
 
 async function handleSearchPick(interaction: any) {
   const searchId = interaction.customId.split(":")[2];
   const session = activeSearchSessions.get(searchId);
-  if (!session || !(await isSearchSessionAllowed(session, interaction))) {
+  if (!isSearchSessionAllowed(session)) {
     await interaction
-      .reply({ content: "انتهت صلاحية هذه النتائج أو أنها لطالبها فقط — نفّذ /بحث من جديد.", flags: MessageFlags.Ephemeral })
+      .reply({ content: "لم أعثر على نتائج هذا البحث — ربما أعيد تشغيل الخادم منذ طلبها. نفّذ /بحث من جديد.", flags: MessageFlags.Ephemeral })
       .catch(() => undefined);
     return;
   }
   await interaction.deferUpdate();
   const index = Number(interaction.values?.[0]);
-  const match = Number.isInteger(index) ? session.matches[index] : undefined;
+  const match = Number.isInteger(index) ? session!.matches[index] : undefined;
   if (!match) return;
   try {
     const searcher = new SuwayomiClient(
@@ -2692,9 +2703,9 @@ async function handleSearchPick(interaction: any) {
 async function handleSearchBackButton(interaction: any) {
   const searchId = interaction.customId.split(":")[2];
   const session = activeSearchSessions.get(searchId);
-  if (!session || !(await isSearchSessionAllowed(session, interaction))) {
+  if (!isSearchSessionAllowed(session)) {
     await interaction
-      .reply({ content: "انتهت صلاحية هذه القائمة أو أنها لطالبها فقط — نفّذ /بحث من جديد.", flags: MessageFlags.Ephemeral })
+      .reply({ content: "لم أعثر على نتائج هذا البحث — ربما أعيد تشغيل الخادم منذ طلبها. نفّذ /بحث من جديد.", flags: MessageFlags.Ephemeral })
       .catch(() => undefined);
     return;
   }
@@ -2710,9 +2721,9 @@ async function handleSearchBackButton(interaction: any) {
 async function handleSearchChapterPick(interaction: any) {
   const searchId = interaction.customId.split(":")[2];
   const session = activeSearchSessions.get(searchId);
-  if (!session || !(await isSearchSessionAllowed(session, interaction))) {
+  if (!isSearchSessionAllowed(session)) {
     await interaction
-      .reply({ content: "انتهت صلاحية هذه القائمة أو أنها لطالبها فقط — نفّذ /بحث من جديد.", flags: MessageFlags.Ephemeral })
+      .reply({ content: "لم أعثر على نتائج هذا البحث — ربما أعيد تشغيل الخادم منذ طلبها. نفّذ /بحث من جديد.", flags: MessageFlags.Ephemeral })
       .catch(() => undefined);
     return;
   }
@@ -2797,9 +2808,9 @@ async function handleSearchSelectMenu(interaction: any) {
 async function handleSearchPageButton(interaction: any) {
   const [, kind, searchId, direction] = interaction.customId.split(":");
   const session = activeSearchSessions.get(searchId);
-  if (!session || !(await isSearchSessionAllowed(session, interaction))) {
+  if (!isSearchSessionAllowed(session)) {
     await interaction
-      .reply({ content: "انتهت صلاحية هذه القائمة أو أنها لطالبها فقط — نفّذ /بحث من جديد.", flags: MessageFlags.Ephemeral })
+      .reply({ content: "لم أعثر على نتائج هذا البحث — ربما أعيد تشغيل الخادم منذ طلبها. نفّذ /بحث من جديد.", flags: MessageFlags.Ephemeral })
       .catch(() => undefined);
     return;
   }
@@ -3755,13 +3766,16 @@ async function replyChapter(interaction: any) {
       guildId: interaction.guildId ?? undefined,
     });
   } catch (error) {
-    const detail =
+    // إخفاء السبب الفعلي خلف «تحقق من الرابط» كان يربك صاحب الطلب — نعرض
+    // الرسالة الحقيقية (مهلة/شبكة/خادم) مع السجل الكامل للتشخيص.
+    console.error("[Discord] /فصل start failed", error);
+    const reason =
       error instanceof UrlPolicyError
         ? error.message
-        : "تعذر قبول الرابط، تحقق منه ثم أعد المحاولة.";
+        : `${error instanceof Error && error.message ? error.message : "خطأ غير متوقع"} — فشلت ثلاث محاولات متتالية، الخادم متعثر الآن غالبًا؛ أعد المحاولة بعد لحظات.`;
     await interaction
       .editReply(
-        cardPayload({ status: "failed", title: "❌ تعذر بدء السحب", detail })
+        cardPayload({ status: "failed", title: "❌ تعذر بدء السحب", detail: reason })
       )
       .catch(() => undefined);
   }
@@ -3985,7 +3999,9 @@ export async function startDiscordBot() {
       });
     } catch (error) {
       const detail =
-        error instanceof UrlPolicyError ? error.message : "تعذر قبول الرابط.";
+        error instanceof UrlPolicyError
+          ? error.message
+          : `${error instanceof Error && error.message ? error.message : "خطأ غير متوقع"} — عطل مؤقت غالبًا، أعد المحاولة.`;
       await card
         .show({ status: "failed", title: "❌ تعذر بدء السحب", detail })
         .catch(() => undefined);
