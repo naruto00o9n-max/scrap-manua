@@ -5,6 +5,7 @@ import {
   resolveSuwayomiPageUrl,
   searchQueryVariants,
   sourceSearchQueryFromChapterUrl,
+  urlSearchQueryFromMangaUrl,
 } from "./suwayomi";
 
 describe("Suwayomi source lookup helpers", () => {
@@ -41,6 +42,21 @@ describe("Suwayomi source lookup helpers", () => {
     const chapter = "https://m.comic.naver.com/webtoon/detail?titleId=854757&no=1&week=tue&listSortOrder=DESC&listPage=1";
     expect(mangaUrlFromChapterUrl(chapter)).toBe("https://comic.naver.com/webtoon/list?titleId=854757");
     expect(chapterNumberFromUrl(chapter)).toBe(1);
+  });
+
+  it("builds the extension URL-search query from webtoons manga URLs", () => {
+    // رابط m.webtoons يُعاد كتابته إلى www لأن الإضافة ترفض غيره
+    expect(urlSearchQueryFromMangaUrl(
+      "https://m.webtoons.com/en/canvas/falling-in-love-with-my-ex-fiances-grandfather/list?title_no=855089"
+    )).toBe("https://www.webtoons.com/en/canvas/falling-in-love-with-my-ex-fiances-grandfather/list?title_no=855089");
+    // رابط www يبقى كما هو
+    expect(urlSearchQueryFromMangaUrl(
+      "https://www.webtoons.com/en/drama/some-original/list?title_no=95"
+    )).toBe("https://www.webtoons.com/en/drama/some-original/list?title_no=95");
+    // بلا title_no أو من نطاق آخر → لا استعلام رابط
+    expect(urlSearchQueryFromMangaUrl("https://www.webtoons.com/en/canvas/slug/list")).toBeNull();
+    expect(urlSearchQueryFromMangaUrl("https://comic.naver.com/webtoon/list?titleId=799837")).toBeNull();
+    expect(urlSearchQueryFromMangaUrl("not a url")).toBeNull();
   });
 
 
