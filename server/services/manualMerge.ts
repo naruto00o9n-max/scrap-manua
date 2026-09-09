@@ -11,7 +11,9 @@ import {
   GoogleDriveError,
   sharingPolicyFromMode,
   type DriveSharingPolicy,
+  type DriveFileMeta,
 } from "./googleDrive";
+import { downloadPublicDriveFile, probePublicDriveItem } from "./drivePublic";
 import {
   openLocalImageMergeSession,
   type ImageOutputConfig,
@@ -123,7 +125,7 @@ export async function downloadHttpsToPath(url: string, targetPath: string, maxBy
 
 export type ManualMergeSource =
   | { kind: "zip"; zipPath: string; title: string }
-  | { kind: "drive"; id: string };
+  | { kind: "drive"; id: string; linkKind: "folder" | "file" };
 
 export type ManualMergePhase = "fetch" | "merge" | "upload";
 
@@ -215,58 +217,39 @@ export async function runManualMerge(
     } else {
       // عنصر Drive: مجلد صور أو ملف أرشيف ZIP/CBZ.
       checkCancelled();
-      const meta = await drive.getFileMeta(source.id);
-      const isFolder = meta.mimeType === "application/vnd.google-apps.folder";
-      if (isFolder) {
-        title = titleFromName(meta.name);
-        const files = await drive.listFolderFiles(source.id);
-        const images = files.filter(
-          file =>
-            file.mimeType.toLowerCase().startsWith("image/") ||
-            IMAGE_EXTENSIONS.test(file.name)
-        );
-        if (!images.length) {
-          throw new GoogleDriveError(
-            "مجلد Drive لا يحتوي صورًا. ضع صور الفصل مباشرة داخل المجلد ثم أعد المحاولة."
-          );
-        }
-        images.sort((a, b) => naturalCompare(a.name, b.name));
-        const imagesDir = path.join(workDir, "images");
-        await mkdir(imagesDir, { recursive: true });
-        imagePaths = [];
-        for (let index = 0; index < images.length; index += 1) {
-          checkCancelled();
-          const targetPath = path.join(imagesDir, `image-${String(index + 1).padStart(4, "0")}.img`);
-          await drive.downloadFileToPath(images[index]!.id, targetPath, MAX_IMAGE_BYTES);
-          imagePaths.push(targetPath);
-          await emit({ phase: "fetch", done: index + 1, total: images.length });
-        }
+      // المسار الأساسي: حساب Drive المصرّح للبوت.
+      // إن لم يرَ الحساب العنصر (404 — يحدث غالبًا لأن التصريح بنطاق «لكل ملف»
+      // أو لأن المجلد غير مشترك مع حساب البوت) نجرّب القراءة العلنية للرابط
+      // قبل الفشل: مستخدم يرى الرابط يعمل في متصفحه ولن يقبل خطأً يشك في رابطه.
+      let meta: DriveFileMeta | null = null;
+      try {
+        meta = await drive.getFileMeta(source.id);
+      } catch {
+        meta = null;
+      }
+      if (meta) {
+        await runAuthorizedDriveSource(source.id, meta, drive, workDir, {
+          checkCancelled,
+          emit,
+          setTitle: value => {
+            title = value;
+          },
+          setImagePaths: value => {
+            imagePaths = value;
+          },
+        });
       } else {
-        if (!ARCHIVE_EXTENSIONS.test(meta.name)) {
-          throw new GoogleDriveError(
-            "رابط Drive لا يشير إلى مجلد صور ولا إلى ملف ZIP/CBZ. أرسل رابط مجلد يحتوي الصور."
-          );
-        }
-        title = titleFromName(meta.name);
-        if (meta.size && meta.size > MAX_ARCHIVE_BYTES) {
-          throw new GoogleDriveError(
-            `حجم الأرشيف على Drive يتجاوز الحد الآمن (${Math.round(MAX_ARCHIVE_BYTES / (1024 * 1024))}MB).`
-          );
-        }
-        checkCancelled();
-        const zipPath = path.join(workDir, "source-archive.zip");
-        await drive.downloadFileToPath(source.id, zipPath, MAX_ARCHIVE_BYTES);
-        await emit({ phase: "fetch", done: 1, total: 1 });
-        checkCancelled();
-        const extractDir = path.join(workDir, "zip");
-        await extract(zipPath, { dir: extractDir });
-        checkCancelled();
-        imagePaths = await collectImageFiles(extractDir);
-        if (!imagePaths.length) {
-          throw new GoogleDriveError(
-            "لم يُعثر على صور داخل الأرشيف. تأكد أنه يحتوي ملفات JPG/PNG/WEBP مباشرة أو داخل مجلدات."
-          );
-        }
+        await runPublicDriveSource(source, workDir, {
+          checkCancelled,
+          emit,
+          drive,
+          setTitle: value => {
+            title = value;
+          },
+          setImagePaths: value => {
+            imagePaths = value;
+          },
+        });
       }
     }
 
@@ -322,4 +305,148 @@ export async function runManualMerge(
 /** يفحص أن اسم ملف مرفق هو أرشيف مدعوم (ZIP أو CBZ). */
 export function isSupportedArchiveName(name: string | null | undefined): boolean {
   return Boolean(name && ARCHIVE_EXTENSIONS.test(name));
+}
+
+export type ManualMergeDriveHooks = {
+  checkCancelled: () => void;
+  emit: (event: ManualMergeEvent) => Promise<void>;
+  drive: GoogleDriveClient;
+  setTitle: (value: string) => void;
+  setImagePaths: (value: string[]) => void;
+};
+
+/**
+ * مصدر Drive يراه حساب البوت: مجلد صور أو ملف أرشيف — المنطق الأصلي كما هو.
+ */
+async function runAuthorizedDriveSource(
+  id: string,
+  meta: DriveFileMeta,
+  drive: GoogleDriveClient,
+  workDir: string,
+  hooks: Omit<ManualMergeDriveHooks, "drive">
+): Promise<void> {
+  const { checkCancelled, emit, setTitle, setImagePaths } = hooks;
+  const isFolder = meta.mimeType === "application/vnd.google-apps.folder";
+  if (isFolder) {
+    setTitle(titleFromName(meta.name));
+    const files = await drive.listFolderFiles(id);
+    const images = files.filter(
+      file =>
+        file.mimeType.toLowerCase().startsWith("image/") ||
+        IMAGE_EXTENSIONS.test(file.name)
+    );
+    if (!images.length) {
+      throw new GoogleDriveError(
+        "مجلد Drive لا يحتوي صورًا. ضع صور الفصل مباشرة داخل المجلد ثم أعد المحاولة."
+      );
+    }
+    images.sort((a, b) => naturalCompare(a.name, b.name));
+    const imagesDir = path.join(workDir, "images");
+    await mkdir(imagesDir, { recursive: true });
+    const paths: string[] = [];
+    for (let index = 0; index < images.length; index += 1) {
+      checkCancelled();
+      const targetPath = path.join(imagesDir, `image-${String(index + 1).padStart(4, "0")}.img`);
+      await drive.downloadFileToPath(images[index]!.id, targetPath, MAX_IMAGE_BYTES);
+      paths.push(targetPath);
+      await emit({ phase: "fetch", done: index + 1, total: images.length });
+    }
+    setImagePaths(paths);
+  } else {
+    if (!ARCHIVE_EXTENSIONS.test(meta.name)) {
+      throw new GoogleDriveError(
+        "رابط Drive لا يشير إلى مجلد صور ولا إلى ملف ZIP/CBZ. أرسل رابط مجلد يحتوي الصور."
+      );
+    }
+    setTitle(titleFromName(meta.name));
+    if (meta.size && meta.size > MAX_ARCHIVE_BYTES) {
+      throw new GoogleDriveError(
+        `حجم الأرشيف على Drive يتجاوز الحد الآمن (${Math.round(MAX_ARCHIVE_BYTES / (1024 * 1024))}MB).`
+      );
+    }
+    checkCancelled();
+    const zipPath = path.join(workDir, "source-archive.zip");
+    await drive.downloadFileToPath(id, zipPath, MAX_ARCHIVE_BYTES);
+    await emit({ phase: "fetch", done: 1, total: 1 });
+    checkCancelled();
+    const extractDir = path.join(workDir, "zip");
+    await extract(zipPath, { dir: extractDir });
+    checkCancelled();
+    const paths = await collectImageFiles(extractDir);
+    if (!paths.length) {
+      throw new GoogleDriveError(
+        "لم يُعثر على صور داخل الأرشيف. تأكد أنه يحتوي ملفات JPG/PNG/WEBP مباشرة أو داخل مجلدات."
+      );
+    }
+    setImagePaths(paths);
+  }
+}
+
+/**
+ * مصدر Drive لا يراه حساب البوت: قراءة عبر الرابط العلني.
+ * إن لم يكن العنصر علنيًا أصلًا تُرمى رسالة تحدد الحلّين بدقة مع بريد حساب البوت.
+ */
+async function runPublicDriveSource(
+  source: { id: string; linkKind: "folder" | "file" },
+  workDir: string,
+  hooks: ManualMergeDriveHooks
+): Promise<void> {
+  const { checkCancelled, emit, drive, setTitle, setImagePaths } = hooks;
+  const probed = await probePublicDriveItem(source.id, source.linkKind);
+  if (!probed) {
+    const email = await drive.getDriveAccountEmail().catch(() => null);
+    const shareLine = email
+      ? `1) شارك المجلد مع حساب البوت «${email}» بصلاحية «محرر»، أو`
+      : "1) شارك المجلد مع حساب البوت الذي وثّق به بصلاحية «محرر»، أو";
+    throw new GoogleDriveError(
+      "العنصر لا يراه حساب Drive المصرّح للبوت، وهو أيضًا غير متاح عبر رابط عام.\n" +
+        "أحد حلّين يكفي:\n" +
+        `${shareLine}\n` +
+        "2) اضبط مشاركة المجلد على «أي شخص لديه الرابط» وسيتكفل البوت بقراءته تلقائيًا."
+    );
+  }
+  if (probed.kind === "folder") {
+    setTitle(titleFromName(probed.name));
+    const images = probed.files
+      .filter(file => IMAGE_EXTENSIONS.test(file.name))
+      .sort((a, b) => naturalCompare(a.name, b.name));
+    if (!images.length) {
+      throw new GoogleDriveError(
+        "مجلد Drive لا يحتوي صورًا. ضع صور الفصل مباشرة داخل المجلد ثم أعد المحاولة."
+      );
+    }
+    const imagesDir = path.join(workDir, "images");
+    await mkdir(imagesDir, { recursive: true });
+    const paths: string[] = [];
+    for (let index = 0; index < images.length; index += 1) {
+      checkCancelled();
+      const targetPath = path.join(imagesDir, `image-${String(index + 1).padStart(4, "0")}.img`);
+      await downloadPublicDriveFile(images[index]!.id, targetPath, MAX_IMAGE_BYTES);
+      paths.push(targetPath);
+      await emit({ phase: "fetch", done: index + 1, total: images.length });
+    }
+    setImagePaths(paths);
+  } else {
+    if (!ARCHIVE_EXTENSIONS.test(probed.name)) {
+      throw new GoogleDriveError(
+        "رابط Drive لا يشير إلى مجلد صور ولا إلى ملف ZIP/CBZ. أرسل رابط مجلد يحتوي الصور."
+      );
+    }
+    setTitle(titleFromName(probed.name));
+    checkCancelled();
+    const zipPath = path.join(workDir, "source-archive.zip");
+    await downloadPublicDriveFile(probed.id, zipPath, MAX_ARCHIVE_BYTES);
+    await emit({ phase: "fetch", done: 1, total: 1 });
+    checkCancelled();
+    const extractDir = path.join(workDir, "zip");
+    await extract(zipPath, { dir: extractDir });
+    checkCancelled();
+    const paths = await collectImageFiles(extractDir);
+    if (!paths.length) {
+      throw new GoogleDriveError(
+        "لم يُعثر على صور داخل الأرشيف. تأكد أنه يحتوي ملفات JPG/PNG/WEBP مباشرة أو داخل مجلدات."
+      );
+    }
+    setImagePaths(paths);
+  }
 }
