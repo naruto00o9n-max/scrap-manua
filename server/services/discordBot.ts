@@ -1148,7 +1148,7 @@ function createMergeProgressPoster(target: MergeCardTarget) {
 
 type MergeRequest =
   | { type: "zip"; url: string; name: string; zipPath?: string }
-  | { type: "drive"; id: string };
+  | { type: "drive"; id: string; linkKind: "folder" | "file" };
 
 /** يشغّل عملية دمج كاملة أمام بطاقة حية واحدة من أول فحص إلى رابط النتيجة. */
 async function startManualMerge(
@@ -1191,7 +1191,7 @@ async function startManualMerge(
     const result = await runManualMerge(
       effectiveRequest.type === "zip"
         ? { kind: "zip", zipPath: effectiveRequest.zipPath!, title: effectiveRequest.name }
-        : { kind: "drive", id: effectiveRequest.id },
+        : { kind: "drive", id: effectiveRequest.id, linkKind: effectiveRequest.linkKind },
       {
         onEvent: async event => {
           if (event.phase === "fetch") {
@@ -1364,7 +1364,7 @@ async function replyMerge(interaction: any) {
     }
     await startManualMerge(
       mergeInteractionCard(interaction),
-      { type: "drive", id: link.id },
+      { type: "drive", id: link.id, linkKind: link.kind },
       requester,
       guildOutput,
       guildMergeDimensions
@@ -3966,7 +3966,7 @@ export async function startDiscordBot() {
           } else {
             await startManualMerge(
               card,
-              { type: "drive", id: driveLink!.id },
+              { type: "drive", id: driveLink!.id, linkKind: driveLink!.kind },
               requester,
               guildOutput,
               guildMergeDimensions
