@@ -27,11 +27,10 @@ function pageDownloadReferer(parsed: URL): string | null {
   }
   return null;
 }
-// سقف ارتفاع الصورة المدمجة الافتراضي: عتبة مستهدفة ~14000px مع هامش مرونة
-// يسمح بإغلاق المجموعة عندما ترفعها الصفحة التالية قليلًا فوق العتبة
-// (مثل 5000+5000+4316 = 14316 أو 5000+5000+4925 = 14925) بدل ترك صفحات
-// صغيرة مستقلة — طلب المستخدم: «دمج اثنين أو ثلاثة ليصل العتبة».
-// أصبح هذا السقف قابلًا للتخصيص لكل سيرفر من /الاعدادات (قسم الدمج).
+// سقف ارتفاع الصورة المدمجة: الخوارزمية توزّع مجموع ارتفاع الصفحات بالتساوي
+// على أقل عدد ممكن من الصور، فيصبح ارتفاع كل ناتج ≈ المجموع ÷ العدد (داخل السقف)
+// بدل تكدّس أطوال متباعدة. أصبح هذا السقف قابلًا للتخصيص لكل سيرفر من /الاعدادات
+// (قسم الدمج).
 export const DEFAULT_MERGE_HEIGHT_CAP = 15000;
 /** مدى سقف الارتفاع المقبول — خارج المدى تُرجع القيمة للحد الأقرب. */
 export const MERGE_HEIGHT_CAP_MIN = 2000;
@@ -403,138 +402,129 @@ async function downloadPagesToTemp(
 }
 
 /**
- * التجميع الاحترافي المرن: لا قص لأي صفحة ولا حشو أبيض ولا إعادة ترتيب —
- * العرض يُوحد بالتحجير قبل التجميع، ثم تُقسم صفحات الفصل إلى أقل عدد ممكن
- * من الصور بحيث لا يتجاوز ارتفاع أي صورة سقف المرونة (15000px افتراضيًا
- * وقابلًا للتخصيص من إعدادات السيرفر)، وبين التوزيعات ذات العدد الأدنى
- * يُختار التوزيع الأكثر تساويًا في الارتفاع — فتخرج صور الفصل متقاربة
- * الطول حول العتبة بدل «تارة كبير وتارة صغير»، وتُدمج الصفحات الصغيرة
- * اثنين أو ثلاثة أو أكثر حتى تبلغ العتبة كما طلب المستخدم.
- *
- * الصفحة الأطول من سقف المرونة تبقى مستقلة كاملة (القص ممنوع إطلاقًا)،
- * وهي حاجز يقسم الفصل إلى نافذات متصلة تُوازن كل واحدة على حدة.
+ * شريحة من صفحة داخل صورة مدمجة: من أي صفحة، ومن أي ارتفاع داخلها، وبأي سماكة.
+ * الصفحة الكاملة = شريحة واحدة top:0 بطول الصفحة كاملًا.
  */
-function groupPageIndexes(
-  dimensions: Array<{ height?: number }>,
-  heightCap: number = DEFAULT_MERGE_HEIGHT_CAP
-): number[][] {
-  const heights = dimensions.map((item, index) => {
-    const height = item?.height ?? 0;
-    if (!height) throw new Error(`تعذر قراءة ارتفاع الصفحة ${index + 1}.`);
-    return height;
-  });
-
-  const groups: number[][] = [];
-  let segmentStart = 0;
-  const flushSegment = (endExclusive: number) => {
-    if (endExclusive > segmentStart) {
-      groups.push(...partitionSegmentEvenly(heights, segmentStart, endExclusive, heightCap));
-    }
-    segmentStart = endExclusive;
-  };
-  for (let index = 0; index < heights.length; index += 1) {
-    if (heights[index]! > heightCap) {
-      flushSegment(index);
-      groups.push([index]);
-      segmentStart = index + 1;
-    }
-  }
-  flushSegment(heights.length);
-  return groups;
-}
+export type MergeSlice = { pageIndex: number; top: number; height: number };
 
 /**
- * يقسم نافذة متصلة من الصفحات (كل ارتفاعاتها داخل سقف المرونة) إلى أقل عدد
- * ممكن من المجموعات المتصلة، ثم يوازن ارتفاعات المجموعات: العدد الأدنى
- * يُحسب بتعبئة جشعة حتى السقف (مثالية لتقسيم تسلسل متصل)، وبين التوزيعات
- * ذات العدد الأدنى يُختار عبر برمجة ديناميكية التوزيع الذي يقلل مجموع
- * مربعات انحراف ارتفاع كل مجموعة عن الارتفاع المثالي (مجموع النافذة ÷
- * عددها) — أي التوزيع الأكثر تساويًا.
+ * التجميع الاحترافي متساوي الارتفاع (طلب المالك: «جميع الصور بارتفاع واحد
+ * أو متقارب — يجب قص ودمج لترتيب الصور»):
+ *
+ * 1. مجموع ارتفاع الصفحات T ≤ السقف؟ صورة واحدة بلا أي قص (سلوك الفصول الصغيرة).
+ * 2. وإلا العدد الأدنى للصور N = ⌈T ÷ السقف⌉ والارتفاع المثالي = T ÷ N —
+ *    فتخرج كل الصور بارتفاع واحد فعليًا بدل أطوال متباعدة.
+ * 3. نقاط القص عند حدود المثالي، مع انزلاق كل نقطة إلى أقرب حد صفحة داخل
+ *    هامش صغير (±2% من المثالي، بحدود 120–500px) لتفادي شرائح الضجير —
+ *    فلا يُقطع صفحتان متجاورتان لفرق بكسلات تافه، ويبقى الارتفاع متقاربًا.
+ * 4. إن خال الانزلاق السقف (حدث فقط عندما يكون المثالي ملاصقًا للسقف)
+ *    تعود كل النقاط إلى القيم المثالية — السقف خط أحمر لا يُخترق.
+ *
+ * القص نفسه استخراج بكسل-دقيق (extract) بلا أي إعادة عيّنة — لا يمس الجودة،
+ * والقراءة تسلسلية بترتيب الصفحات الأصلي فلا يختل ترتيب القصة.
  */
-function partitionSegmentEvenly(
-  heights: number[],
-  start: number,
-  end: number,
-  heightCap: number = DEFAULT_MERGE_HEIGHT_CAP
-): number[][] {
-  const length = end - start;
-  const segment = heights.slice(start, end);
-  const total = segment.reduce((sum, height) => sum + height, 0);
+export function planUniformMergeGroups(heights: number[], heightCap: number): MergeSlice[][] {
+  const wholePageSlices = (): MergeSlice[][] => [
+    heights.map((height, pageIndex) => ({ pageIndex, top: 0, height })),
+  ];
 
-  // العدد الأدنى للمجموعات: تعبئة جشعة حتى سقف المرونة.
-  let minGroups = 1;
-  let accumulated = 0;
-  for (const height of segment) {
-    if (accumulated > 0 && accumulated + height > heightCap) {
-      minGroups += 1;
-      accumulated = 0;
-    }
-    accumulated += height;
-  }
-  if (minGroups === 1) {
-    return [Array.from({ length }, (_, offset) => start + offset)];
-  }
+  const total = heights.reduce((sum, height) => sum + height, 0);
+  if (total <= heightCap) return wholePageSlices();
 
-  const ideal = total / minGroups;
-  const prefix: number[] = [0];
-  for (const height of segment) prefix.push(prefix[prefix.length - 1]! + height);
-  const groupSum = (from: number, to: number) => prefix[to]! - prefix[from]!;
+  const groupCount = Math.ceil(total / heightCap);
+  const ideal = total / groupCount;
+  const snapTolerance = Math.min(500, Math.max(120, Math.round(ideal * 0.02)));
 
-  // bestCost[g][i]: أقل تكلفة لتقسيم أول i صفحة إلى g مجموعة، وchoice[g][i]:
-  // عدد الصفحات قبل المجموعة الأخيرة في التوزيع الأمثل.
-  const infinite = Number.POSITIVE_INFINITY;
-  const bestCost: number[][] = Array.from({ length: minGroups + 1 }, () => new Array<number>(length + 1).fill(infinite));
-  const choice: number[][] = Array.from({ length: minGroups + 1 }, () => new Array<number>(length + 1).fill(-1));
-  bestCost[0]![0] = 0;
-  for (let groupsUsed = 1; groupsUsed <= minGroups; groupsUsed += 1) {
-    for (let pages = groupsUsed; pages <= length; pages += 1) {
-      // نفحص بدايات المجموعة الأخيرة من الأكبر إلى الأصغر، وعند تعادل
-      // التكلفة يفوز التوزيع الذي يجعل المجموعات السابقة أكثر امتلاءً —
-      // نفس روح التعبئة الجشعة: الصور الأولى ممتلئة أولًا.
-      for (let previous = pages - 1; previous >= groupsUsed - 1; previous -= 1) {
-        if (bestCost[groupsUsed - 1]![previous] === infinite) continue;
-        const sum = groupSum(previous, pages);
-        if (sum > heightCap) continue;
-        const cost = bestCost[groupsUsed - 1]![previous]! + (sum - ideal) ** 2;
-        if (cost < bestCost[groupsUsed]![pages]!) {
-          bestCost[groupsUsed]![pages] = cost;
-          choice[groupsUsed]![pages] = previous;
-        }
+  const cumulative: number[] = [0];
+  for (const height of heights) cumulative.push(cumulative[cumulative.length - 1]! + height);
+
+  // القص المثالي مقرّبًا لبكسل — المجموعة الأخيرة تمتص التقريب فمجموع الشرائح = T تمامًا.
+  const idealCuts = Array.from({ length: groupCount - 1 }, (_, k) => Math.round((k + 1) * ideal));
+
+  const cuts = idealCuts.map((cut, k) => {
+    const previousIdeal = k === 0 ? 0 : idealCuts[k - 1]!;
+    const nextIdeal = k + 1 < idealCuts.length ? idealCuts[k + 1]! : total;
+    let nearest = cut;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+    for (let index = 1; index < cumulative.length - 1; index += 1) {
+      const boundary = cumulative[index]!;
+      const distance = Math.abs(boundary - cut);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearest = boundary;
       }
     }
-  }
+    if (nearestDistance > snapTolerance) return cut;
+    if (nearest <= previousIdeal || nearest >= nextIdeal) return cut;
+    return nearest;
+  });
 
-  // استخراج حدود المجموعات من جدول الاختيار (مضمونة الجدوى لأن التعبئة
-  // الجشعة أثبتت أن العدد الأدنى ممكن ضمن السقف).
-  const bounds: number[] = [length];
-  for (let groupsUsed = minGroups; groupsUsed >= 1; groupsUsed -= 1) {
-    bounds.unshift(choice[groupsUsed]![bounds[0]!]!);
+  // التحقق من السقف بعد الانزلاق — أي تجاوز يعيد كل النقاط إلى المثالي
+  // (القص المثالي مضمون داخل السقف: كل مجموعة = المثالي ± تقريب بكسل).
+  const buildGroups = (groupCuts: number[]): MergeSlice[][] => {
+    const groups: MergeSlice[][] = [];
+    let cutIndex = 0;
+    let cursor = 0;
+    for (let group = 0; group < groupCount; group += 1) {
+      const end = group === groupCount - 1 ? total : groupCuts[cutIndex++]!;
+      const slices: MergeSlice[] = [];
+      while (cursor < end) {
+        let pageIndex = 0;
+        while (pageIndex < heights.length && cumulative[pageIndex + 1]! <= cursor) pageIndex += 1;
+        const pageStart = cumulative[pageIndex]!;
+        const pageHeight = heights[pageIndex]!;
+        const sliceHeight = Math.min(pageStart + pageHeight, end) - cursor;
+        slices.push({ pageIndex, top: cursor - pageStart, height: sliceHeight });
+        cursor += sliceHeight;
+      }
+      groups.push(slices);
+    }
+    return groups;
+  };
+
+  for (let group = 0; group < groupCount; group += 1) {
+    const start = group === 0 ? 0 : cuts[group - 1]!;
+    const end = group === groupCount - 1 ? total : cuts[group]!;
+    if (end - start > heightCap + 1) return buildGroups(idealCuts);
   }
-  const groups: number[][] = [];
-  for (let groupIndex = 0; groupIndex < minGroups; groupIndex += 1) {
-    const from = bounds[groupIndex]!;
-    const to = bounds[groupIndex + 1]!;
-    groups.push(Array.from({ length: to - from }, (_, offset) => start + from + offset));
-  }
-  return groups;
+  return buildGroups(cuts);
 }
 
-async function renderGroupToFile(
-  group: number[],
+async function renderSliceGroupToFile(
+  slices: MergeSlice[],
   pagePaths: string[],
   dimensions: Array<{ width?: number; height?: number }>,
   width: number,
   outputPath: string,
   output: ImageOutputConfig
 ): Promise<number> {
-  const dims = group.map(index => dimensions[index]!);
-  const height = dims.reduce((sum, item) => sum + (item.height ?? 0), 0);
+  const height = slices.reduce((sum, slice) => sum + slice.height, 0);
   if (!height || !width) throw new Error("تعذر قراءة أبعاد صورة الفصل.");
-  const composites = group.map((pageIndex, position) => ({
-    input: pagePaths[pageIndex]!,
-    left: Math.floor((width - (dims[position]?.width ?? width)) / 2),
-    top: dims.slice(0, position).reduce((sum, item) => sum + (item.height ?? 0), 0),
-  }));
+  const composites: Array<{ input: string | Buffer; left: number; top: number }> = [];
+  let top = 0;
+  for (const slice of slices) {
+    const dims = dimensions[slice.pageIndex];
+    const pageWidth = dims?.width ?? 0;
+    const pageHeight = dims?.height ?? 0;
+    // الصفحة الكاملة تُركَّب من ملفها مباشرة بلا فكّ إضافي — نفس مسار المحرك القديم.
+    const isWholePage = slice.top === 0 && (pageHeight === 0 || slice.height === pageHeight);
+    if (isWholePage) {
+      composites.push({
+        input: pagePaths[slice.pageIndex]!,
+        left: Math.floor((width - (pageWidth || width)) / 2),
+        top,
+      });
+    } else {
+      // جزء مقصوص من صفحة: استخراج بكسل-دقيق ثم تركيب — بلا أي إعادة عيّنة.
+      const regionWidth = pageWidth || (await sharp(pagePaths[slice.pageIndex]!).metadata()).width || width;
+      const region = await sharp(pagePaths[slice.pageIndex]!)
+        .extract({ left: 0, top: slice.top, width: regionWidth, height: slice.height })
+        .png()
+        .toBuffer();
+      composites.push({ input: region, left: Math.floor((width - regionWidth) / 2), top });
+    }
+    top += slice.height;
+  }
   const canvas = sharp({ create: { width, height, channels: 4, background: { r: 255, g: 255, b: 255, alpha: 1 } } }).composite(composites);
   await encodeWithOutputConfig(canvas, output).toFile(outputPath);
   return height;
@@ -633,22 +623,29 @@ export async function openLocalImageMergeSession(
       ? { paths: pagePaths, dimensions: originalDimensions }
       : await scalePagesToUniformWidth(pagePaths, originalDimensions, width, path.join(dir, "scaled"));
 
-    // التجميع بسقف الارتفاع فقط — بلا أي تقسيم إضافي: المجموعات الأطول من
-    // ميزانية صيغة الترميز تُحوّل إلى PNG بلا أي فقدان داخل resolveGroupOutput.
-    const groups = groupPageIndexes(effectiveDimensions, heightCap);
+    // التجميع متساوي الارتفاع: مجموع الأطوال يوزَّع بالتساوي على أقل عدد
+    // صور داخل السقف، مع قص بكسل-دقيق للصفحات عند الحدود الحسابية —
+    // والمجموعات الأطول من ميزانية صيغة الترميز تُحوّل إلى PNG بلا أي فقدان
+    // داخل resolveGroupOutput.
+    const heights = effectiveDimensions.map((item, index) => {
+      const height = item?.height ?? 0;
+      if (!height) throw new Error(`تعذر قراءة ارتفاع الصفحة ${index + 1}.`);
+      return height;
+    });
+    const groups = planUniformMergeGroups(heights, heightCap);
 
     const images: MergedChapterFile[] = [];
     // التسلسل مقصود: تُرسم مجموعة واحدة في كل مرة وتُكتب إلى القرص فورًا.
     for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
       const group = groups[groupIndex]!;
-      const groupHeight = group.reduce((sum, index) => sum + (effectiveDimensions[index]?.height ?? 0), 0);
+      const groupHeight = group.reduce((sum, slice) => sum + slice.height, 0);
       // ترميز كل صورة حسب ميزانية صيغتها: تخطي اللوحة أو تحويل الصورة
       // الأطول من الميزانية إلى PNG بلا أي تقسيم — مع ملاحظة لكل منها.
       const { output: groupOutput, note } = resolveGroupOutput(output, width, groupHeight, group.length);
       if (note) notes.push(note);
       const extension = imageOutputExtension(groupOutput.format);
       const outputPath = path.join(dir, `merged-${String(groupIndex + 1).padStart(3, "0")}.${extension}`);
-      const height = await renderGroupToFile(group, effectivePaths, effectiveDimensions, width, outputPath, groupOutput);
+      const height = await renderSliceGroupToFile(group, effectivePaths, effectiveDimensions, width, outputPath, groupOutput);
       images.push({ filePath: outputPath, width, height, mimeType: FORMAT_MIME[groupOutput.format] });
       if (onProgress) {
         try { await onProgress({ phase: "merging", done: groupIndex + 1, total: groups.length }); } catch { /* فشل الإشعار لا يُفشل المعالجة */ }

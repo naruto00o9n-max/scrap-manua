@@ -8,6 +8,7 @@ import {
   openChapterMergeSession,
   PALETTE_AREA_LIMIT,
   pickUniformWidth,
+  planUniformMergeGroups,
   resolveGroupOutput,
   WEBP_MAX_DIMENSION,
 } from "./imageMerging";
@@ -54,7 +55,7 @@ describe("chapter image merging", () => {
 
   it("leaves no small orphans in a real mixed chapter (user's Drive folder heights)", async () => {
     // أطوال حقيقية من مجلد Drive للمستخدم: كانت تخرج 19 ملفًا مستقلاً بأطوال
-    // 4030-13950؛ الآن الصفحات الصغيرة تُدمج حتى العتبة ولا يبقى يتيم قصير.
+    // 4030-13950؛ الآن مجموع الأطوال يوزّع بالتساوي على أقل عدد صور داخل السقف.
     const heights = [5000, 5000, 4316, 13360, 13950, 5000, 5000, 4925];
     const buffers: Buffer[] = [];
     for (let index = 0; index < heights.length; index += 1) {
@@ -64,14 +65,20 @@ describe("chapter image merging", () => {
     vi.stubGlobal("fetch", vi.fn(async (_url: string) => new Response(buffers.shift(), { status: 200, headers: { "content-type": "image/png" } })));
 
     const output = await mergeChapterPages(urls);
-    // 14316 + الصفحتان الكبيرتان مستقلتان + 14925 — لا ملف واحد تحت 13000.
-    expect(output.map(item => item.height)).toEqual([14316, 13360, 13950, 14925]);
+    const total = heights.reduce((sum, height) => sum + height, 0);
+    expect(output).toHaveLength(4);
+    // كل الصور متقاربة الارتفاع: التشتت الكلي أقل من هامش الانزلاق، ولا صورة فوق السقف.
+    const heightsOut = output.map(item => item.height);
+    expect(Math.max(...heightsOut) - Math.min(...heightsOut)).toBeLessThanOrEqual(600);
+    expect(heightsOut.every(height => height <= 15000)).toBe(true);
+    expect(heightsOut.reduce((sum, height) => sum + height, 0)).toBe(total);
     vi.unstubAllGlobals();
   });
 
   it("evens out the two output heights instead of leaving one tall and one short", async () => {
-    // سيناريو حقيقي من مجلد Drive: 14 صفحة × 1500px + 1037px.
-    // التوزيع الأكثر تساويًا (10500/11537) أفضل من 12000/10037 القديم.
+    // سيناريو حقيقي من مجلد Drive: 14 صفحة × 1500px + 1037px (مجموع 22037).
+    // القص عند الحد المثالي 11018.5 يعطي صورتين متساويتين تمامًا 11019/11018
+    // بدل توزيع صفحات كاملة متباينة في المحرك القديم.
     const heights = [1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500, 1037];
     const buffers: Buffer[] = [];
     for (let index = 0; index < heights.length; index += 1) {
@@ -81,7 +88,7 @@ describe("chapter image merging", () => {
     vi.stubGlobal("fetch", vi.fn(async (_url: string) => new Response(buffers.shift(), { status: 200, headers: { "content-type": "image/png" } })));
 
     const output = await mergeChapterPages(urls);
-    expect(output.map(item => item.height)).toEqual([10500, 11537]);
+    expect(output.map(item => item.height)).toEqual([11019, 11018]);
     expect(output).toHaveLength(2);
     vi.unstubAllGlobals();
   });
@@ -99,21 +106,20 @@ describe("chapter image merging", () => {
     vi.unstubAllGlobals();
   });
 
-  it("never merges pages when the total would exceed the flexible ceiling", async () => {
+  it("cuts oversized pages into equal heights when the total exceeds the ceiling", async () => {
     const buffers = [await image(900, 12000, "#999999"), await image(900, 16000, "#aaaaaa")];
     vi.stubGlobal("fetch", vi.fn(async (_url: string) => new Response(buffers.shift(), { status: 200, headers: { "content-type": "image/png" } })));
     const output = await mergeChapterPages(["https://pages.test/strip", "https://pages.test/giant"]);
-    expect(output.map(item => item.height)).toEqual([12000, 16000]);
+    expect(output.map(item => item.height)).toEqual([14000, 14000]);
     vi.unstubAllGlobals();
   });
 
-  it("keeps a single page intact when it is taller than the flexible ceiling", async () => {
+  it("cuts a single giant page into equal halves instead of keeping it over the ceiling", async () => {
     const buffer = await image(900, 16000, "#444444");
     vi.stubGlobal("fetch", vi.fn(async () => new Response(buffer, { status: 200, headers: { "content-type": "image/png" } })));
     const output = await mergeChapterPages(["https://pages.test/tall"]);
-    expect(output).toHaveLength(1);
-    expect(output[0]?.width).toBe(900);
-    expect(output[0]?.height).toBe(16000);
+    expect(output.map(item => item.height)).toEqual([8000, 8000]);
+    expect(output.every(item => item.width === 900)).toBe(true);
     vi.unstubAllGlobals();
   });
 
@@ -152,8 +158,8 @@ describe("chapter image merging", () => {
   });
 
   it("respects a custom merge height cap from guild settings", async () => {
-    // سقف مخصص 9000px: ثلاث صفحات 4000px تخرج صورتين متساويتين قدر الإمكان
-    // (8000 ثم 4000) بدل صورة واحدة 12000px كما في الافتراضي.
+    // سقف مخصص 9000px: ثلاث صفحات 4000px تخرج صورتين متساويتين تمامًا (6000/6000)
+    // بالقص عند الحد المثالي بدل 8000/4000 المتباينة في المحرك القديم.
     const buffers = [await image(800, 4000, "#111111"), await image(800, 4000, "#222222"), await image(800, 4000, "#333333")];
     vi.stubGlobal("fetch", vi.fn(async (_url: string) => new Response(buffers.shift(), { status: 200, headers: { "content-type": "image/png" } })));
     const output = await mergeChapterPages(
@@ -161,7 +167,7 @@ describe("chapter image merging", () => {
       undefined,
       { heightCap: 9000 }
     );
-    expect(output.map(item => item.height)).toEqual([8000, 4000]);
+    expect(output.map(item => item.height)).toEqual([6000, 6000]);
     vi.unstubAllGlobals();
   });
 
@@ -193,6 +199,80 @@ describe("chapter image merging", () => {
     expect(output).toHaveLength(1);
     expect(output[0]!.height).toBe(14316);
     vi.unstubAllGlobals();
+  });
+});
+
+describe("uniform merge planner", () => {
+  it("keeps one whole-page group when the total fits the cap", () => {
+    const plan = planUniformMergeGroups([5000, 6000, 3000], 15000);
+    expect(plan).toEqual([
+      [
+        { pageIndex: 0, top: 0, height: 5000 },
+        { pageIndex: 1, top: 0, height: 6000 },
+        { pageIndex: 2, top: 0, height: 3000 },
+      ],
+    ]);
+  });
+
+  it("cuts pages into exactly equal heights when the total exceeds the cap", () => {
+    // 17000px فوق سقف 15000 → صورتان × 8500px، والقص داخل الصفحة الثانية.
+    const plan = planUniformMergeGroups([8000, 9000], 15000);
+    expect(plan).toHaveLength(2);
+    const heightsOut = plan.map(group => group.reduce((sum, slice) => sum + slice.height, 0));
+    expect(heightsOut).toEqual([8500, 8500]);
+    // تسلسل الشرائح يحافظ على ترتيب القراءة.
+    const pageOrder = plan.flat().map(slice => slice.pageIndex);
+    expect([...pageOrder].sort((a, b) => a - b)).toEqual(pageOrder);
+    // مجموع الشرائح = مجموع الارتفاعات تمامًا.
+    expect(heightsOut.reduce((sum, height) => sum + height, 0)).toBe(17000);
+  });
+
+  it("snaps a cut to an exact page boundary so whole pages stay uncut", () => {
+    // حد القص المثالي 8100 يطابق حد الصفحة الثانية تمامًا — بلا أي قص فعلي.
+    const plan = planUniformMergeGroups([8100, 8100], 15000);
+    expect(plan).toEqual([
+      [{ pageIndex: 0, top: 0, height: 8100 }],
+      [{ pageIndex: 1, top: 0, height: 8100 }],
+    ]);
+  });
+
+  it("avoids tiny slivers by absorbing a short page into its neighbour group", () => {
+    // صفحة قصيرة 400px بين صفحتين طويلتين: تُبتلع كاملة في مجموعتها
+    // ولا تُترك شريحة ضجير، والأطوال الثلاثة متقاربة (10133/10134/10133).
+    const plan = planUniformMergeGroups([15000, 400, 15000], 15000);
+    expect(plan).toHaveLength(3);
+    const heightsOut = plan.map(group => group.reduce((sum, slice) => sum + slice.height, 0));
+    expect(Math.max(...heightsOut) - Math.min(...heightsOut)).toBeLessThanOrEqual(1);
+    for (const group of plan) {
+      for (const slice of group) {
+        expect(slice.height).toBeGreaterThanOrEqual(400);
+      }
+    }
+  });
+
+  it("reverts snapping when it would breach the height cap", () => {
+    // حد صفحة ضمن هامش الانزلاق لكن قبوله يخترق السقف (15249 > 15000) —
+    // تعود كل النقاط إلى المثالي 14950/14950.
+    const plan = planUniformMergeGroups([15249, 14651], 15000);
+    const heightsOut = plan.map(group => group.reduce((sum, slice) => sum + slice.height, 0));
+    expect(heightsOut).toEqual([14950, 14950]);
+    expect(heightsOut.every(height => height <= 15000)).toBe(true);
+  });
+
+  it("always stays within the cap and preserves total pixels (property)", () => {
+    const heights = [4648, 6460, 9140, 8478, 7715, 8060, 11749, 7123, 8619, 9227, 9309, 9035, 12929];
+    const plan = planUniformMergeGroups(heights, 15000);
+    const heightsOut = plan.map(group => group.reduce((sum, slice) => sum + slice.height, 0));
+    expect(heightsOut.every(height => height <= 15000)).toBe(true);
+    expect(heightsOut.reduce((sum, height) => sum + height, 0)).toBe(112492);
+    // التشتت أقل من هامش الانزلاق مضاعفًا — عمليًا ارتفاع واحد.
+    expect(Math.max(...heightsOut) - Math.min(...heightsOut)).toBeLessThanOrEqual(600);
+    // لا شريحة يتيمة أقل من هامش الانزلاق.
+    for (const group of plan) {
+      for (const slice of group) {
+        expect(slice.height).toBeGreaterThanOrEqual(120);
+      }
+    }
   });
 });
 
