@@ -120,10 +120,11 @@ describe("openLocalImageMergeSession", () => {
 
     const session = await openLocalImageMergeSession(pagePaths);
     try {
-      // صفحتان 6000px تُجمّعان في صورة 12000px، والثالثة تبقى مستقلة.
+      // مجموع 18000px فوق سقف 15000 → صورتان متساويتان 9000/9000
+      // (قص الصفحة الثانية عند الحد المثالي) بدل 12000/6000 المتباينتين.
       expect(session.images).toHaveLength(2);
-      expect(session.images[0]!.height).toBe(12000);
-      expect(session.images[1]!.height).toBe(6000);
+      expect(session.images[0]!.height).toBe(9000);
+      expect(session.images[1]!.height).toBe(9000);
       for (const image of session.images) {
         const metadata = await sharp(image.filePath).metadata();
         expect(metadata.width).toBe(100);
