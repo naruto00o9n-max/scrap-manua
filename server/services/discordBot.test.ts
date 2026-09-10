@@ -1310,30 +1310,38 @@ describe("settings hub and section interfaces", () => {
   };
 
   const baseState = {
-    section: "format" as const,
     guildId: "g1",
     guildName: "سيرفر الاختبار",
     requesterId: "u1",
     channelId: "c1",
     messageId: null,
+    currentView: null,
     overrideAtOpen: null,
     effectiveAtOpen: { format: "png" as const, quality: 88, pngPalette: false },
     mergeAtOpen: { enabled: true, heightCap: null, width: null },
-    draft: { format: null, quality: null, palette: null, merge: null, height: null, width: null },
-    saved: false,
-    feedback: null,
+    sections: {
+      format: {
+        draft: { format: null, quality: null, palette: null, merge: null, height: null, width: null },
+        saved: false,
+        feedback: null,
+      },
+      merge: {
+        draft: { format: null, quality: null, palette: null, merge: null, height: null, width: null },
+        saved: false,
+        feedback: null,
+      },
+    },
   };
 
-  it("hub explains the command and its sections with a section select menu", () => {
+  it("hub shows the guild settings and the section select for in-place switching", () => {
     const [container] = buildSettingsHubComponents(hubView, null) as unknown as [ComponentShape];
     const flattened = flatten(container);
     const texts = collectTexts([container]).join("\n");
     expect(texts).toContain("## ⚙️ إعدادات هذا السيرفر");
-    expect(texts).toContain("قسمين مستقلين");
-    expect(texts).toContain("**1. 🖼 قسم صيغة الصور**");
-    expect(texts).toContain("**2. 🧩 قسم دمج الصفحات**");
-    expect(texts).toContain("ستصلك رسالة جديدة خاصة به");
-    // القائمة تحت الشرح تفتح القسم المختار كرسالة جديدة.
+    expect(texts).toContain("سيرفر **سيرفر الاختبار**");
+    expect(texts).not.toContain("رسالة جديدة");
+    expect(texts).not.toContain("الإعدادات تخص هذا السيرفر وحده");
+    // القائمة تعرض القسم في نفس الرسالة لا في رسالة جديدة.
     const select = flattened.find(item => item.custom_id === "settings:sec:u1");
     expect(select).toBeTruthy();
     const options = (select?.options ?? []) as Array<{ label: string; value: string }>;
@@ -1354,9 +1362,9 @@ describe("settings hub and section interfaces", () => {
     expect(texts).toContain("أقصى الارتفاع: الافتراضي (15000px)");
   });
 
-  it("format section is its own interface with its own selects and save/reset", () => {
+  it("format section is its own interface with its own selects, save/reset and back", () => {
     const [container] = buildSettingsSectionComponents(
-      buildSettingsSectionView(baseState),
+      buildSettingsSectionView(baseState, "format"),
       null
     ) as unknown as [ComponentShape];
     const flattened = flatten(container);
@@ -1364,6 +1372,9 @@ describe("settings hub and section interfaces", () => {
     expect(texts).toContain("## 🖼 قسم صيغة الصور");
     expect(texts).toContain("**الصيغة المطبقة حاليًا:** PNG");
     expect(texts).toContain("الافتراضي العام من لوحة التحكم");
+    expect(texts).not.toContain("اضغط «");
+    expect(texts).not.toContain("الجودة تنطبق على");
+    expect(texts).not.toContain("لاختيار قسم آخر");
     const ids = flattened.map(item => item.custom_id).filter(Boolean);
     expect(ids).toEqual(
       expect.arrayContaining([
@@ -1372,6 +1383,7 @@ describe("settings hub and section interfaces", () => {
         "settings:pal:u1",
         "settings:fsave:u1",
         "settings:freset:u1",
+        "settings:back:u1",
       ])
     );
     // قوائم قسم الدمج وأزراره لا تظهر في واجهة قسم الصيغة.
@@ -1387,9 +1399,9 @@ describe("settings hub and section interfaces", () => {
     expect(save?.disabled).toBe(true);
   });
 
-  it("merge section is its own interface with its own selects and save/reset", () => {
+  it("merge section is its own interface with its own selects, save/reset and back", () => {
     const [container] = buildSettingsSectionComponents(
-      buildSettingsSectionView({ ...baseState, section: "merge" }),
+      buildSettingsSectionView(baseState, "merge"),
       null
     ) as unknown as [ComponentShape];
     const flattened = flatten(container);
@@ -1422,11 +1434,13 @@ describe("settings hub and section interfaces", () => {
 
   it("merge section shows custom dimensions without the applied annotation", () => {
     const [container] = buildSettingsSectionComponents(
-      buildSettingsSectionView({
-        ...baseState,
-        section: "merge",
-        mergeAtOpen: { enabled: false, heightCap: 12000, width: 900 },
-      }),
+      buildSettingsSectionView(
+        {
+          ...baseState,
+          mergeAtOpen: { enabled: false, heightCap: 12000, width: 900 },
+        },
+        "merge"
+      ),
       null
     ) as unknown as [ComponentShape];
     const texts = collectTexts([container]).join("\n");
@@ -1438,11 +1452,14 @@ describe("settings hub and section interfaces", () => {
 
   it("format section marks a guild with its own override as self-configured", () => {
     const [container] = buildSettingsSectionComponents(
-      buildSettingsSectionView({
-        ...baseState,
-        overrideAtOpen: { format: "webp", quality: 90, pngPalette: false },
-        effectiveAtOpen: { format: "webp", quality: 90, pngPalette: false },
-      }),
+      buildSettingsSectionView(
+        {
+          ...baseState,
+          overrideAtOpen: { format: "webp", quality: 90, pngPalette: false },
+          effectiveAtOpen: { format: "webp", quality: 90, pngPalette: false },
+        },
+        "format"
+      ),
       null
     ) as unknown as [ComponentShape];
     const texts = collectTexts([container]).join("\n");
@@ -1451,10 +1468,20 @@ describe("settings hub and section interfaces", () => {
 
   it("renders format draft choices and enables its save button", () => {
     const [container] = buildSettingsSectionComponents(
-      buildSettingsSectionView({
-        ...baseState,
-        draft: { format: "jpeg", quality: 90, palette: true, merge: null, height: null, width: null },
-      }),
+      buildSettingsSectionView(
+        {
+          ...baseState,
+          sections: {
+            ...baseState.sections,
+            format: {
+              draft: { format: "jpeg", quality: 90, palette: true, merge: null, height: null, width: null },
+              saved: false,
+              feedback: null,
+            },
+          },
+        },
+        "format"
+      ),
       null
     ) as unknown as [ComponentShape];
     const texts = collectTexts([container]).join("\n");
@@ -1462,30 +1489,39 @@ describe("settings hub and section interfaces", () => {
     expect(texts).toContain("الصيغة: **JPG**");
     expect(texts).toContain("الجودة: **90**");
     expect(texts).toContain("تقليل ألوان PNG: **تفعيل**");
-    expect(texts).toContain("حفظ قسم الصيغة");
     const save = flatten(container).find(item => item.custom_id === "settings:fsave:u1");
+    expect(save?.label).toBe("حفظ قسم الصيغة");
     expect(save?.disabled).toBe(false);
   });
 
   it("renders merge draft choices and enables its save button", () => {
     const [container] = buildSettingsSectionComponents(
-      buildSettingsSectionView({
-        ...baseState,
-        section: "merge",
-        draft: { format: null, quality: null, palette: null, merge: false, height: "default", width: 900 },
-      }),
+      buildSettingsSectionView(
+        {
+          ...baseState,
+          sections: {
+            ...baseState.sections,
+            merge: {
+              draft: { format: null, quality: null, palette: null, merge: false, height: "default", width: 900 },
+              saved: false,
+              feedback: null,
+            },
+          },
+        },
+        "merge"
+      ),
       null
     ) as unknown as [ComponentShape];
     const texts = collectTexts([container]).join("\n");
     expect(texts).toContain("دمج الصفحات: **معطّل**");
     expect(texts).toContain("أقصى الارتفاع: **الافتراضي (15000px)**");
     expect(texts).toContain("العرض: **900px**");
-    expect(texts).toContain("حفظ قسم الدمج");
     const save = flatten(container).find(item => item.custom_id === "settings:msave:u1");
+    expect(save?.label).toBe("حفظ قسم الدمج");
     expect(save?.disabled).toBe(false);
   });
 
-  it("saved quick-path card summarizes both sections", () => {
+  it("saved quick-path card summarizes both sections with no advice subtext", () => {
     const [container] = buildSettingsSavedComponents([
       "**السيرفر:** سيرفر الاختبار",
       "🖼 **الصيغة:** JPG — جودة 85",
@@ -1493,7 +1529,7 @@ describe("settings hub and section interfaces", () => {
     ]) as unknown as [ComponentShape];
     const texts = collectTexts([container]).join("\n");
     expect(texts).toContain("## ✅ تم حفظ إعدادات هذا السيرفر");
-    expect(texts).toContain("اختر القسم من القائمة");
+    expect(texts).not.toContain("نفّذ /الاعدادات");
   });
 });
 
