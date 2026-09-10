@@ -1079,14 +1079,30 @@ async function editMessageContent(
   await found.messages.edit(messageId, body as never);
 }
 
+/** يرسل بطاقة جديدة إلى القناة — تُستخدم للنتائج النهائية كي يصل المنشن. */
+async function sendChannelMessage(channelId: string, body: object) {
+  if (!client) throw new Error("لم يبدأ عميل Discord بعد.");
+  const found = await client.channels.fetch(channelId);
+  if (!found?.isTextBased() || !("send" in found))
+    throw new Error("القناة غير متاحة للإرسال.");
+  return found.send(body as never);
+}
+
+async function deleteMessageContent(channelId: string, messageId: string) {
+  if (!client || !channelId || !messageId) return;
+  const found = await client.channels.fetch(channelId);
+  if (!found?.isTextBased() || !("messages" in found)) return;
+  await found.messages.delete(messageId);
+}
+
 // ============================================================
 // تدفق أمر الدمج اليدوي /دمج
 // ============================================================
 
 /**
- * هدف بطاقة الدمج: كل استدعاء show يرسم في نفس الرسالة دائمًا.
- * الرسم الأول عبر ردّ التفاعل ثم كل التحديثات عبر رسالة القناة نفسها،
- * حتى لا يتوقف التحديث بانتهاء صلاحية توكن التفاعل (15 دقيقة) في العمليات الطويلة.
+ * هدف بطاقة الدمج: كل استدعاء show يرسم في نفس الرسالة أثناء العمل، وعند
+ * النتيجة النهائية تُحذف رسالة التقدم وتُرسل النتيجة رسالة جديدة كي يصل
+ * منشن صاحب الطلب (التعديل لا يُنبّه أبدًا).
  */
 type MergeCardTarget = {
   show: (notice: MergeNotice, options?: MergeCardOptions) => Promise<string>;
@@ -1097,6 +1113,14 @@ function mergeInteractionCard(interaction: any): MergeCardTarget {
   const channelId = interaction.channelId as string;
   return {
     show: async (notice, options) => {
+      // النتيجة النهائية رسالة جديدة: تُحذف بطاقة التقدم وتُرسل النتيجة
+      // منفردة كي يصل منشن صاحب الطلب — تعديل الرسالة لا يُنبّه أبدًا.
+      if (TERMINAL_STATUSES.includes(notice.status) && messageId) {
+        await deleteMessageContent(channelId, messageId).catch(() => undefined);
+        const finalMessage = await sendChannelMessage(channelId, mergeCardPayload(notice, options));
+        messageId = String(finalMessage.id);
+        return messageId;
+      }
       if (!messageId) {
         const sent = await interaction.editReply(mergeCardPayload(notice, options));
         messageId = String(sent.id);
@@ -1112,9 +1136,15 @@ function mergeMessageCard(message: any): MergeCardTarget {
   let sent: any = null;
   return {
     show: async (notice, options) => {
+      // النتيجة النهائية رسالة جديدة نفس منطق بطاقة الأمر — كي يصل المنشن.
+      if (TERMINAL_STATUSES.includes(notice.status) && sent) {
+        await sent.delete().catch(() => undefined);
+        sent = await message.reply(mergeCardPayload(notice, options));
+        return String(sent.id);
+      }
       if (!sent) sent = await message.reply(mergeCardPayload(notice, options));
       else await sent.edit(mergeCardPayload(notice, options));
-      return sent.id;
+      return String(sent.id);
     },
   };
 }
@@ -4057,9 +4087,21 @@ export async function updateJobProgressMessage(
 ) {
   if (!client || !channelId || !messageId) return;
   const found = await client.channels.fetch(channelId);
-  if (!found?.isTextBased() || !("messages" in found)) return;
+  if (!found?.isTextBased() || !("send" in found)) return;
   try {
-    await found.messages.edit(messageId, cardPayload(notice, options) as never);
+    if (TERMINAL_STATUSES.includes(notice.status)) {
+      // النتيجة النهائية رسالة جديدة: رسالة التقدم تُحذف والبطاقة النهائية
+      // تُرسل منفردًا كي يصل منشن صاحب الطلب فعليًا — تعديل الرسالة لا
+      // يُنبّه أبدًا وفق سلوك Discord.
+      await found.messages.delete(messageId).catch(() => undefined);
+      const finalMessage = await found.send(cardPayload(notice, options) as never);
+      if (notice.jobId)
+        await setDiscordProgressMessage(notice.jobId, String(finalMessage.id)).catch(
+          () => undefined
+        );
+    } else {
+      await found.messages.edit(messageId, cardPayload(notice, options) as never);
+    }
   } catch (error) {
     console.warn(
       `[Discord] Could not update progress message ${messageId}`,
@@ -4069,8 +4111,9 @@ export async function updateJobProgressMessage(
 }
 
 /**
- * تحديث حالة المهمة: البطاقة الحية الواحدة هي كل شيء، وتُحدَّث حتى النتيجة
- * النهائية داخل نفسها (الرابط وزر الفتح) بلا أي رسالة ثانية مكررة.
+ * تحديث حالة المهمة: بطاقة حية تُحدَّث حتى نتيجتها النهائية — وعند النتيجة
+ * تُحذف رسالة التقدم وتُرسل البطاقة النهائية رسالة جديدة كي يصل منشن
+ * صاحب الطلب (تعديل الرسالة لا يُنبّه أبدًا وفق سلوك Discord).
  */
 export async function sendJobUpdate(
   channelId: string | null,
