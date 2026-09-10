@@ -1,4 +1,5 @@
 import { getSetting, setSetting } from "../db";
+import { fetchKakaoPageChapter } from "./kakaoPage";
 
 // ============================================================
 // السحب المباشر بجلسة الموقع (كوكي تسجيل الدخول)
@@ -17,6 +18,7 @@ export const SUPPORTED_DIRECT_SOURCES = [
   "wamanga.ru",
   "webtoons.com",
   "m.webtoons.com",
+  "page.kakao.com",
 ] as const;
 
 export type DirectSourceHostname = (typeof SUPPORTED_DIRECT_SOURCES)[number];
@@ -39,6 +41,7 @@ const DIRECT_SOURCE_MODES: Record<(typeof SUPPORTED_DIRECT_SOURCES)[number], Dir
   "wamanga.ru": "direct-first",
   "webtoons.com": "direct-first",
   "m.webtoons.com": "direct-first",
+  "page.kakao.com": "direct-first",
 };
 
 export function directSourceMode(hostname: string | null | undefined): DirectSourceMode | null {
@@ -541,6 +544,23 @@ function chapterHost(chapterUrl: string): string {
 export async function probeDirectChapterPage(chapterUrl: string): Promise<DirectProbe> {
   try {
     const host = chapterHost(chapterUrl);
+    // كاكاو بيج لا يحتاج فحص HTML أصلًا — واجهة bff الرسمية تحسم كل شيء
+    // (العناوين والصور والفصل المدفوع) من جهة الزائر للفصول المجانية.
+    if (host === "page.kakao.com") {
+      const outcome = await fetchKakaoPageChapter(chapterUrl);
+      if (outcome.ok) {
+        return {
+          mode: "free",
+          chapter: {
+            mangaTitle: outcome.mangaTitle,
+            chapterName: outcome.chapterName || "الفصل",
+            pages: outcome.pages,
+          },
+        };
+      }
+      if (outcome.locked) return { mode: "locked", chapter: null };
+      return { mode: "unknown", chapter: null, reason: outcome.message };
+    }
     // بوابة العمر في WEBTOON تُتجاوز بكوكي الموقع نفسه — يُرسل مقدمًا دائمًا.
     const html = await fetchChapterHtml(chapterUrl, isWebtoonsHost(host) ? WEBTOONS_AGE_COOKIE : undefined);
     if (host === "wamanga.ru") {
@@ -646,6 +666,24 @@ export async function fetchDirectChapterWithSession(
   cookie: string
 ): Promise<DirectChapterPages> {
   const host = chapterHost(chapterUrl);
+  // كاكاو بيج: الجلسة كوكي حساب كاكاو (يضبطه المالك من لوحة التحكم) —
+  // تُمرّر لواجهة viewer/data لمحاولة الفصول المدفوعة بحساب موثق، وبلا
+  // نجاح يُرفض الفصل برسالة واضحة (بعض الفصول تشترى من التطبيق فقط).
+  if (host === "page.kakao.com") {
+    const outcome = await fetchKakaoPageChapter(chapterUrl, cookie);
+    if (outcome.ok) {
+      return {
+        mangaTitle: outcome.mangaTitle,
+        chapterName: outcome.chapterName || "الفصل",
+        pages: outcome.pages,
+      };
+    }
+    throw new DirectSourceError(
+      outcome.locked
+        ? "الفصل ما يزال مدفوعًا رغم الجلسة الموثقة — الجلسة منتهية أو الفصل غير مشترى/غير مفتوح في حساب كاكاو. حدّث كوكي الجلسة من لوحة التحكم أو افتح الفصل أولًا."
+        : outcome.message
+    );
+  }
   const html = await fetchChapterHtml(
     chapterUrl,
     isWebtoonsHost(host) && !cookie ? WEBTOONS_AGE_COOKIE : cookie
