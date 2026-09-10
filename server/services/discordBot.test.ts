@@ -42,7 +42,11 @@ import {
   safeMediaUrl,
   sitesCount,
   SOURCES_GROUP_LIMIT,
+  sourceLangFromHostname,
+  sourceLangFromName,
   stripHtmlTags,
+  stripLangNameSuffix,
+  effectiveSourceLang,
   type SearchSession,
 } from "./discordBot";
 import { resolveMergeDimensions } from "./imageMerging";
@@ -1191,7 +1195,7 @@ describe("Discord ZEUS chapter experience", () => {
     ) as unknown as [ComponentShape];
     const texts = collectTexts([container]).join("\n");
     expect(texts).toContain("🌐 **المواقع العربية — 1**");
-    expect(texts).toContain("• **ArabicSite** — arabicsite.com");
+    expect(texts).toContain("• **ArabicSite** (AR) — arabicsite.com");
     expect(texts).not.toContain("⚡");
     expect(texts).toContain("🌐 **المواقع الإنجليزية — 1**");
     expect(texts).toContain("🌐 **مواقع أخرى — 1**");
@@ -1227,6 +1231,56 @@ describe("Discord ZEUS chapter experience", () => {
     expect(texts).toContain(`🌐 **المواقع العربية — ${SOURCES_GROUP_LIMIT + 5}**`);
     expect(texts).toContain(`و5 موقعًا آخر في هذا القسم…`);
     expect(texts).not.toContain(`Site${String(SOURCES_GROUP_LIMIT + 1).padStart(2, "0")}`);
+  });
+
+  it("infers the language of manual sites from hostname and name suffix", () => {
+    expect(sourceLangFromHostname("page.kakao.com")).toBe("ko");
+    expect(sourceLangFromHostname("www.webtoons.com")).toBe("en");
+    expect(sourceLangFromHostname("comic.naver.com")).toBe("ko");
+    expect(sourceLangFromHostname("suwayomi-42.sync.internal")).toBeNull();
+    expect(sourceLangFromName("Naver Webtoon (KO)")).toBe("ko");
+    expect(sourceLangFromName("MangaSite KO")).toBe("ko");
+    expect(sourceLangFromName("Site (2023)")).toBeNull();
+    expect(sourceLangFromName("Site (US)")).toBeNull();
+    expect(stripLangNameSuffix("Naver Webtoon (KO)")).toBe("Naver Webtoon");
+    expect(stripLangNameSuffix("MangaSite KO")).toBe("MangaSite");
+    expect(stripLangNameSuffix("Webtoon Naver")).toBe("Webtoon Naver");
+    expect(effectiveSourceLang({ name: "X", hostname: null, lang: "es" })).toBe("es");
+    expect(effectiveSourceLang({ name: "X (JA)", hostname: null, lang: null })).toBe("ja");
+  });
+
+  it("places a manual no-lang Kakao site in the Korean section with a clean language tag", () => {
+    const manual = (overrides: Partial<Record<string, unknown>>) => ({
+      id: 99,
+      name: "كاكاو بيج",
+      hostname: "page.kakao.com",
+      baseUrl: "https://page.kakao.com",
+      suwayomiSourceId: null,
+      extensionPackage: null,
+      extensionName: null,
+      status: "active" as const,
+      documentedIntegrationUrl: null,
+      allowDirectChapterLookup: true,
+      notes: null,
+      origin: "manual" as const,
+      lang: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      ...overrides,
+    });
+
+    const groups = groupSourcesByLang([manual({ name: "Naver Webtoon (KO)" }), manual({})]);
+    // المصدر اليدوي بلا لغة يُستنتج من نطاقه — كوري وليس «أخرى».
+    expect(groups.map(group => group.key)).toEqual(["ko"]);
+    expect(groups[0]!.label).toBe("المواقع الكورية");
+
+    const [container] = buildSourcesComponents([manual({}), manual({ name: "Naver Webtoon (KO)" })], 2, null) as unknown as [ComponentShape];
+    const texts = collectTexts([container]).join("\n");
+    expect(texts).toContain("🌐 **المواقع الكورية — 2**");
+    expect(texts).toContain("• **كاكاو بيج** (KO) — page.kakao.com");
+    // لاحقة اللغة الأصلية لا تتكرر بعد التنظيف.
+    expect(texts).toContain("• **Naver Webtoon** (KO) — page.kakao.com");
+    expect(texts).not.toContain("Naver Webtoon (KO)");
   });
 });
 

@@ -2149,7 +2149,82 @@ export type LanguageSourceGroup = {
   sources: ContentSource[];
 };
 
-const LANG_GROUP_ORDER = ["ar", "en", "multi"];
+const LANG_GROUP_ORDER = ["ar", "en", "ko", "ja", "zh", "multi"];
+
+/** رموز اللغات المعروفة في مواقع المانجا (ISO-639-1 الشائعة + multi وpt-br وzh-hans/zh-hant). */
+const KNOWN_LANG_CODES = new Set([
+  "multi",
+  "ar", "en", "ja", "ko", "zh", "es", "fr", "pt", "ru", "de", "it", "tr",
+  "id", "th", "vi", "pl", "nl", "uk", "hu", "cs", "ro", "el", "he", "fa",
+  "hi", "tl", "fil", "ms",
+  "pt-br", "zh-hans", "zh-hant",
+]);
+
+const BRACKETED_LANG_SUFFIX = /^(.*?)[(\[【]\s*([A-Za-z]{2}(?:-[A-Za-z]{2,4})?)\s*[)\]】]\s*$/;
+const BARE_LANG_SUFFIX = /^(.*?)\s+([A-Z]{2})\s*$/;
+
+function matchLangNameSuffix(name: string): { base: string; lang: string } | null {
+  const text = (name ?? "").trim();
+  if (!text) return null;
+  const bracketed = text.match(BRACKETED_LANG_SUFFIX);
+  if (bracketed?.[1] && bracketed[2]) {
+    const base = bracketed[1].trim();
+    const lang = bracketed[2].toLowerCase();
+    if (base && KNOWN_LANG_CODES.has(lang)) return { base, lang };
+    return null;
+  }
+  const bare = text.match(BARE_LANG_SUFFIX);
+  if (bare?.[1] && bare[2]) {
+    const base = bare[1].trim();
+    const lang = bare[2].toLowerCase();
+    if (base && KNOWN_LANG_CODES.has(lang)) return { base, lang };
+  }
+  return null;
+}
+
+/** لغة مكتوبة لاحقة باسم الموقع — «Naver Webtoon (KO)» تعطي ko. */
+export function sourceLangFromName(name: string): string | null {
+  return matchLangNameSuffix(name)?.lang ?? null;
+}
+
+/** اسم الموقع بلا لاحقة اللغة — للعرض النظيف في /مواقع. */
+export function stripLangNameSuffix(name: string): string {
+  return matchLangNameSuffix(name)?.base ?? (name ?? "").trim();
+}
+
+/** لغة من نطاق الموقع — للمصادر المسجلة يدويًا بلا لغة من المزامنة. */
+const LANG_BY_HOST_EXACT: Record<string, string> = {
+  "tapas.io": "en",
+  "mangadex.org": "multi",
+};
+
+const LANG_BY_HOST_SUFFIX: Array<[string, string]> = [
+  [".kakao.com", "ko"],
+  [".naver.com", "ko"],
+  [".webtoons.com", "en"],
+];
+
+export function sourceLangFromHostname(hostname: string | null | undefined): string | null {
+  const host = (hostname ?? "").toLowerCase().replace(/^www\./, "");
+  if (!host || host.endsWith(".internal")) return null;
+  const exact = LANG_BY_HOST_EXACT[host];
+  if (exact) return exact;
+  for (const [suffix, lang] of LANG_BY_HOST_SUFFIX) {
+    if (host === suffix.slice(1) || host.endsWith(suffix)) return lang;
+  }
+  return null;
+}
+
+/** اللغة الفعّالة للمصدر: المعلنة أولًا ثم المستنتجة من الاسم ثم من النطاق. */
+export function effectiveSourceLang(source: {
+  name: string;
+  hostname: string | null;
+  lang?: string | null;
+}): string | null {
+  const declared = source.lang?.trim().toLowerCase();
+  if (declared) return declared;
+  return sourceLangFromName(source.name) ?? sourceLangFromHostname(source.hostname);
+}
 
 /** عنوان قسم اللغة بالعربية — Intl.DisplayNames للغات غير الشهيرة. */
 export function languageGroupLabel(lang: string | null | undefined): string {
@@ -2157,6 +2232,9 @@ export function languageGroupLabel(lang: string | null | undefined): string {
   const code = lang.toLowerCase();
   if (code === "ar") return "المواقع العربية";
   if (code === "en") return "المواقع الإنجليزية";
+  if (code === "ko") return "المواقع الكورية";
+  if (code === "ja") return "المواقع اليابانية";
+  if (code === "zh" || code === "zh-hans" || code === "zh-hant") return "المواقع الصينية";
   if (code === "multi") return "مواقع متعددة اللغات";
   try {
     const name = new Intl.DisplayNames(["ar"], { type: "language" }).of(code);
@@ -2167,11 +2245,11 @@ export function languageGroupLabel(lang: string | null | undefined): string {
   return `مواقع (${code})`;
 }
 
-/** يجمع المصادر النشطة في أقسام لغوية مرتبة: العربية أولًا ثم الإنجليزية ثم البقية. */
+/** يجمع المصادر النشطة في أقسام لغوية مرتبة: العربية أولًا ثم الإنجليزية ثم الكورية واليابانية والصينية ثم البقية. */
 export function groupSourcesByLang(sources: ContentSource[]): LanguageSourceGroup[] {
   const groups = new Map<string, ContentSource[]>();
   for (const source of sources) {
-    const key = source.lang?.toLowerCase() || "other";
+    const key = effectiveSourceLang(source) ?? "other";
     const list = groups.get(key);
     if (list) list.push(source);
     else groups.set(key, [source]);
@@ -2220,8 +2298,11 @@ export function buildSourcesComponents(
     const lines: string[] = [`🌐 **${group.label} — ${group.sources.length}**`];
     const shown = group.sources.slice(0, SOURCES_GROUP_LIMIT);
     for (const source of shown) {
+      // اسم نظيف بلا لاحقة لغة مكررة + رمز اللغة الفعّالة بجانب الموقع.
+      const langKey = effectiveSourceLang(source);
+      const langTag = langKey ? ` (${langKey.toUpperCase()})` : "";
       lines.push(
-        `• **${source.name}** — ${source.hostname && !source.hostname.endsWith(".internal") ? source.hostname : "عبر /بحث"}`
+        `• **${stripLangNameSuffix(source.name)}**${langTag} — ${source.hostname && !source.hostname.endsWith(".internal") ? source.hostname : "عبر /بحث"}`
       );
     }
     if (group.sources.length > shown.length) {

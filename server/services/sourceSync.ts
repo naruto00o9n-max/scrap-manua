@@ -5,6 +5,7 @@ import {
   saveSource,
   type BlockedSources,
 } from "../db";
+import { ensureBuiltinSources } from "./builtinSources";
 import { getUsableSuwayomiToken } from "./settings";
 import { SuwayomiClient, type SuwayomiSource } from "./suwayomi";
 
@@ -140,9 +141,18 @@ let inFlight: Promise<{ added: number; activated: number; disabled: number } | n
 
 /** يشغّل مزامنة واحدة (مع منع التداخل لو نُفّذت من أكثر من مكان في نفس اللحظة). */
 export async function syncSourcesFromSuwayomi(): Promise<{ added: number; activated: number; disabled: number } | null> {
-  if (!ENV.suwayomiBaseUrl) return null;
   if (inFlight) return inFlight;
   inFlight = (async () => {
+    // تسجيل المواقع المدمجة أولًا — لا يتوقف لو كان خادم السحب غير مهيأ.
+    try {
+      const builtin = await ensureBuiltinSources();
+      if (builtin.added.length) {
+        console.info(`[SourceSync] سُجّلت مواقع مدمجة تلقائيًا: ${builtin.added.join("، ")}.`);
+      }
+    } catch (error) {
+      console.warn("[SourceSync] تعذر تسجيل المواقع المدمجة:", error);
+    }
+    if (!ENV.suwayomiBaseUrl) return { added: 0, activated: 0, disabled: 0 };
     try {
       const suwayomi = new SuwayomiClient(ENV.suwayomiBaseUrl, getUsableSuwayomiToken());
       const installed = await suwayomi.listInstalledSources();
