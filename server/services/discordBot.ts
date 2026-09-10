@@ -52,6 +52,7 @@ import {
   parseDriveLink,
   runManualMerge,
 } from "./manualMerge";
+import { probePublicDriveItem } from "./drivePublic";
 import {
   checkChapterAvailability,
   chapterUrlFromParts,
@@ -850,6 +851,44 @@ export function moveAccessFailureDetail(
     .join("\n");
 }
 
+/**
+ * نص فشل الوصول عندما يكون المجلد موجودًا ومشتركًا فعلًا: المشكلة حينها
+ * ليست في المشاركة بل نطاق توكن Drive نفسه (drive.file يرى ملفات البوت
+ * فقط) — والحل إعادة توليد التوكن بالنطاق الكامل.
+ */
+export function moveScopeFailureDetail(
+  folderName: string | null,
+  botEmail: string | null
+): string {
+  return [
+    `المجلد ${folderName ? `«${folderName}» ` : ""}موجود ومشترك، لكن توكن Drive الحالي للبوت بالنطاق المحدود (drive.file) لا يرى إلا المجلدات التي أنشأها البوت نفسه — لا يرى المجلدات المشتركة معه حتى لو كان محررًا عليها.`,
+    "**الحل:** أعد توليد GDRIVE_REFRESH_TOKEN بالنطاق الكامل ثم حدّثه في Railway — نفّذ `npx tsx scripts/mint-drive-token.mts` واتبع الخطوات (شرح كامل في docs/RAILWAY_DEPLOYMENT.md).",
+    botEmail ? `**حساب Drive الذي يستخدمه البوت:** ${botEmail}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/**
+ * يشخّص فشل الوصول لعنصر نقل: إن كان العنصر يُرى علنيًا من المتصفح فالسبب
+ * شبه المؤكد نطاق توكن drive.file — يعيد نص نطاق التوكن بدل النص العام.
+ */
+async function moveAccessDetail(
+  drive: GoogleDriveClient,
+  itemId: string,
+  slot: "من" | "إلى",
+  reason: string
+): Promise<string> {
+  const botEmail = await drive.getDriveAccountEmail();
+  try {
+    const probe = await probePublicDriveItem(itemId, "folder");
+    if (probe?.kind === "folder") return moveScopeFailureDetail(probe.name, botEmail);
+  } catch {
+    /* فشل الفحص العلني — نعرض النص العام */
+  }
+  return moveAccessFailureDetail(slot, reason, botEmail);
+}
+
 export type MoveNotice = {
   status: JobStatus;
   title: string;
@@ -1459,13 +1498,13 @@ async function replyMove(interaction: any) {
     try {
       toMeta = await drive.getFileMeta(to.id);
     } catch (error) {
-      const botEmail = await drive.getDriveAccountEmail();
       await fail(
         "❌ تعذر الوصول إلى مجلد الوجهة",
-        moveAccessFailureDetail(
+        await moveAccessDetail(
+          drive,
+          to.id,
           "إلى",
-          error instanceof Error ? error.message : "خطأ غير معروف",
-          botEmail
+          error instanceof Error ? error.message : "خطأ غير معروف"
         )
       );
       return;
@@ -1525,16 +1564,16 @@ async function moveAllSubfolders(
   try {
     fromMeta = await drive.getFileMeta(fromId);
   } catch (error) {
-    const botEmail = await drive.getDriveAccountEmail();
     await interaction.editReply(
       moveCardPayload(
         {
           status: "failed",
           title: "❌ تعذر الوصول إلى مجلد المصدر",
-          detail: moveAccessFailureDetail(
+          detail: await moveAccessDetail(
+            drive,
+            fromId,
             "من",
-            error instanceof Error ? error.message : "خطأ غير معروف",
-            botEmail
+            error instanceof Error ? error.message : "خطأ غير معروف"
           ),
         },
         options

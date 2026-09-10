@@ -34,6 +34,7 @@ import {
   mergeHeightLabel,
   mergeWidthLabel,
   moveAccessFailureDetail,
+  moveScopeFailureDetail,
   noticeFromJob,
   paginateForSelect,
   parseDriveFolderLinks,
@@ -337,6 +338,19 @@ describe("Discord ZEUS chapter experience", () => {
 
   it("caps the number of folder links accepted per move", () => {
     expect(MAX_MOVE_LINKS).toBe(50);
+  });
+
+  it("explains the token-scope failure when the folder is actually shared", () => {
+    const withName = moveScopeFailureDetail("مجلد صديقي", "zeus-bot@gmail.com");
+    expect(withName).toContain("«مجلد صديقي» موجود ومشترك");
+    expect(withName).toContain("drive.file");
+    expect(withName).toContain("mint-drive-token.mts");
+    expect(withName).toContain("GDRIVE_REFRESH_TOKEN");
+    expect(withName).toContain("**حساب Drive الذي يستخدمه البوت:** zeus-bot@gmail.com");
+
+    const withoutName = moveScopeFailureDetail(null, null);
+    expect(withoutName).toContain("موجود ومشترك");
+    expect(withoutName).not.toContain("«»");
   });
 
   it("renders pagination info and page nav buttons on the search results card", () => {
