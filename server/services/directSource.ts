@@ -197,7 +197,7 @@ function chapterPageHeaders(chapterUrl: string, cookie?: string): Record<string,
   };
 }
 
-async function fetchChapterHtml(chapterUrl: string, cookie?: string): Promise<string> {
+export async function fetchChapterHtml(chapterUrl: string, cookie?: string): Promise<string> {
   const parsed = new URL(chapterUrl);
   if (parsed.protocol !== "https:") {
     throw new DirectSourceError("السحب المباشر يقبل روابط HTTPS فقط.");

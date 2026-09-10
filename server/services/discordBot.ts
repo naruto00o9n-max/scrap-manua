@@ -53,6 +53,11 @@ import {
   runManualMerge,
 } from "./manualMerge";
 import { probePublicDriveItem } from "./drivePublic";
+import { directSourceMode, getDirectSessionCookie } from "./directSource";
+import {
+  inspectRokariLockedChapter,
+  purchaseRokariChapter,
+} from "./rokariPurchase";
 import {
   checkChapterAvailability,
   chapterUrlFromParts,
@@ -491,6 +496,7 @@ export function buildHelpComponents(
         "**1.** نفّذ `/فصل` واكتب رابط الفصل في الخانة المخصصة.",
         "**2.** أو نفّذ `/فصل` بدون رابط ثم أرسله كرسالة عادية في القناة خلال دقيقتين.",
         "**3.** بطاقة التقدم تتحدث تلقائيًا مع كل خطوة: فحص الرابط ← العثور على الفصل ← سحب الصفحات ← دمج الصفحات ← الرفع إلى Drive، وعند الاكتمال تجد زر فتح الفصل.",
+        "**4.** لو كان الفصل مقفلًا (مدفوعًا) ووثّق المالك جلسة الموقع، سيسألك أولًا: «شراء وسحب» يشتري الفصل بعملات الحساب ويبدأ السحب مباشرة، و«إلغاء» يوقف العملية دون أي خصم.",
       ].join("\n")
     ),
     separator(),
@@ -1132,6 +1138,225 @@ async function deleteMessageContent(channelId: string, messageId: string) {
   const found = await client.channels.fetch(channelId);
   if (!found?.isTextBased() || !("messages" in found)) return;
   await found.messages.delete(messageId);
+}
+
+// ============================================================
+// سؤال شراء الفصل المقفل (روكاري): بدل فشل الطلب وطلب إعادة الإرسال
+// بعد الشراء اليدوي، يُعرض سؤال عند اكتشاف القفل: الموافقة تشتري
+// الفصل بعملات الحساب الموثق في لوحة التحكم ثم يبدأ السحب فورًا،
+// والرفض يلغي دون أي خصم.
+// ============================================================
+
+type PendingLockedBuy = {
+  chapterUrl: string;
+  requesterId: string;
+  requesterName: string;
+  channelId: string;
+  guildId?: string;
+  messageId: string;
+  mangaTitle: string;
+  chapterName: string;
+  coinCost: number | null;
+  timer?: NodeJS.Timeout;
+};
+
+const pendingLockedBuys = new Map<string, PendingLockedBuy>();
+
+function buildLockedBuyQuestionPayload(
+  entry: Pick<PendingLockedBuy, "mangaTitle" | "chapterName" | "coinCost">,
+  token: string
+) {
+  const lines: string[] = [];
+  if (entry.mangaTitle) lines.push(`**العمل:** ${entry.mangaTitle}`);
+  if (entry.chapterName) lines.push(`**الفصل:** ${entry.chapterName}`);
+  if (entry.coinCost !== null) lines.push(`**السعر:** ${entry.coinCost} عملة من رصيد الموقع`);
+  lines.push(
+    "الموافقة تشتري الفصل من رصيد الحساب الموثق في لوحة التحكم ثم يبدأ السحب مباشرة، والرفض يلغي العملية."
+  );
+  const body: Raw[] = [
+    headerBlock("## 🔒 هذا الفصل مقفل — نشتريه ونسحبه؟", [], avatarUrl()),
+    separator(2),
+    text(lines.join("\n")),
+    separator(),
+    {
+      type: 1,
+      components: [
+        { type: 2, style: 3, label: "شراء وسحب", custom_id: `rokbuy:go:${token}` },
+        { type: 2, style: 4, label: "إلغاء", custom_id: `rokbuy:no:${token}` },
+      ],
+    },
+  ];
+  return {
+    flags: MessageFlags.IsComponentsV2 as MessageFlags.IsComponentsV2,
+    components: [raw({ type: 17, accent_color: GOLD, components: body })],
+  };
+}
+
+type RenderCard = (payload: object) => Promise<string>;
+
+/**
+ * يفحص رابط الفصل قبل بدء السحب: إن كان مقفلًا في موقع بجلية موثقة
+ * وعليه زر شراء قابل للقراءة، تُعرض بطاقة السؤال وتُسجّل الأزرار —
+ * ويعيد true إذا عُرض السؤال (فيتوقف المتصل عن بدء السحب مباشرة).
+ * أي حالة أخرى تجعل السحب يسير كالمعتاد دون أي سؤال.
+ */
+async function tryOfferLockedChapterPurchase(
+  render: RenderCard,
+  chapterUrl: string,
+  requester: Requester
+): Promise<boolean> {
+  try {
+    let host = "";
+    try {
+      host = new URL(chapterUrl).hostname.toLowerCase().replace(/^www\./, "");
+    } catch {
+      return false;
+    }
+    if (directSourceMode(host) !== "session-only") return false;
+    const cookie = await getDirectSessionCookie(host);
+    if (!cookie) return false;
+    const inspection = await inspectRokariLockedChapter(chapterUrl, cookie);
+    if (inspection.state !== "locked") return false;
+    const token = randomUUID();
+    const entry: PendingLockedBuy = {
+      chapterUrl,
+      requesterId: requester.id,
+      requesterName: requester.username,
+      channelId: requester.channelId,
+      guildId: requester.guildId,
+      messageId: "",
+      mangaTitle: inspection.mangaTitle || "العمل",
+      chapterName: inspection.chapterName || "الفصل",
+      coinCost: inspection.offer.coinCost,
+    };
+    const timer = setTimeout(() => {
+      const current = pendingLockedBuys.get(token);
+      if (!current) return;
+      pendingLockedBuys.delete(token);
+      void editMessageContent(
+        current.channelId,
+        current.messageId,
+        cardPayload({
+          status: "info",
+          title: "⏳ انتهت مهلة الرد",
+          detail: "لم يُشترَ الفصل — نفّذ /فصل من جديد إن أردت شراءه وسحبه.",
+        })
+      ).catch(() => undefined);
+    }, PROMPT_TIMEOUT_MS);
+    timer.unref?.();
+    entry.timer = timer;
+    pendingLockedBuys.set(token, entry);
+    try {
+      entry.messageId = await render(buildLockedBuyQuestionPayload(entry, token));
+    } catch (error) {
+      clearTimeout(entry.timer);
+      pendingLockedBuys.delete(token);
+      console.warn("[Discord] Locked buy question failed to render:", error);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.warn("[Discord] Locked chapter purchase offer skipped:", error);
+    return false;
+  }
+}
+
+async function handleRokariBuyButton(interaction: any) {
+  const [, action, token] = interaction.customId.split(":");
+  const entry = token ? pendingLockedBuys.get(token) : undefined;
+  if (!entry) {
+    await interaction
+      .reply({
+        content: "انتهت صلاحية هذا السؤال — نفّذ /فصل من جديد.",
+        flags: MessageFlags.Ephemeral,
+      })
+      .catch(() => undefined);
+    return;
+  }
+  if (entry.requesterId !== interaction.user.id && !isOwner(interaction.user.id)) {
+    await interaction
+      .reply({
+        content: "هذا السؤال موجّه لصاحب الطلب فقط.",
+        flags: MessageFlags.Ephemeral,
+      })
+      .catch(() => undefined);
+    return;
+  }
+  await interaction.deferUpdate();
+  clearTimeout(entry.timer);
+  pendingLockedBuys.delete(token!);
+  if (action === "no") {
+    await interaction
+      .editReply(
+        cardPayload({
+          status: "info",
+          title: "🚫 أُلغيت العملية",
+          detail: "لم يُشترَ الفصل — يمكنك /فصل في أي وقت.",
+        })
+      )
+      .catch(() => undefined);
+    return;
+  }
+  await interaction
+    .editReply(
+      cardPayload({
+        status: "pending",
+        title: "🛒 يجري شراء الفصل…",
+        detail: "يُشترى من رصيد الحساب الموثق ثم يبدأ السحب مباشرة.",
+      })
+    )
+    .catch(() => undefined);
+  let host = "";
+  try {
+    host = new URL(entry.chapterUrl).hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    /* مستحيل عمليًا — الرابط تحقق عند العرض */
+  }
+  const cookie = await getDirectSessionCookie(host);
+  if (!cookie) {
+    await interaction
+      .editReply(
+        cardPayload({
+          status: "failed",
+          title: "❌ لا توجد جلسة موثقة للموقع",
+          detail:
+            "وثّق كوكي جلسة الموقع من لوحة التحكم ثم نفّذ /فصل من جديد — لم يُخصم أي شيء.",
+        })
+      )
+      .catch(() => undefined);
+    return;
+  }
+  const inspection = await inspectRokariLockedChapter(entry.chapterUrl, cookie);
+  if (inspection.state === "other") {
+    await interaction
+      .editReply(
+        cardPayload({
+          status: "failed",
+          title: "❌ تعذر فحص الفصل قبل الشراء",
+          detail: `${inspection.reason ?? "عطب غير معروف"} — لم يُخصم أي شيء، أعد /فصل.`,
+        })
+      )
+      .catch(() => undefined);
+    return;
+  }
+  if (inspection.state === "locked") {
+    const outcome = await purchaseRokariChapter(entry.chapterUrl, inspection.offer, cookie);
+    if (!outcome.ok) {
+      await interaction
+        .editReply(
+          cardPayload({ status: "failed", title: "❌ تعذر شراء الفصل", detail: outcome.message })
+        )
+        .catch(() => undefined);
+      return;
+    }
+  }
+  // الفصل مفتوح الآن في الحساب (اشترى الآن أو كان مفتوحًا سلفًا) — السحب المعتاد.
+  await startChapterFromUrl(interactionCard(interaction), entry.chapterUrl, {
+    id: entry.requesterId,
+    username: entry.requesterName,
+    channelId: entry.channelId,
+    guildId: entry.guildId,
+  });
 }
 
 // ============================================================
@@ -3936,12 +4161,20 @@ async function replyChapter(interaction: any) {
       pendingChapterPrompts.set(key, { timer });
       return;
     }
-    await startChapterFromUrl(interactionCard(interaction), url, {
+    const requester: Requester = {
       id: interaction.user.id,
       username: interaction.user.username,
       channelId: interaction.channelId,
       guildId: interaction.guildId ?? undefined,
-    });
+    };
+    // فصل مقفل قابل للشراء بجلية موثقة؟ سؤال الشراء يُعرض بدل بدء السحب.
+    const offeredLockedBuy = await tryOfferLockedChapterPurchase(
+      async payload => (await interaction.editReply(payload)).id,
+      url,
+      requester
+    );
+    if (offeredLockedBuy) return;
+    await startChapterFromUrl(interactionCard(interaction), url, requester);
   } catch (error) {
     // إخفاء السبب الفعلي خلف «تحقق من الرابط» كان يربك صاحب الطلب — نعرض
     // الرسالة الحقيقية (مهلة/شبكة/خادم) مع السجل الكامل للتشخيص.
@@ -3959,6 +4192,8 @@ async function replyChapter(interaction: any) {
 }
 
 async function handleButton(interaction: any) {
+  if (interaction.customId.startsWith("rokbuy:"))
+    return void handleRokariBuyButton(interaction);
   if (
     interaction.customId.startsWith("search:page:") ||
     interaction.customId.startsWith("search:cpage:")
@@ -4166,14 +4401,22 @@ export async function startDiscordBot() {
     const content = message.content.trim();
     if (!/^https:\/\//i.test(content)) return;
     clearPrompt(key);
+    const requester: Requester = {
+      id: message.author.id,
+      username: message.author.username,
+      channelId: message.channelId,
+      guildId: message.guildId ?? undefined,
+    };
+    // فصل مقفل قابل للشراء بجلية موثقة؟ سؤال الشراء يُعرض بدل بدء السحب.
+    const offeredLockedBuy = await tryOfferLockedChapterPurchase(
+      async payload => (await message.reply(payload as never)).id,
+      content,
+      requester
+    );
+    if (offeredLockedBuy) return;
     const card = messageCard(message);
     try {
-      await startChapterFromUrl(card, content, {
-        id: message.author.id,
-        username: message.author.username,
-        channelId: message.channelId,
-        guildId: message.guildId ?? undefined,
-      });
+      await startChapterFromUrl(card, content, requester);
     } catch (error) {
       const detail =
         error instanceof UrlPolicyError
