@@ -40,6 +40,29 @@ export const MERGE_WIDTH_MIN = 600;
 export const MERGE_WIDTH_MAX = 2400;
 const PAGE_DOWNLOAD_CONCURRENCY = 6;
 
+// ============================================================
+// القص الذكي المرن — الهدف صفر فقاعة أو رسمة مقصوصة عند فواصل الدمج:
+// بدل القص عند ارتفاع ثابت يمر أحيانًا عبر نص فقاعة، يُبحث عن سطر بكسلات
+// فارغ قريب من النقطة المثالية ويُقص عنده؛ وإن كان الرسم كثيفًا حول النقطة
+// فلا مفر من القص عبره، تُخاط الشريحة المعلقة أعلى الصورة التالية بنهاية
+// الصورة السابقة — نقل حدود مجموعتين فقط، بلا أي فقدان أو إعادة رسم.
+// ============================================================
+
+/** نصف مدى بحث القص الذكي حول النقطة المثالية (بكسل لكل اتجاه). */
+export const SMART_CUT_SEARCH = 400;
+/** عتبة البياض في بحث السطر الفارغ: البكسل الأفتح من هذا يُعدّ ضجيج ضغط لا حبرًا. */
+export const SMART_CUT_BLANK_THRESHOLD = 245;
+/** عتبة الحبر الداكن في كشف الشريحة المعلقة أعلى الصورة التالية (الخياطة الاحتياطية). */
+export const REPAIR_INK_THRESHOLD = 200;
+/** أقل عدد بكسلات داكنة في السطر ليُعدّ سطرًا يحمل رسمة عند كشف الخياطة. */
+export const REPAIR_ROW_INK_MIN = 3;
+/** أقل عدد أسطر صفّية فاصلة يؤكد انتهاء الشريحة المعلقة أعلى الصورة التالية. */
+export const REPAIR_BLANK_GAP = 30;
+/** هامش أمان بعد آخر سطر حبر في الشريحة المعلقة قبل وضع خط القطع الجديد. */
+export const REPAIR_MARGIN = 56;
+/** أقصى عمق فحص للشريحة المعلقة من خط القطع قبل الاستسلام وترك القص كما هو. */
+export const REPAIR_MAX_SCAN = 2000;
+
 /** صيغ إخراج الصور المدمجة المدعومة — الاختيار من لوحة الإعدادات. */
 export type ImageOutputFormat = "png" | "jpeg" | "webp";
 export type MergedImageMime = "image/png" | "image/jpeg" | "image/webp";
@@ -420,23 +443,74 @@ export type MergeSlice = { pageIndex: number; top: number; height: number };
  * 4. إن خال الانزلاق السقف (حدث فقط عندما يكون المثالي ملاصقًا للسقف)
  *    تعود كل النقاط إلى القيم المثالية — السقف خط أحمر لا يُخترق.
  *
- * القص نفسه استخراج بكسل-دقيق (extract) بلا أي إعادة عيّنة — لا يمس الجودة،
- * والقراءة تسلسلية بترتيب الصفحات الأصلي فلا يختل ترتيب القصة.
+ * هذه هي الخطة الحسابية النقية؛ فوقها يعمل القص الذكي refineMergeCutsAgainstInk
+ * الذي يضبط النقاط على بكسلات حقيقية، والقص نفسه استخراج بكسل-دقيق (extract)
+ * بلا أي إعادة عيّنة — لا يمس الجودة، والقراءة تسلسلية بترتيب الصفحات الأصلي
+ * فلا يختل ترتيب القصة.
  */
-export function planUniformMergeGroups(heights: number[], heightCap: number): MergeSlice[][] {
+/** خطة الدمج متساوي الارتفاع: حدود حسابية نقية تُبنى منها المجموعات قبل أي ضبط بكسلي. */
+export type UniformMergePlan = {
+  /** مجموع ارتفاعات الصفحات. */
+  total: number;
+  /** عدد الصور الناتجة. */
+  groupCount: number;
+  /** الارتفاع المثالي لكل صورة (المجموع ÷ العدد). */
+  ideal: number;
+  /** الحدود التراكمية لبداية كل صفحة في الفضاء المدمج. */
+  cumulative: number[];
+  /** نقاط القص المثالية بين الصور قبل أي ضبط بكسلي. */
+  idealCuts: number[];
+  /** مجموعات الشرائح عند نقاط القص المحسوبة (انزلاق حدود الصفحات). */
+  groups: MergeSlice[][];
+};
+
+/** يبني مجموعات الشرائح من نقاط قص محددة في الفضاء المدمج — تغطية متصلة بلا فقدان. */
+function buildMergeGroupsFromCuts(groupCuts: number[], heights: number[], cumulative: number[], total: number): MergeSlice[][] {
+  const groupCount = groupCuts.length + 1;
+  const groups: MergeSlice[][] = [];
+  let cutIndex = 0;
+  let cursor = 0;
+  for (let group = 0; group < groupCount; group += 1) {
+    const end = group === groupCount - 1 ? total : groupCuts[cutIndex++]!;
+    const slices: MergeSlice[] = [];
+    while (cursor < end) {
+      let pageIndex = 0;
+      while (pageIndex < heights.length && cumulative[pageIndex + 1]! <= cursor) pageIndex += 1;
+      const pageStart = cumulative[pageIndex]!;
+      const pageHeight = heights[pageIndex]!;
+      const sliceHeight = Math.min(pageStart + pageHeight, end) - cursor;
+      slices.push({ pageIndex, top: cursor - pageStart, height: sliceHeight });
+      cursor += sliceHeight;
+    }
+    groups.push(slices);
+  }
+  return groups;
+}
+
+/**
+ * الخطة الحسابية النقية للدمج متساوي الارتفاع (قبل القص الذكي البكسلي):
+ *
+ * 1. مجموع ارتفاع الصفحات T ≤ السقف؟ صورة واحدة بلا أي قص (سلوك الفصول الصغيرة).
+ * 2. وإلا العدد الأدنى للصور N = ⌈T ÷ السقف⌉ والارتفاع المثالي = T ÷ N.
+ * 3. نقاط القص عند حدود المثالي مع انزلاق كل نقطة إلى أقرب حد صفحة داخل
+ *    هامش صغير لتفادي شرائح الضجير — وإن خال الانزلاق السقف عادت النقاط للمثالي.
+ */
+export function planUniformMerge(heights: number[], heightCap: number): UniformMergePlan {
+  const cumulative: number[] = [0];
+  for (const height of heights) cumulative.push(cumulative[cumulative.length - 1]! + height);
+  const total = cumulative[cumulative.length - 1]!;
+
   const wholePageSlices = (): MergeSlice[][] => [
     heights.map((height, pageIndex) => ({ pageIndex, top: 0, height })),
   ];
 
-  const total = heights.reduce((sum, height) => sum + height, 0);
-  if (total <= heightCap) return wholePageSlices();
+  if (total <= heightCap) {
+    return { total, groupCount: 1, ideal: total, cumulative, idealCuts: [], groups: wholePageSlices() };
+  }
 
   const groupCount = Math.ceil(total / heightCap);
   const ideal = total / groupCount;
   const snapTolerance = Math.min(500, Math.max(120, Math.round(ideal * 0.02)));
-
-  const cumulative: number[] = [0];
-  for (const height of heights) cumulative.push(cumulative[cumulative.length - 1]! + height);
 
   // القص المثالي مقرّبًا لبكسل — المجموعة الأخيرة تمتص التقريب فمجموع الشرائح = T تمامًا.
   const idealCuts = Array.from({ length: groupCount - 1 }, (_, k) => Math.round((k + 1) * ideal));
@@ -461,33 +535,185 @@ export function planUniformMergeGroups(heights: number[], heightCap: number): Me
 
   // التحقق من السقف بعد الانزلاق — أي تجاوز يعيد كل النقاط إلى المثالي
   // (القص المثالي مضمون داخل السقف: كل مجموعة = المثالي ± تقريب بكسل).
-  const buildGroups = (groupCuts: number[]): MergeSlice[][] => {
-    const groups: MergeSlice[][] = [];
-    let cutIndex = 0;
-    let cursor = 0;
-    for (let group = 0; group < groupCount; group += 1) {
-      const end = group === groupCount - 1 ? total : groupCuts[cutIndex++]!;
-      const slices: MergeSlice[] = [];
-      while (cursor < end) {
-        let pageIndex = 0;
-        while (pageIndex < heights.length && cumulative[pageIndex + 1]! <= cursor) pageIndex += 1;
-        const pageStart = cumulative[pageIndex]!;
-        const pageHeight = heights[pageIndex]!;
-        const sliceHeight = Math.min(pageStart + pageHeight, end) - cursor;
-        slices.push({ pageIndex, top: cursor - pageStart, height: sliceHeight });
-        cursor += sliceHeight;
-      }
-      groups.push(slices);
-    }
-    return groups;
-  };
+  const buildGroups = (groupCuts: number[]): MergeSlice[][] =>
+    buildMergeGroupsFromCuts(groupCuts, heights, cumulative, total);
 
   for (let group = 0; group < groupCount; group += 1) {
     const start = group === 0 ? 0 : cuts[group - 1]!;
     const end = group === groupCount - 1 ? total : cuts[group]!;
-    if (end - start > heightCap + 1) return buildGroups(idealCuts);
+    if (end - start > heightCap + 1) {
+      return { total, groupCount, ideal, cumulative, idealCuts, groups: buildGroups(idealCuts) };
+    }
   }
-  return buildGroups(cuts);
+  return { total, groupCount, ideal, cumulative, idealCuts, groups: buildGroups(cuts) };
+}
+
+/** واجهة متوافقة مع الاستدعاءات القديمة: مجموعات الخطة الحسابية فقط. */
+export function planUniformMergeGroups(heights: number[], heightCap: number): MergeSlice[][] {
+  return planUniformMerge(heights, heightCap).groups;
+}
+
+/** نتيجة القص الذكي: نقاط القص النهائية وعدد الإزاحات والخياطات. */
+export type MergeCutRefinement = {
+  cuts: number[];
+  movedToBlank: number;
+  repairedSeams: number;
+};
+
+/** حبر أسطر مدى من البكسلات: عدّاد بكسلات تحت عتبة البياض وعدّاد تحت عتبة الدكنة. */
+type BandInk = { ink: Uint32Array; dark: Uint32Array };
+
+/**
+ * القص الذكي المرن فوق الخطة الحسابية — يعيد نقاط قص معدّلة على بكسلات حقيقية:
+ *
+ * 1. **إزاحة إلى سطر فارغ**: لكل نقطة مثالية يُقرأ حبر المدى ±SMART_CUT_SEARCH
+ *    حولها (نطاقات ضيقة فقط — لا فك كامل للصفحات) ويُقص عند أقرب سطر لا يحمل
+ *    أي بكسل أدكن من SMART_CUT_BLANK_THRESHOLD — فلا تُقطع فقاعة أو لوحة.
+ * 2. **خياطة احتياطية**: إن كان الرسم كثيفًا حول النقطة فلا سطر فارغ، والقص
+ *    يمر عبر حبر داكن يلامس أعلى الصورة التالية، يُزاح الخط إلى نهاية تلك
+ *    الشريحة المعلقة: آخر سطر حبر + REPAIR_MARGIN داخل فجوة صفّية مؤكدة
+ *    (REPAIR_BLANK_GAP على الأقل، حتى REPAIR_MARGIN) ضمن REPAIR_MAX_SCAN —
+ *    فتكتمل الرسمة في الصورة السابقة والشريحة لم تُنقل ولا أُعيد رسمها.
+ * 3. **قيود صارمة**: كل مجموعة تبقى ≤ heightCap (إلا زحف الخياطة وحده، ثمن
+ *    إكمال فقاعة كانت ستنقطع)، والنقاط متزايدة تمامًا وكل مجموعة ≥ سطر واحد،
+ *    والتغطية عبر buildMergeGroupsFromCuts متصلة من أول بكسل لآخره مهما كانت
+ *    النقاط — فلا صف يُفقد ولا يُكرر أبدًا.
+ */
+export async function refineMergeCutsAgainstInk(params: {
+  idealCuts: number[];
+  total: number;
+  heights: number[];
+  cumulative: number[];
+  pagePaths: string[];
+  dimensions: Array<{ width?: number; height?: number }>;
+  heightCap: number;
+}): Promise<MergeCutRefinement> {
+  const { idealCuts, total, heights, cumulative, pagePaths, dimensions, heightCap } = params;
+  if (!idealCuts.length) return { cuts: [], movedToBlank: 0, repairedSeams: 0 };
+
+  /** يقرأ حبر نطاق صفوف من صفحة واحدة — استخراج ضيق بلا فك كامل. */
+  const readPageBand = async (pageIndex: number, startRow: number, rowCount: number): Promise<BandInk> => {
+    const pageWidth = dimensions[pageIndex]?.width ?? 0;
+    const pageHeight = heights[pageIndex]!;
+    if (pageWidth <= 0 || startRow < 0 || rowCount <= 0 || startRow + rowCount > pageHeight) {
+      throw new Error("تعذر تحديد مدى قراءة البكسلات للقص الذكي.");
+    }
+    const { data, info } = await sharp(pagePaths[pageIndex]!)
+      .extract({ left: 0, top: startRow, width: pageWidth, height: rowCount })
+      .flatten({ background: { r: 255, g: 255, b: 255 } })
+      .grayscale()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    const channels = Math.max(1, info.channels);
+    const ink = new Uint32Array(rowCount);
+    const dark = new Uint32Array(rowCount);
+    for (let y = 0; y < rowCount; y += 1) {
+      let inkPixels = 0;
+      let darkPixels = 0;
+      const rowOffset = y * pageWidth * channels;
+      for (let x = 0; x < pageWidth; x += 1) {
+        const value = data[rowOffset + x * channels]!;
+        if (value < SMART_CUT_BLANK_THRESHOLD) inkPixels += 1;
+        if (value < REPAIR_INK_THRESHOLD) darkPixels += 1;
+      }
+      ink[y] = inkPixels;
+      dark[y] = darkPixels;
+    }
+    return { ink, dark };
+  };
+
+  /** يقرأ حبر الأسطر [fromRow, toRow) من الفضاء المدمج عبر الصفحات المتقاطعة. */
+  const readMergedInk = async (fromRow: number, toRow: number): Promise<BandInk> => {
+    const rowCount = Math.max(0, toRow - fromRow);
+    const ink = new Uint32Array(rowCount);
+    const dark = new Uint32Array(rowCount);
+    let cursor = fromRow;
+    while (cursor < toRow) {
+      let pageIndex = 0;
+      while (pageIndex < heights.length && cumulative[pageIndex + 1]! <= cursor) pageIndex += 1;
+      if (pageIndex >= heights.length) throw new Error("تعذر تحديد الصفحة عند مدى القص الذكي.");
+      const bandStartInPage = cursor - cumulative[pageIndex]!;
+      const bandRows = Math.min(heights[pageIndex]! - bandStartInPage, toRow - cursor);
+      const band = await readPageBand(pageIndex, bandStartInPage, bandRows);
+      ink.set(band.ink, cursor - fromRow);
+      dark.set(band.dark, cursor - fromRow);
+      cursor += bandRows;
+    }
+    return { ink, dark };
+  };
+
+  const cuts: number[] = [];
+  let movedToBlank = 0;
+  let repairedSeams = 0;
+
+  for (let k = 0; k < idealCuts.length; k += 1) {
+    const ideal = idealCuts[k]!;
+    const previousCut = k === 0 ? 0 : cuts[k - 1]!;
+    const nextIdeal = k + 1 < idealCuts.length ? idealCuts[k + 1]! : total;
+    const isLastCut = k === idealCuts.length - 1;
+
+    // قيود النقطة: داخل مدى البحث، والمجموعة المحاذية داخل السقف، وبقي سطر
+    // واحد على الأقل لكل مجموعة — والمثالي نفسه داخل المدى دائمًا.
+    let lo = Math.max(ideal - SMART_CUT_SEARCH, previousCut + 1);
+    let hi = Math.min(ideal + SMART_CUT_SEARCH, previousCut + heightCap);
+    if (isLastCut) lo = Math.max(lo, total - heightCap);
+    hi = Math.min(hi, total - 1);
+    if (lo > hi) lo = hi = Math.min(Math.max(ideal, previousCut + 1), total - 1);
+    const fallbackCut = Math.min(hi, Math.max(lo, ideal));
+
+    let cut = fallbackCut;
+    const blankWindow = await readMergedInk(lo, hi + 1);
+    let bestRow = -1;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (let row = lo; row <= hi; row += 1) {
+      if (blankWindow.ink[row - lo] !== 0) continue;
+      const distance = Math.abs(row - ideal);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestRow = row;
+      }
+    }
+
+    if (bestRow >= 0) {
+      cut = bestRow;
+      if (cut !== ideal) movedToBlank += 1;
+    } else {
+      // لا سطر فارغ في المدى (رسم كثيف): إن كان الخط يلامس حبرًا داكنًا
+      // أعلى الصورة التالية يُزاح إلى نهاية الشريحة المعلقة بعد فجوة مؤكدة.
+      const scanEnd = Math.min(cut + REPAIR_MAX_SCAN + REPAIR_MARGIN, nextIdeal, total);
+      if (scanEnd > cut + 1) {
+        const scan = await readMergedInk(cut, scanEnd);
+        let attachesToTop = false;
+        let lastInkRow = -1;
+        let gapAfterLastInk = 0;
+        let repairedCut = -1;
+        for (let i = 0; i < scan.dark.length; i += 1) {
+          if (i < 5 && !attachesToTop && scan.dark[i]! >= REPAIR_ROW_INK_MIN) attachesToTop = true;
+          if (scan.dark[i]! >= REPAIR_ROW_INK_MIN) {
+            lastInkRow = cut + i;
+            gapAfterLastInk = 0;
+          } else if (lastInkRow >= 0) {
+            gapAfterLastInk += 1;
+            if (gapAfterLastInk >= REPAIR_MARGIN) {
+              repairedCut = lastInkRow + REPAIR_MARGIN;
+              break;
+            }
+          }
+        }
+        if (repairedCut < 0 && lastInkRow >= 0 && gapAfterLastInk >= REPAIR_BLANK_GAP) {
+          repairedCut = lastInkRow + gapAfterLastInk;
+        }
+        if (attachesToTop && repairedCut > cut && repairedCut < nextIdeal) {
+          cut = repairedCut;
+          repairedSeams += 1;
+        }
+      }
+    }
+
+    cuts.push(cut);
+  }
+
+  return { cuts, movedToBlank, repairedSeams };
 }
 
 async function renderSliceGroupToFile(
@@ -624,15 +850,41 @@ export async function openLocalImageMergeSession(
       : await scalePagesToUniformWidth(pagePaths, originalDimensions, width, path.join(dir, "scaled"));
 
     // التجميع متساوي الارتفاع: مجموع الأطوال يوزَّع بالتساوي على أقل عدد
-    // صور داخل السقف، مع قص بكسل-دقيق للصفحات عند الحدود الحسابية —
-    // والمجموعات الأطول من ميزانية صيغة الترميز تُحوّل إلى PNG بلا أي فقدان
-    // داخل resolveGroupOutput.
+    // صور داخل السقف، ثم يُضبط القص بكسليًا (القص الذكي): كل فاصل يُزاح إلى
+    // أقرب سطر فارغ حتى لا تنقطع فقاعة أو رسمة، ومع الرسم الكثيف تُخاط
+    // الشريحة المعلقة أعلى الصورة التالية بنهاية سابقتها — والمجموعات الأطول
+    // من ميزانية صيغة الترميز تُحوّل إلى PNG بلا أي فقدان داخل resolveGroupOutput.
     const heights = effectiveDimensions.map((item, index) => {
       const height = item?.height ?? 0;
       if (!height) throw new Error(`تعذر قراءة ارتفاع الصفحة ${index + 1}.`);
       return height;
     });
-    const groups = planUniformMergeGroups(heights, heightCap);
+    const plan = planUniformMerge(heights, heightCap);
+    let groups = plan.groups;
+    if (plan.groupCount > 1) {
+      try {
+        const refinement = await refineMergeCutsAgainstInk({
+          idealCuts: plan.idealCuts,
+          total: plan.total,
+          heights,
+          cumulative: plan.cumulative,
+          pagePaths: effectivePaths,
+          dimensions: effectiveDimensions,
+          heightCap,
+        });
+        if (refinement.cuts.length === plan.idealCuts.length) {
+          groups = buildMergeGroupsFromCuts(refinement.cuts, heights, plan.cumulative, plan.total);
+          if (refinement.movedToBlank > 0) {
+            notes.push(`القص الذكي: أُزح ${refinement.movedToBlank} من ${plan.idealCuts.length} فواصل إلى أقرب سطر فارغ تفاديًا لقطع فقاعة أو رسمة.`);
+          }
+          if (refinement.repairedSeams > 0) {
+            notes.push(`القص الذكي: خُيطت ${refinement.repairedSeams} حافة صورة كان يقطعها الفاصل عبر إلحاق شريحتها المعلقة بنهاية الصورة السابقة.`);
+          }
+        }
+      } catch {
+        notes.push("تعذر قراءة بكسلات الصفحات للقص الذكي — بقيت فواصل القص الحسابية كما هي.");
+      }
+    }
 
     const images: MergedChapterFile[] = [];
     // التسلسل مقصود: تُرسم مجموعة واحدة في كل مرة وتُكتب إلى القرص فورًا.
