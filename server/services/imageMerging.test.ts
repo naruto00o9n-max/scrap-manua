@@ -1,3 +1,6 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import sharp from "sharp";
 import {
@@ -6,9 +9,11 @@ import {
   normalizeMergeHeightCap,
   normalizeMergeWidth,
   openChapterMergeSession,
+  openLocalImageMergeSession,
   PALETTE_AREA_LIMIT,
   pickUniformWidth,
   planUniformMergeGroups,
+  refineMergeCutsAgainstInk,
   resolveGroupOutput,
   WEBP_MAX_DIMENSION,
 } from "./imageMerging";
@@ -553,5 +558,190 @@ describe("memory-safe merge budgets", () => {
       await session.cleanup();
     }
     vi.unstubAllGlobals();
+  });
+});
+
+// ============================================================
+// القص الذكي المرن — صفر فقاعة مقصوصة عند فواصل الدمج
+// ============================================================
+
+/** يبني صفحة بيضاء تحمل أشرطة حبر داكن (فقاعات/لوحات) في مدى الصفوف المحدد [أعلى، أسفل). */
+async function whitePageWithInk(width: number, height: number, inkBands: Array<[number, number]>, ink: { r: number; g: number; b: number } = { r: 20, g: 20, b: 20 }): Promise<Buffer> {
+  const composites: Array<{ input: Buffer; left: number; top: number }> = [];
+  for (const [top, bottom] of inkBands) {
+    composites.push({
+      input: await sharp({ create: { width, height: bottom - top, channels: 3, background: ink } }).png().toBuffer(),
+      left: 0,
+      top,
+    });
+  }
+  return sharp({ create: { width, height, channels: 3, background: { r: 255, g: 255, b: 255 } } })
+    .composite(composites)
+    .png()
+    .toBuffer();
+}
+
+/** يركّب صورًا عموديًا فوق بعضها لمقارنة محتوى النواتج بالمدخلات. */
+async function stackVertically(buffers: Buffer[]): Promise<Buffer> {
+  const metas = await Promise.all(buffers.map(buffer => sharp(buffer).metadata()));
+  const width = metas[0]!.width!;
+  const height = metas.reduce((sum, meta) => sum + (meta.height ?? 0), 0);
+  const composites: Array<{ input: Buffer; left: number; top: number }> = [];
+  let top = 0;
+  for (let index = 0; index < buffers.length; index += 1) {
+    composites.push({ input: buffers[index]!, left: 0, top });
+    top += metas[index]!.height ?? 0;
+  }
+  return sharp({ create: { width, height, channels: 3, background: { r: 255, g: 255, b: 255 } } })
+    .composite(composites)
+    .png()
+    .toBuffer();
+}
+
+async function rawGray(buffer: Buffer): Promise<Buffer> {
+  return sharp(buffer).grayscale().raw().toBuffer();
+}
+
+async function rowMin(filePath: string, top: number): Promise<number> {
+  const row = await sharp(filePath).extract({ left: 0, top, width: 800, height: 1 }).grayscale().raw().toBuffer();
+  return row.reduce((min, value) => Math.min(min, value), 255);
+}
+
+describe("القص الذكي المرن — لا فقاعة مقصوصة", () => {
+  it("ينقل الفاصل إلى أقرب سطر فارغ فتكتمل الفقاعة التي كان سيقطعها نصفين", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "smart-cut-"));
+    try {
+      // صفحة واحدة 20000px وسقف 15000 → صورتان والمثالي 10000؛
+      // فقاعة تعبر المثالي (9900–10200) — القص الثابت كان سيقصها نصفين.
+      const pagePath = path.join(dir, "page-1.png");
+      await sharp(await whitePageWithInk(800, 20000, [[9900, 10200]])).toFile(pagePath);
+      const session = await openLocalImageMergeSession([pagePath], undefined, undefined, { heightCap: 15000 });
+      try {
+        // أقرب سطر فارغ للمثالي: 9899 (فوق الفقاعة) لا 10200 (تحتها).
+        expect(session.images.map(img => img.height)).toEqual([9899, 10101]);
+        expect(await rowMin(session.images[1]!.filePath, 0)).toBeGreaterThanOrEqual(245);
+        expect(await rowMin(session.images[0]!.filePath, 9898)).toBeGreaterThanOrEqual(245);
+        // الفقاعة كاملة داخل الصورة الثانية (صفوف 1–301) وبها حبر داكن.
+        const bubble = await sharp(session.images[1]!.filePath).extract({ left: 0, top: 1, width: 800, height: 300 }).stats();
+        expect(bubble.channels[0]!.min).toBeLessThan(100);
+        expect(session.notes.join("\n")).toContain("القص الذكي");
+      } finally {
+        await session.cleanup();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("يخيط الشريحة المعلقة حين يكون الرسم كثيفًا حول الفاصل ولا سطر فارغ في المدى", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "smart-repair-"));
+    try {
+      // رسم كثيف حتى الصف 10600 ثم فجوة بيضاء — المثالي 10000 داخل الرسم
+      // ولا سطر فارغ في ±400، فتُزاح الحافة إلى 10599 + 56 = 10655.
+      const pagePath = path.join(dir, "page-1.png");
+      const dense = await sharp({ create: { width: 800, height: 10600, channels: 3, background: { r: 48, g: 48, b: 48 } } }).png().toBuffer();
+      const page = await sharp({ create: { width: 800, height: 20000, channels: 3, background: { r: 255, g: 255, b: 255 } } })
+        .composite([{ input: dense, left: 0, top: 0 }])
+        .png()
+        .toBuffer();
+      await sharp(page).toFile(pagePath);
+      const session = await openLocalImageMergeSession([pagePath], undefined, undefined, { heightCap: 15000 });
+      try {
+        expect(session.images.map(img => img.height)).toEqual([10655, 9345]);
+        // أعلى الصورة الثانية بلا حبر داكن — الشريحة المعلقة أُلحقت بالسابقة.
+        const topRow = await sharp(session.images[1]!.filePath).extract({ left: 0, top: 0, width: 800, height: 1 }).grayscale().raw().toBuffer();
+        expect(topRow.every(value => value >= 200)).toBe(true);
+        expect(session.notes.join("\n")).toContain("خُيطت");
+      } finally {
+        await session.cleanup();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("يبقي الفاصل عند المثالي حين لا سطر فارغ ولا فجوة تؤكد انتهاء الشريحة", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "smart-solid-"));
+    try {
+      // صفحة موحدة الدكنة 16000 وسقف 15000 → المثالي 8000 كما في القص الحسابي.
+      const pagePath = path.join(dir, "page-1.png");
+      await sharp({ create: { width: 900, height: 16000, channels: 3, background: { r: 68, g: 68, b: 68 } } }).png().toFile(pagePath);
+      const session = await openLocalImageMergeSession([pagePath], undefined, undefined, { heightCap: 15000 });
+      try {
+        expect(session.images.map(img => img.height)).toEqual([8000, 8000]);
+      } finally {
+        await session.cleanup();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("يبحث عبر حدود الصفحات ويبقي كل مجموعة داخل السقف", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "smart-cross-"));
+    try {
+      // مجموع 5200 وسقف 3000 → المثالي 2600 = حد الصفحتين تمامًا، لكن أعلى
+      // الصفحة الثانية فقاعة (0–100) فالسطر الفارغ الأقرب 2599 قبل الحد.
+      const page1 = path.join(dir, "page-1.png");
+      const page2 = path.join(dir, "page-2.png");
+      await sharp(await whitePageWithInk(800, 2600, [])).toFile(page1);
+      await sharp(await whitePageWithInk(800, 2600, [[0, 100]])).toFile(page2);
+      const refinement = await refineMergeCutsAgainstInk({
+        idealCuts: [2600],
+        total: 5200,
+        heights: [2600, 2600],
+        cumulative: [0, 2600, 5200],
+        pagePaths: [page1, page2],
+        dimensions: [{ width: 800, height: 2600 }, { width: 800, height: 2600 }],
+        heightCap: 3000,
+      });
+      expect(refinement).toEqual({ cuts: [2599], movedToBlank: 1, repairedSeams: 0 });
+
+      const session = await openLocalImageMergeSession([page1, page2], undefined, undefined, { heightCap: 3000 });
+      try {
+        expect(session.images.map(img => img.height)).toEqual([2599, 2601]);
+        expect(await rowMin(session.images[1]!.filePath, 0)).toBeGreaterThanOrEqual(245);
+        const bubble = await sharp(session.images[1]!.filePath).extract({ left: 0, top: 1, width: 800, height: 99 }).stats();
+        expect(bubble.channels[0]!.min).toBeLessThan(100);
+      } finally {
+        await session.cleanup();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("يحافظ على كل بكسل بترتيبه عبر الفصول متعددة الصور (مساواة بكسلية كاملة)", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "smart-preserve-"));
+    try {
+      // ثلاث صفحات بمحتوى متناثر؛ المجموع 26000 وسقف 10000 → ثلاث صور مثالي ≈ 8667.
+      const pageBuffers = [
+        await whitePageWithInk(800, 9000, [[200, 700], [8300, 9000]]),
+        await whitePageWithInk(800, 8000, [[0, 120], [4000, 4600]]),
+        await whitePageWithInk(800, 9000, [[5000, 5900], [8990, 9000]]),
+      ];
+      const pagePaths: string[] = [];
+      for (let index = 0; index < pageBuffers.length; index += 1) {
+        const pagePath = path.join(dir, `page-${index + 1}.png`);
+        await sharp(pageBuffers[index]!).toFile(pagePath);
+        pagePaths.push(pagePath);
+      }
+      const session = await openLocalImageMergeSession(pagePaths, undefined, undefined, { heightCap: 10000 });
+      try {
+        expect(session.images).toHaveLength(3);
+        for (const merged of session.images) expect(merged.height).toBeLessThanOrEqual(10000);
+        expect(session.images.reduce((sum, merged) => sum + merged.height, 0)).toBe(26000);
+        // مصفوفة النواتج بترتيبها = مصفوفة المدخلات بكسلًا بكسل —
+        // القص الذكي نقل حدود مجموعتين فقط فلا صف فُقد ولا تكرر.
+        const expected = await rawGray(await stackVertically(pageBuffers));
+        const outputs = await Promise.all(session.images.map(merged => readFile(merged.filePath)));
+        const actual = await rawGray(await stackVertically(outputs));
+        expect(actual.equals(expected)).toBe(true);
+      } finally {
+        await session.cleanup();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
