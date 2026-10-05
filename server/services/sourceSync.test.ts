@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { SuwayomiSource } from "./suwayomi";
 import {
   hostnameFromHomeUrl,
+  isPlaceholderHostname,
+  planHostnameHeals,
   planSourceChanges,
   sourceLangBackfills,
   type SyncPlan,
@@ -208,5 +210,86 @@ describe("owner source control", () => {
     );
     expect(unblocked.create).toHaveLength(1);
     expect(unblocked.blockedSkipped).toBe(0);
+  });
+});
+
+describe("isPlaceholderHostname", () => {
+  it("matches only the auto-sync placeholder format", () => {
+    expect(isPlaceholderHostname("suwayomi-1911019612901009263.sync.internal")).toBe(true);
+    expect(isPlaceholderHostname("evascans.net")).toBe(false);
+    expect(isPlaceholderHostname("suwayomi-x.sync.internal")).toBe(false);
+    expect(isPlaceholderHostname("example.com/suwayomi-1.sync.internal")).toBe(false);
+  });
+});
+
+describe("planHostnameHeals", () => {
+  it("heals a placeholder row once the server reports the real homeUrl", () => {
+    // صف سُجّل بنطاق مؤقت حين كان homeUrl فارغًا — ثم أعلن الخادم النطاق الحقيقي
+    const heals = planHostnameHeals(
+      [installed("eva", "Eva Scans", "https://evascans.net")],
+      [{ id: 3, suwayomiSourceId: "eva", status: "active", origin: "suwayomi", hostname: "suwayomi-1911019612901009263.sync.internal" }]
+    );
+    expect(heals).toEqual([{ source: expect.objectContaining({ id: "eva" }), hostname: "evascans.net" }]);
+  });
+
+  it("does not heal rows with real hostnames, manual rows, or unknown sources", () => {
+    const installedSources = [installed("eva", "Eva Scans", "https://evascans.net")];
+    const heals = planHostnameHeals(installedSources, [
+      { id: 1, suwayomiSourceId: "eva", status: "active", origin: "suwayomi", hostname: "evascans.net" },
+      { id: 2, suwayomiSourceId: "gone", status: "active", origin: "suwayomi", hostname: "suwayomi-42.sync.internal" },
+      { id: 3, suwayomiSourceId: "eva", status: "active", origin: "manual", hostname: "suwayomi-43.sync.internal" },
+      { id: 4, suwayomiSourceId: null, status: "active", origin: "suwayomi", hostname: "suwayomi-44.sync.internal" },
+    ]);
+    expect(heals).toHaveLength(0);
+  });
+
+  it("does not heal when the homeUrl is still missing", () => {
+    const heals = planHostnameHeals(
+      [installed("mystery", "Mystery", null)],
+      [{ id: 5, suwayomiSourceId: "mystery", status: "active", origin: "suwayomi", hostname: "suwayomi-77.sync.internal" }]
+    );
+    expect(heals).toHaveLength(0);
+  });
+
+  it("does not heal onto a hostname held by another row", () => {
+    const heals = planHostnameHeals(
+      [installed("md-cs", "MangaDex (CS)", "https://mangadex.org")],
+      [
+        { id: 1, suwayomiSourceId: "md-en", status: "active", origin: "suwayomi", hostname: "mangadex.org" },
+        { id: 2, suwayomiSourceId: "md-cs", status: "active", origin: "suwayomi", hostname: "suwayomi-91.sync.internal" },
+      ]
+    );
+    expect(heals).toHaveLength(0);
+  });
+
+  it("respects the owner's block list (deleted sites)", () => {
+    const existing = [{ id: 6, suwayomiSourceId: "eva", status: "active", origin: "suwayomi", hostname: "suwayomi-1911019612901009263.sync.internal" }];
+    const byHostname = planHostnameHeals(
+      [installed("eva", "Eva Scans", "https://evascans.net")],
+      existing,
+      { suwayomiSourceIds: [], hostnames: ["evascans.net"] }
+    );
+    expect(byHostname).toHaveLength(0);
+    const bySourceId = planHostnameHeals(
+      [installed("eva", "Eva Scans", "https://evascans.net")],
+      existing,
+      { suwayomiSourceIds: ["eva"], hostnames: [] }
+    );
+    expect(bySourceId).toHaveLength(0);
+  });
+
+  it("heals each placeholder row once and keeps the first claim when two rows want one hostname", () => {
+    const heals = planHostnameHeals(
+      [
+        installed("eva", "Eva Scans", "https://evascans.net"),
+        installed("eva2", "Eva Scans Mirror", "https://evascans.net"),
+      ],
+      [
+        { id: 1, suwayomiSourceId: "eva", status: "active", origin: "suwayomi", hostname: "suwayomi-1.sync.internal" },
+        { id: 2, suwayomiSourceId: "eva2", status: "active", origin: "suwayomi", hostname: "suwayomi-2.sync.internal" },
+      ]
+    );
+    expect(heals).toHaveLength(1);
+    expect(heals[0]!.hostname).toBe("evascans.net");
   });
 });

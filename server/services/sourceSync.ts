@@ -32,7 +32,47 @@ export type SyncPlan = {
   skippedHostname: number;
   /** مواقع حذفها المالك سابقًا (قائمة الحجب) — لا تُعاد إضافتها تلقائيًا. */
   blockedSkipped: number;
+  /** صفوف مزامنت سابقًا بنطاق مؤقت لأصبح نطاقها الحقيقي متاحًا الآن. */
+  healed: number;
 };
+
+/** النطاق المؤقت الذي تُسجّل به صفوف المصادر التي لم يعرف خادم السحب نطاقها وقت المزامنة. */
+export function isPlaceholderHostname(hostname: string): boolean {
+  return /^suwayomi-\d+\.sync\.internal$/.test(hostname);
+}
+
+export type HostnameHeal = { source: SuwayomiSource; hostname: string };
+
+/**
+ * شفاء الصفوف المؤقتة: صف سُجّل بنطاق مؤقت (لأن homeUrl كان فارغًا وقت المزامنة)
+ * يحتفظ بـ allowDirectChapterLookup=false فترفض روابطه «غير مدرج ضمن المصادر»
+ * أبديًا. حين يعلن خادم السحب نطاقه الحقيقي لاحقًا، يُحدَّث الصف به — إن كان
+ * النطاق الجديد حرًا وغير محجوب، ودون مسّ حالة التفعيل الحالية.
+ */
+export function planHostnameHeals(
+  installed: SuwayomiSource[],
+  existing: SyncableExistingSource[],
+  blocked: BlockedSources = { suwayomiSourceIds: [], hostnames: [] }
+): HostnameHeal[] {
+  const bySuwayomiId = new Map(installed.map(source => [source.id, source]));
+  const takenHostnames = new Set(
+    existing.filter(row => !isPlaceholderHostname(row.hostname)).map(row => row.hostname)
+  );
+  const heals: HostnameHeal[] = [];
+  for (const row of existing) {
+    if (row.origin !== "suwayomi" || !row.suwayomiSourceId) continue;
+    if (!isPlaceholderHostname(row.hostname)) continue;
+    if (blocked.suwayomiSourceIds.includes(row.suwayomiSourceId)) continue;
+    const source = bySuwayomiId.get(row.suwayomiSourceId);
+    if (!source) continue;
+    const hostname = hostnameFromHomeUrl(source.homeUrl);
+    if (!hostname || hostname === row.hostname || takenHostnames.has(hostname)) continue;
+    if (blocked.hostnames.includes(hostname)) continue;
+    takenHostnames.add(hostname);
+    heals.push({ source, hostname });
+  }
+  return heals;
+}
 
 /** يستخرج نطاق موقع المصدر من homeUrl إن وُجد. */
 export function hostnameFromHomeUrl(homeUrl: string | null | undefined): string | null {
@@ -67,7 +107,7 @@ export function planSourceChanges(
     existing.filter(row => row.suwayomiSourceId).map(row => [row.suwayomiSourceId!, row])
   );
   const installedIds = new Set(installed.map(source => source.id));
-  const plan: SyncPlan = { create: [], activate: [], disable: [], keep: 0, skippedHostname: 0, blockedSkipped: 0 };
+  const plan: SyncPlan = { create: [], activate: [], disable: [], keep: 0, skippedHostname: 0, blockedSkipped: 0, healed: 0 };
 
   // فهرس hostname محجوز فريدًا في قاعدة البيانات — أي مصدر جديد يطلب نطاقًا
   // محجوزًا (مثل عشرات لغات MangaDex كلها على mangadex.org، أو مصدر أُضيف
@@ -152,13 +192,14 @@ export async function syncSourcesFromSuwayomi(): Promise<{ added: number; activa
     } catch (error) {
       console.warn("[SourceSync] تعذر تسجيل المواقع المدمجة:", error);
     }
-    if (!ENV.suwayomiBaseUrl) return { added: 0, activated: 0, disabled: 0 };
+    if (!ENV.suwayomiBaseUrl) return { added: 0, activated: 0, disabled: 0, healed: 0 };
     try {
       const suwayomi = new SuwayomiClient(ENV.suwayomiBaseUrl, getUsableSuwayomiToken());
       const installed = await suwayomi.listInstalledSources();
       const existing = await listSources();
       const blocked = await getBlockedSources();
       const plan = planSourceChanges(installed, existing, blocked);
+      const heals = planHostnameHeals(installed, existing, blocked);
 
       let added = 0;
       for (const action of plan.create) {
@@ -230,6 +271,35 @@ export async function syncSourcesFromSuwayomi(): Promise<{ added: number; activa
         }
       }
 
+      // شفاء الصفوف المؤقتة: أول استقرار للنطاقات الحقيقية قبل كل شي —
+      // يُبقي حالة التفعيل كما هي (وإن فُعّل في هذه الدورة فيبقى مفعّلًا).
+      let healed = 0;
+      for (const heal of heals) {
+        const row = existing.find(
+          item => item.suwayomiSourceId === heal.source.id && isPlaceholderHostname(item.hostname)
+        );
+        if (!row) continue;
+        try {
+          await saveSource({
+            id: row.id,
+            name: heal.source.displayName || heal.source.name || row.name,
+            hostname: heal.hostname,
+            baseUrl: heal.source.homeUrl ?? row.baseUrl,
+            suwayomiSourceId: row.suwayomiSourceId,
+            extensionPackage: heal.source.extension?.pkgName ?? row.extensionPackage,
+            extensionName: heal.source.extension?.name ?? row.extensionName,
+            status: plan.activate.includes(row.id) ? "active" : (row.status as "active" | "disabled"),
+            allowDirectChapterLookup: true,
+            notes: row.notes,
+            origin: "suwayomi",
+            lang: heal.source.lang || row.lang,
+          });
+          healed += 1;
+        } catch (error) {
+          console.warn(`[SourceSync] تعذر استكمال نطاق المصدر ${row.id}:`, error);
+        }
+      }
+
       // استكمال لغة الصفوف القديمة المُزامنة قبل إدخال حقل lang —
       // تشغيل رخيص: لا يكتب إلا الصفوف الناقصة فقط، ويشفي نفسه كل دورة.
       let backfilled = 0;
@@ -256,15 +326,15 @@ export async function syncSourcesFromSuwayomi(): Promise<{ added: number; activa
         }
       }
 
-      if (added || plan.activate.length || plan.disable.length || backfilled) {
+      if (added || plan.activate.length || plan.disable.length || backfilled || healed) {
         console.info(
-          `[SourceSync] أُضيف ${added}، فُعّل ${plan.activate.length}، عُطّل ${plan.disable.length}، استُكملت لغة ${backfilled}.`
+          `[SourceSync] أُضيف ${added}، فُعّل ${plan.activate.length}، عُطّل ${plan.disable.length}، استُكملت لغة ${backfilled}، استُكمل نطاق ${healed}.`
         );
       }
-      return { added, activated: plan.activate.length, disabled: plan.disable.length };
+      return { added, activated: plan.activate.length, disabled: plan.disable.length, healed };
     } catch (error) {
       console.warn("[SourceSync] فشلت مزامنة المصادر:", error);
-      return { added: 0, activated: 0, disabled: 0 };
+      return { added: 0, activated: 0, disabled: 0, healed: 0 };
     } finally {
       inFlight = null;
     }

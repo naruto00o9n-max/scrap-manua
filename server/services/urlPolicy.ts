@@ -34,7 +34,7 @@ function isForbiddenHost(hostname: string): boolean {
   );
 }
 
-function normalizeHostname(hostname: string): string {
+export function normalizeHostname(hostname: string): string {
   const normalized = hostname.toLowerCase().replace(/^www\./, "");
   // webtoons.com and www.webtoons.com serve the same catalog as m.webtoons.com,
   // so canonicalize them onto the registered source hostname.

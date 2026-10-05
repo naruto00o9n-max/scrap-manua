@@ -14,6 +14,42 @@ export type SuwayomiSource = {
   extension: { name: string; pkgName: string; isInstalled: boolean } | null;
 };
 
+export type SuwayomiSourcePage = {
+  nodes: SuwayomiSource[];
+  pageInfo?: { hasNextPage?: boolean | null; endCursor?: string | null } | null;
+};
+
+/** حجم صفحة مصادر Suwayomi، وسقف أمان لعدد الصفحات كي لا تمتد الحلقة بلا نهاية. */
+export const SOURCES_PAGE_SIZE = 100;
+export const SOURCES_PAGE_LIMIT = 20;
+
+/**
+ * يجمع المصادر من كل صفحات الاستعلام: جدول المصادر في الخادم يشمل كل ما ثُبِّت
+ * يومًا، والاكتفاء بأول صفحة كان يُسقط مصادر مثبتة فعلاً خارجها فتبقى روابطها
+ * مرفوضة رغم سلامة الإضافة.
+ */
+export async function collectAllSourcePages(
+  fetchPage: (after: string | null) => Promise<SuwayomiSourcePage>
+): Promise<SuwayomiSource[]> {
+  const collected: SuwayomiSource[] = [];
+  const seenIds = new Set<string>();
+  let after: string | null = null;
+  for (let page = 0; page < SOURCES_PAGE_LIMIT; page += 1) {
+    const result = await fetchPage(after);
+    for (const node of result.nodes ?? []) {
+      if (!node?.id) continue;
+      if (seenIds.has(node.id)) continue;
+      seenIds.add(node.id);
+      collected.push(node);
+    }
+    if (!result.pageInfo?.hasNextPage) break;
+    const cursor = result.pageInfo.endCursor ?? null;
+    if (!cursor || cursor === after) break;
+    after = cursor;
+  }
+  return collected;
+}
+
 export type SuwayomiChapter = {
   id: number;
   name: string;
@@ -349,12 +385,18 @@ export class SuwayomiClient {
   async listInstalledSources(timeoutMs = 30_000): Promise<SuwayomiSource[]> {
     // مهلة أطول من الافتراضية: أول نداء بعد خمول خادم Railway يحتاج ثواني
     // إضافية ليستيقظ الخادم، وفشلها كان سبب «تعذر قبول الرابط» الزائف.
-    const result = await this.request<{ sources: { nodes: SuwayomiSource[] } }>(
-      "{ sources(first: 100) { nodes { id name displayName homeUrl lang extension { name pkgName isInstalled } } } }",
-      undefined,
-      timeoutMs,
-    );
-    return result.sources.nodes.filter(source => source.extension?.isInstalled === true);
+    // مؤشر الترقيم «Cursor» نوع مستقل في المخطط لا «String».
+    const query = `query Sources($after: Cursor) {
+        sources(first: ${SOURCES_PAGE_SIZE}, after: $after) {
+          nodes { id name displayName homeUrl lang extension { name pkgName isInstalled } }
+          pageInfo { hasNextPage endCursor }
+        }
+      }`;
+    const all = await collectAllSourcePages(async after => {
+      const result = await this.request<{ sources: SuwayomiSourcePage }>(query, { after }, timeoutMs);
+      return result.sources;
+    });
+    return all.filter(source => source.extension?.isInstalled === true);
   }
 
   async findChapterByUrl(chapterUrl: string): Promise<SuwayomiChapter | null> {
