@@ -29,6 +29,13 @@ export const BUILTIN_SOURCES: BuiltinSourceSpec[] = [
     lang: "ko",
     notes: "مدمج داخل البوت: سحب مباشر لروابط الفصول المجانية من كاكاو بيج.",
   },
+  {
+    hostname: "comix.to",
+    name: "ComiX",
+    baseUrl: "https://comix.to",
+    lang: "en",
+    notes: "مدمج داخل البوت: سحب مباشر عبر واجهة كوميكس الموقعة — يحتاج مادة تشفير تُلصق من لوحة التحكم مرة واحدة.",
+  },
 ];
 
 export type BuiltinSourcePlanAction =

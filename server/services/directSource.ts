@@ -1,5 +1,6 @@
 import { getSetting, setSetting } from "../db";
 import { fetchKakaoPageChapter } from "./kakaoPage";
+import { COMIX_HOSTS, fetchComixChapter, parseComixUrl } from "./comixPage";
 
 // ============================================================
 // السحب المباشر بجلسة الموقع (كوكي تسجيل الدخول)
@@ -19,9 +20,18 @@ export const SUPPORTED_DIRECT_SOURCES = [
   "webtoons.com",
   "m.webtoons.com",
   "page.kakao.com",
+  "comix.to",
+  "comix.ws",
 ] as const;
 
 export type DirectSourceHostname = (typeof SUPPORTED_DIRECT_SOURCES)[number];
+
+/** هل النطاق من نطاقات كوميكس؟ (توجيه مباشر عبر واجهتها الموقعة). */
+export function isComixHost(hostname: string | null | undefined): boolean {
+  if (!hostname) return false;
+  const normalized = hostname.toLowerCase().replace(/^www\./, "");
+  return (COMIX_HOSTS as readonly string[]).includes(normalized);
+}
 
 /**
  * نمط التوجيه لكل موقع:
@@ -42,6 +52,8 @@ const DIRECT_SOURCE_MODES: Record<(typeof SUPPORTED_DIRECT_SOURCES)[number], Dir
   "webtoons.com": "direct-first",
   "m.webtoons.com": "direct-first",
   "page.kakao.com": "direct-first",
+  "comix.to": "direct-first",
+  "comix.ws": "direct-first",
 };
 
 export function directSourceMode(hostname: string | null | undefined): DirectSourceMode | null {
@@ -561,6 +573,23 @@ export async function probeDirectChapterPage(chapterUrl: string): Promise<Direct
       if (outcome.locked) return { mode: "locked", chapter: null };
       return { mode: "unknown", chapter: null, reason: outcome.message };
     }
+    // كوميكس: واجهة موقعة عبر الوسيط تحسم كل شيء (الصور والفصل المدفوع)
+    // — الصور بذاتها على مضيف مفتوح، والحماية على واجهة الموقع فقط.
+    if (isComixHost(host)) {
+      const outcome = await fetchComixChapter(chapterUrl);
+      if (outcome.ok) {
+        return {
+          mode: "free",
+          chapter: {
+            mangaTitle: outcome.mangaTitle,
+            chapterName: outcome.chapterName || "الفصل",
+            pages: outcome.pages,
+          },
+        };
+      }
+      if (outcome.locked) return { mode: "locked", chapter: null };
+      return { mode: "unknown", chapter: null, reason: outcome.message };
+    }
     // بوابة العمر في WEBTOON تُتجاوز بكوكي الموقع نفسه — يُرسل مقدمًا دائمًا.
     const html = await fetchChapterHtml(chapterUrl, isWebtoonsHost(host) ? WEBTOONS_AGE_COOKIE : undefined);
     if (host === "wamanga.ru") {
@@ -669,6 +698,17 @@ export async function fetchDirectChapterWithSession(
   // كاكاو بيج: الجلسة كوكي حساب كاكاو (يضبطه المالك من لوحة التحكم) —
   // تُمرّر لواجهة viewer/data لمحاولة الفصول المدفوعة بحساب موثق، وبلا
   // نجاح يُرفض الفصل برسالة واضحة (بعض الفصول تشترى من التطبيق فقط).
+  if (isComixHost(host)) {
+    const outcome = await fetchComixChapter(chapterUrl);
+    if (outcome.ok) {
+      return {
+        mangaTitle: outcome.mangaTitle,
+        chapterName: outcome.chapterName || "الفصل",
+        pages: outcome.pages,
+      };
+    }
+    throw new DirectSourceError(outcome.message);
+  }
   if (host === "page.kakao.com") {
     const outcome = await fetchKakaoPageChapter(chapterUrl, cookie);
     if (outcome.ok) {

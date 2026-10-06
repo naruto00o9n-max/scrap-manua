@@ -36,6 +36,7 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { adminProcedure, protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { getIntegrationConfiguration, getUsableSuwayomiToken } from "./services/settings";
 import { getScraperApiStatus, removeScraperApiKey, saveScraperApiKey } from "./services/scraperApi";
+import { getComixMaterialStatus, removeComixMaterial, saveComixMaterial } from "./services/comixPage";
 import { syncSourcesFromSuwayomi } from "./services/sourceSync";
 import { SuwayomiClient } from "./services/suwayomi";
 import { ENV } from "./_core/env";
@@ -167,6 +168,15 @@ export const appRouter = router({
         .input(z.object({ key: z.string().min(8).max(64) }))
         .mutation(({ input }) => saveScraperApiKey(input.key)),
       remove: adminProcedure.mutation(() => removeScraperApiKey()),
+    }),
+    // كوميكس: مادة التشفير الموقعة تُلصق مرة واحدة من مخرجات كود المتصفح —
+    // قيمة سرية لا تُعاد للواجهة أبدًا، فقط الحالة وبصمة قصيرة للتأكد.
+    comix: router({
+      status: adminProcedure.query(() => getComixMaterialStatus()),
+      save: adminProcedure
+        .input(z.object({ material: z.string().min(32).max(200_000) }))
+        .mutation(({ input }) => saveComixMaterial(input.material)),
+      remove: adminProcedure.mutation(() => removeComixMaterial()),
     }),
   }),
   users: router({
