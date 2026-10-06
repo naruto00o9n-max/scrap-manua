@@ -5,6 +5,7 @@ import path from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import sharp, { type Sharp } from "sharp";
+import { fetchViaScraperApi, getScraperApiKey, looksLikeImage } from "./scraperApi";
 
 // التحكم في استهلاك ذاكرة libvips: بلا تخزين مؤقت للصور المفككة ومعالجة تسلسلية،
 // حتى لا تقتل الحاوية العملية عند دمج فصول طويلة (خطأ exit 137 / OOM).
@@ -358,7 +359,57 @@ async function downloadPageToTemp(url: string, index: number, targetPath: string
       if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 250));
     }
   }
+  // ملاذ أخير: مواقع كثيرة تضع حماية Cloudflare ترفض أي طلب من IP مركز بيانات
+  // (403 فوري أو تجميد حتى المهلة). عند توفر وسيط السحب تُمرر الصفحة عبره.
+  if (await getScraperApiKey()) {
+    try {
+      await downloadPageViaScraperApi(parsed.toString(), index, targetPath);
+      if (needsUnscramble) await unscrambleGigaViewerPage(targetPath);
+      return;
+    } catch (scraperError) {
+      console.warn(
+        `[scraperapi] فشل تنزيل الصفحة ${index} عبر الوسيط:`,
+        scraperError instanceof Error ? scraperError.message : scraperError,
+      );
+    }
+  }
   throw lastError instanceof Error ? lastError : new Error(`تعذر تنزيل الصفحة ${index}.`);
+}
+
+/**
+ * تنزيل صفحة عبر وسيط السحب: الاستجابة قد تكون صفحة تحدي HTML وليست الصورة،
+ * فتُفحص بصمة الملف من أول كتلة قبل الكتابة، ثم تُكتب على القرص تدفقًا
+ * بلا احتفاظ بالصورة كاملة في الذاكرة.
+ */
+export async function downloadPageViaScraperApi(url: string, index: number, targetPath: string): Promise<void> {
+  const response = await fetchViaScraperApi(url);
+  if (!response.ok) {
+    throw new Error(`الوسيط أعاد ${response.status} للصفحة ${index}.`);
+  }
+  if (!response.body) throw new Error(`لا بيانات للصفحة ${index} عبر الوسيط.`);
+  const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+  let first: Awaited<ReturnType<typeof reader.read>>;
+  try {
+    first = await reader.read();
+  } catch (error) {
+    throw new Error(`تعذر قراءة الصفحة ${index} عبر الوسيط (${error instanceof Error ? error.message : "خطأ"}).`);
+  }
+  if (first.done || !first.value || !looksLikeImage(first.value)) {
+    throw new Error(`الوسيط لم يعُد صورة للصفحة ${index} — الحماية قائمة على المفتاح الحالي.`);
+  }
+  async function* chunks(): AsyncGenerator<Uint8Array> {
+    yield first.value!;
+    while (true) {
+      const next = await reader.read();
+      if (next.done) return;
+      yield next.value;
+    }
+  }
+  await pipeline(
+    Readable.from(chunks()),
+    byteCappedStream(MAX_PAGE_SIZE_BYTES, `الصفحة ${index}`),
+    createWriteStream(targetPath),
+  );
 }
 
 /** عدد كتل شبكة تشويش GigaViewer في كل بعد، ومضاعف محاذاة الكتلة بالبكسل. */

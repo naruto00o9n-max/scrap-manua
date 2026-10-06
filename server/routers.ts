@@ -35,6 +35,7 @@ import { COOKIE_NAME, ONE_YEAR_MS } from "../shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { adminProcedure, protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { getIntegrationConfiguration, getUsableSuwayomiToken } from "./services/settings";
+import { getScraperApiStatus, removeScraperApiKey, saveScraperApiKey } from "./services/scraperApi";
 import { syncSourcesFromSuwayomi } from "./services/sourceSync";
 import { SuwayomiClient } from "./services/suwayomi";
 import { ENV } from "./_core/env";
@@ -157,6 +158,15 @@ export const appRouter = router({
       remove: adminProcedure
         .input(z.object({ hostname: z.string().min(3).max(255) }))
         .mutation(({ input }) => removeDirectSession(input.hostname)),
+    }),
+    // وسيط السحب (ScraperAPI): مفتاح سرّي يعالج المواقع التي ترفض طلبات مراكز
+    // البيانات — القيمة لا تُعاد للواجهة أبدًا، فقط الحالة وتاريخ التحديث.
+    scraperApi: router({
+      status: adminProcedure.query(() => getScraperApiStatus()),
+      save: adminProcedure
+        .input(z.object({ key: z.string().min(8).max(64) }))
+        .mutation(({ input }) => saveScraperApiKey(input.key)),
+      remove: adminProcedure.mutation(() => removeScraperApiKey()),
     }),
   }),
   users: router({

@@ -19,4 +19,5 @@ export const ENV = {
   integrationMonitorToken: process.env.INTEGRATION_MONITOR_TOKEN ?? "",
   adminEmail: process.env.ADMIN_EMAIL ?? "admin@manga-drive.local",
   adminPassword: process.env.ADMIN_PASSWORD ?? "ChangeMeNow!2026",
+  scraperApiKey: process.env.SCRAPERAPI_KEY ?? "",
 };
