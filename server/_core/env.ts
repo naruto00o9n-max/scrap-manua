@@ -20,4 +20,5 @@ export const ENV = {
   adminEmail: process.env.ADMIN_EMAIL ?? "admin@manga-drive.local",
   adminPassword: process.env.ADMIN_PASSWORD ?? "ChangeMeNow!2026",
   scraperApiKey: process.env.SCRAPERAPI_KEY ?? "",
+  comixCipherMaterial: process.env.COMIX_CIPHER_MATERIAL ?? "",
 };

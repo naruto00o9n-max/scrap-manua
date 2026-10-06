@@ -6,6 +6,7 @@ import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import sharp, { type Sharp } from "sharp";
 import { fetchViaScraperApi, getScraperApiKey, looksLikeImage } from "./scraperApi";
+import { unscrambleComixPage, hasComixScrambleHeaders, type ComixScrambleHeaders } from "./comixDescrambler";
 
 // التحكم في استهلاك ذاكرة libvips: بلا تخزين مؤقت للصور المفككة ومعالجة تسلسلية،
 // حتى لا تقتل الحاوية العملية عند دمج فصول طويلة (خطأ exit 137 / OOM).
@@ -325,10 +326,14 @@ function byteCappedStream(limit: number, label: string) {
 
 async function downloadPageToTemp(url: string, index: number, targetPath: string): Promise<void> {
   const parsed = new URL(url);
-  // روابط GigaViewer المشوشة تحمل فاصل #scramble — يُنزع قبل التنزيل لأنه
-  // مؤشر معالجة داخلي وليس جزءًا من عنوان الملف، ثم يُفك التشويش بعد الحفظ.
-  const needsUnscramble = parsed.hash === "#scramble";
-  if (needsUnscramble) parsed.hash = "";
+  // الفواصل بعد # هي مؤشرات معالجة داخلية لا جزءًا من عنوان الملف:
+  // - #scramble: صفحة GigaViewer المشوشة (يُفك التشويش بعد الحفظ).
+  // - #comixv3 / #comixscrambled: صفحات كوميكس — التشويش يُقرأ من ترويسات
+  //   استجابة الصورة نفسها (x-scramble-* / x-enc-*) ويُفك بعد الحفظ.
+  const marker = parsed.hash;
+  const needsUnscramble = marker === "#scramble";
+  const needsComixUnscramble = marker === "#comixv3" || marker === "#comixscrambled";
+  if (parsed.hash) parsed.hash = "";
   if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.hostname === "localhost") {
     throw new Error(`رابط الصفحة ${index} غير آمن.`);
   }
@@ -344,6 +349,17 @@ async function downloadPageToTemp(url: string, index: number, targetPath: string
           : { "user-agent": PAGE_DOWNLOAD_UA },
       });
       if (!response.ok) throw new Error(`تعذر تنزيل الصفحة ${index} (${response.status}).`);
+      const imageHeaders: ComixScrambleHeaders = needsComixUnscramble
+        ? {
+            "x-scramble-seed": response.headers.get("x-scramble-seed"),
+            "x-scramble-grid": response.headers.get("x-scramble-grid"),
+            "x-scramble-algo": response.headers.get("x-scramble-algo"),
+            "x-scramble-hash": response.headers.get("x-scramble-hash"),
+            "x-enc-seed": response.headers.get("x-enc-seed"),
+            "x-enc-len": response.headers.get("x-enc-len"),
+            "x-enc-algo": response.headers.get("x-enc-algo"),
+          }
+        : {};
       const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
       if (!contentType.startsWith("image/")) throw new Error(`الصفحة ${index} ليست صورة.`);
       const contentLength = Number(response.headers.get("content-length") ?? "0");
@@ -353,6 +369,9 @@ async function downloadPageToTemp(url: string, index: number, targetPath: string
       const source = Readable.fromWeb(response.body as never);
       await pipeline(source, byteCappedStream(MAX_PAGE_SIZE_BYTES, `الصفحة ${index}`), createWriteStream(targetPath));
       if (needsUnscramble) await unscrambleGigaViewerPage(targetPath);
+      if (needsComixUnscramble && hasComixScrambleHeaders(imageHeaders)) {
+        await unscrambleComixPage(targetPath, imageHeaders);
+      }
       return;
     } catch (error) {
       lastError = error;
@@ -365,6 +384,7 @@ async function downloadPageToTemp(url: string, index: number, targetPath: string
     try {
       await downloadPageViaScraperApi(parsed.toString(), index, targetPath);
       if (needsUnscramble) await unscrambleGigaViewerPage(targetPath);
+      // عبر الوسيط ترويسات التشويش تضيع — كوميكس صوره بلا حماية فلا يمر هنا عمليًا
       return;
     } catch (scraperError) {
       console.warn(
