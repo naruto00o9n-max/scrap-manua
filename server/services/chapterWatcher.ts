@@ -42,19 +42,22 @@ export type ChapterWatcherConfig = {
   intervalMinutes: number;
   /** سطر الفصل (GIF) فوق الإعلان — قابل للتغيير من اللوحة. */
   dividerGifUrl: string;
-  /** عنوان بطاقة الإعلان — يقبل {manga} و{chapter} و{source} و{link}. */
-  titleTemplate: string;
-  /** نص بطاقة الإعلان — يقبل المتغيرات نفسها. */
-  descriptionTemplate: string;
+  /** سطر الفوتر الصغير فوق اسم البوت — يقبل {manga} و{chapter} و{source} و{link}. */
+  footerLineTemplate: string;
+  /** الاسم الظاهر في فوتر البطاقة (مثل ZEUS). */
+  footerBrand: string;
 };
+
+/** العنوان الثابت لبطاقة الإعلان — فوق اسم العمل مباشرة. */
+export const ANNOUNCEMENT_TITLE = "نزول فصل جديد";
 
 export const DEFAULT_CHAPTER_WATCHER_CONFIG: ChapterWatcherConfig = {
   enabled: false,
   channelId: "",
   intervalMinutes: 5,
   dividerGifUrl: DEFAULT_DIVIDER_GIF_URL,
-  titleTemplate: "🔔 فصل جديد من «{manga}»",
-  descriptionTemplate: "**{chapter}**\n\nالمصدر: {source}\n[افتح الفصل في الموقع]({link})",
+  footerLineTemplate: "الفصل نزل — يمكنك طلب أي فصل الآن عبر /فصل.",
+  footerBrand: "ZEUS",
 };
 
 export const CHAPTER_WATCHER_INTERVAL_MIN = 2;
@@ -79,14 +82,14 @@ export function normalizeChapterWatcherConfig(
       typeof raw.dividerGifUrl === "string" && /^https?:\/\//i.test(raw.dividerGifUrl.trim())
         ? raw.dividerGifUrl.trim().slice(0, 500)
         : DEFAULT_DIVIDER_GIF_URL,
-    titleTemplate:
-      typeof raw.titleTemplate === "string" && raw.titleTemplate.trim()
-        ? raw.titleTemplate.trim().slice(0, 250)
-        : DEFAULT_CHAPTER_WATCHER_CONFIG.titleTemplate,
-    descriptionTemplate:
-      typeof raw.descriptionTemplate === "string" && raw.descriptionTemplate.trim()
-        ? raw.descriptionTemplate.trim().slice(0, 1500)
-        : DEFAULT_CHAPTER_WATCHER_CONFIG.descriptionTemplate,
+    footerLineTemplate:
+      typeof raw.footerLineTemplate === "string" && raw.footerLineTemplate.trim()
+        ? raw.footerLineTemplate.trim().slice(0, 300)
+        : DEFAULT_CHAPTER_WATCHER_CONFIG.footerLineTemplate,
+    footerBrand:
+      typeof raw.footerBrand === "string" && raw.footerBrand.trim()
+        ? raw.footerBrand.trim().slice(0, 60)
+        : DEFAULT_CHAPTER_WATCHER_CONFIG.footerBrand,
   };
 }
 
@@ -108,12 +111,25 @@ export async function saveChapterWatcherConfig(input: ChapterWatcherConfig): Pro
 
 // ===== بناء الإعلان =====
 
+export type AnnouncementChapter = {
+  name: string;
+  number: number | null;
+  url: string;
+  /** هل الفصل مقفل (مدفوع) كما تبلّغ عنه الإضافة؟ */
+  locked: boolean;
+};
+
 export type AnnouncementEntry = {
   mangaTitle: string;
   sourceName: string;
+  /** رابط الفصل الأحدث — زر «الذهاب للفصل». */
   link: string | null;
+  /** رابط صفحة العمل — زر «صفحة العمل». */
+  mangaLink: string | null;
+  /** رابط الغلاف المباشر من الموقع — بديل عند تعذر إرفاق الصورة. */
+  thumbnailUrl: string | null;
   /** الفصول الجديدة تصاعديًا بترتيبها في الموقع. */
-  chapters: Array<{ name: string; number: number | null; url: string }>;
+  chapters: AnnouncementChapter[];
 };
 
 /** يعبّئ متغيرات القالب: {manga} {chapter} {source} {link}. */
@@ -130,58 +146,77 @@ export function renderAnnouncementTemplate(
 
 export const ANNOUNCEMENT_COLOR = 0xd4af37;
 
+/** غلاف العمل كمرفق مع الرسالة — لا يعتمد على فتح ديسكورد لرابط الموقع. */
+export type AnnouncementCover = { bytes: Buffer; contentType: string } | null;
+
+/** يفرّق الفصل المدفوع من المجاني: علامة القفل من الإضافة أو إيموجي القفل في الاسم. */
+export function isPaidChapter(chapter: { isLocked?: boolean | null; name?: string | null }): boolean {
+  if (chapter.isLocked === true) return true;
+  return /🔒|\[\s*(?:paid|premium|locked)\s*\]/i.test(chapter.name ?? "");
+}
+
+/** يصيغ رقم الفصل للعرض: 23 أو 23.5 أو الاسم عند غياب الرقم. */
+export function chapterLabel(chapter: AnnouncementChapter): string {
+  if (typeof chapter.number === "number" && Number.isFinite(chapter.number)) {
+    return String(chapter.number);
+  }
+  return chapter.name?.trim() || "جديد";
+}
+
 export type ChapterAnnouncement = {
   dividerUrl: string | null;
-  embed: {
-    title: string;
-    description: string;
-    url: string | null;
-    color: number;
-    thumbnailUrl: string | null;
-    footerText: string;
-    timestampISO: string;
-  };
+  /** عنوان البطاقة الثابت (نزول فصل جديد). */
+  titleLine: string;
+  mangaTitle: string;
+  /** سطر الحقول: الفصل/المصدر/الحالة. */
+  fields: string;
+  footerLine: string;
+  footerBrand: string;
+  chapterLink: string | null;
+  mangaLink: string | null;
+  /** غلاف كمرفق (attachment) يُرفع مع الرسالة — الأضمن مع المواقع المحمية. */
+  cover: AnnouncementCover;
+  /** رابط الغلاف المباشر بديلًا عن المرفق عند فشل جلبه. */
+  thumbnailUrl: string | null;
 };
 
-/** يبني الإعلان (السطر + البطاقة) من قالب الإعدادات — دالة نقية قابلة للمعاينة. */
+/**
+ * يبني بطاقة الإعلان بنمط Components V2 — نفس ترتيب بطاقة تتبع الفصول
+ * المعتمد: العنوان ثم اسم العمل مع الغلاف، فاصل، الفصل/المصدر/الحالة،
+ * فاصل، زرا الصفحة والفصل، فاصل، سطر الفوتر ثم اسم البوت.
+ */
 export function buildChapterAnnouncement(
   config: ChapterWatcherConfig,
   entry: AnnouncementEntry,
-  options: { now?: Date } = {}
+  options: { now?: Date; cover?: AnnouncementCover } = {}
 ): ChapterAnnouncement {
   const newest = entry.chapters[entry.chapters.length - 1];
-  const newestName = newest?.name?.trim() || "فصل جديد";
-  const link = entry.link ?? newest?.url ?? "";
-  const safeLink = /^https?:\/\//i.test(link) ? link : "";
+  const labels = entry.chapters.map(chapterLabel);
+  // فصول متعددة في دورة واحدة: أرقامها كلها في سطر الفصل بترتيبها
+  const chapterText = labels.slice(0, 6).join("، ");
+  const paid = newest ? isPaidChapter(newest) : false;
   const vars = {
     manga: entry.mangaTitle,
-    chapter: newestName,
+    chapter: chapterText,
     source: entry.sourceName,
-    link: safeLink,
+    link: newest?.url ?? "",
   };
-  const title = renderAnnouncementTemplate(config.titleTemplate, vars);
-  let description: string;
-  if (entry.chapters.length <= 1) {
-    description = renderAnnouncementTemplate(config.descriptionTemplate, vars);
-  } else {
-    // فصول متعددة في دورة واحدة: قائمة مدمجة بدل إغراق القناة برسائل
-    const list = entry.chapters
-      .map(chapter => `• ${chapter.name?.trim() || "فصل"}`)
-      .join("\n");
-    const suffix = renderAnnouncementTemplate(config.descriptionTemplate, vars);
-    description = `${list}\n\n${suffix}`;
-  }
+  const fields = [
+    `**الفصل:** ${chapterText}`,
+    `**المصدر:** ${entry.sourceName}`,
+    paid ? "مدفوع" : "مجاني",
+  ].join("\n");
   return {
     dividerUrl: config.dividerGifUrl,
-    embed: {
-      title: title.slice(0, 256),
-      description: description.slice(0, 4000),
-      url: safeLink || null,
-      color: ANNOUNCEMENT_COLOR,
-      thumbnailUrl: null,
-      footerText: "ZEUS — إعلانات الفصول",
-      timestampISO: (options.now ?? new Date()).toISOString(),
-    },
+    titleLine: ANNOUNCEMENT_TITLE,
+    mangaTitle: entry.mangaTitle,
+    fields,
+    footerLine: renderAnnouncementTemplate(config.footerLineTemplate, vars),
+    footerBrand: config.footerBrand,
+    chapterLink: entry.link && /^https?:\/\//i.test(entry.link) ? entry.link : null,
+    mangaLink: entry.mangaLink && /^https?:\/\//i.test(entry.mangaLink) ? entry.mangaLink : null,
+    cover: options.cover ?? null,
+    thumbnailUrl: entry.thumbnailUrl && /^https?:\/\//i.test(entry.thumbnailUrl) ? entry.thumbnailUrl : null,
   };
 }
 
@@ -229,6 +264,25 @@ export function resolveChapterLink(
   if (!base) return null;
   try {
     return new URL(raw, base).toString();
+  } catch {
+    return null;
+  }
+}
+
+/** يبني رابط صفحة العمل: realUrl المطلق أولًا ثم url على أساس نطاق المصدر. */
+export function resolveMangaLink(
+  manga: { url: string; realUrl: string | null },
+  source: { baseUrl: string } | undefined
+): string | null {
+  const absolute = manga.realUrl?.trim() ?? "";
+  if (/^https?:\/\//i.test(absolute)) return absolute;
+  const relative = manga.url?.trim() ?? "";
+  if (!relative) return null;
+  if (/^https?:\/\//i.test(relative)) return relative;
+  const base = source?.baseUrl?.trim();
+  if (!base) return null;
+  try {
+    return new URL(relative, base).toString();
   } catch {
     return null;
   }
@@ -339,14 +393,19 @@ export async function runChapterWatcherCycle(): Promise<WatcherCycleSummary> {
       mangaTitle: manga.title,
       sourceName: source?.name ?? manga.sourceId,
       link: resolveChapterLink(newest, source),
+      mangaLink: resolveMangaLink(manga, source),
+      thumbnailUrl: manga.thumbnailUrl,
       chapters: newChapters.map(chapter => ({
         name: chapter.name,
         number: typeof chapter.chapterNumber === "number" ? chapter.chapterNumber : null,
         url: resolveChapterLink(chapter, source) ?? "",
+        locked: isPaidChapter(chapter),
       })),
     };
     try {
-      await sendChapterAnnouncement(config.channelId, buildChapterAnnouncement(config, entry));
+      // الغلاف يُجلب عبر خادم Suwayomi (بمخزنه) ويُرفع مرفقًا — فشله لا يمنع الإعلان.
+      const cover = await suwayomi.fetchMangaThumbnail(manga.id).catch(() => null);
+      await sendChapterAnnouncement(config.channelId, buildChapterAnnouncement(config, entry, { cover }));
       summary.announced += newChapters.length;
       await saveWatchedMangaState({
         suwayomiMangaId: manga.id,
@@ -384,6 +443,32 @@ function newestChapter(chapters: SuwayomiWatchedChapter[]): SuwayomiWatchedChapt
     (newest, chapter) => ((chapter.sourceOrder ?? 0) >= (newest?.sourceOrder ?? 0) ? chapter : newest),
     undefined
   );
+}
+
+/**
+ * يبني مدخل إعلان من عمل في مكتبة Suwayomi وفصوله — للإعلان الحقيقي
+ * ولرسالة التجريب معًا. فشل حل روابط الفصول لا يمنع الإعلان.
+ */
+export function buildLibraryAnnouncementEntry(
+  manga: { id: number; title: string; thumbnailUrl: string | null; url: string; realUrl: string | null },
+  announceChapters: SuwayomiWatchedChapter[],
+  source: { baseUrl: string } | undefined,
+  sourceName: string
+): AnnouncementEntry {
+  const newest = newestChapter(announceChapters) ?? announceChapters[0];
+  return {
+    mangaTitle: manga.title,
+    sourceName,
+    link: newest ? resolveChapterLink(newest, source) : null,
+    mangaLink: resolveMangaLink(manga, source),
+    thumbnailUrl: manga.thumbnailUrl,
+    chapters: announceChapters.map(chapter => ({
+      name: chapter.name,
+      number: typeof chapter.chapterNumber === "number" ? chapter.chapterNumber : null,
+      url: resolveChapterLink(chapter, source) ?? "",
+      locked: isPaidChapter(chapter),
+    })),
+  };
 }
 
 // ===== قائمة المكتبة للوحة التحكم =====

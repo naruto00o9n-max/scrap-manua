@@ -76,6 +76,10 @@ export type LibraryManga = {
   title: string;
   thumbnailUrl: string | null;
   sourceId: string;
+  /** مسار العمل في الموقع كما تحفظه الإضافة — لبناء زر «صفحة العمل». */
+  url: string;
+  /** الرابط المطلق للعمل إن تذكرته الإضافة. */
+  realUrl: string | null;
 };
 
 /** فصل بترتيبه الأصلي في الموقع — مرجع كشف الفصول الجديدة. */
@@ -86,6 +90,8 @@ export type SuwayomiWatchedChapter = {
   realUrl: string | null;
   chapterNumber?: number;
   sourceOrder: number;
+  /** قفل الفصل (مدفوع) كما تبلّغ عنه الإضافة — قد يغيب في إصدارات أقدم. */
+  isLocked?: boolean | null;
 };
 
 /** تفاصيل العمل الكاملة كما تعيده صفحة العمل في Suwayomi (وصف/مؤلف/حالة/تصنيفات). */
@@ -470,8 +476,8 @@ export class SuwayomiClient {
    * الجديدة. صور الغلاف قد تكون مطلقة أو نسبية حسب الإضافة.
    */
   async listLibraryManga(timeoutMs = 20_000): Promise<LibraryManga[]> {
-    const result = await this.request<{ mangas: { nodes: Array<{ id: number; title: string; thumbnailUrl: string | null; sourceId: string }> } }>(
-      "query LibraryManga { mangas(condition: { inLibrary: true }) { nodes { id title thumbnailUrl sourceId } } }",
+    const result = await this.request<{ mangas: { nodes: Array<{ id: number; title: string; thumbnailUrl: string | null; sourceId: string; url: string; realUrl: string | null }> } }>(
+      "query LibraryManga { mangas(condition: { inLibrary: true }) { nodes { id title thumbnailUrl sourceId url realUrl } } }",
       undefined,
       timeoutMs,
     );
@@ -483,12 +489,48 @@ export class SuwayomiClient {
    * الترتيب هو مرجع كشف الجديد: أي فصل أعلى من آخر مرصود يُعلن عنه.
    */
   async fetchMangaChaptersWithOrder(mangaId: number, timeoutMs = 60_000): Promise<SuwayomiWatchedChapter[]> {
+    // isLocked يفرّق المجاني من المدفوع في بطاقة الإعلان؛ بعض إصدارات Suwayomi
+    // الأقدم لا تعرف الحقل وترفض الاستعلام كله — نعيد المحاولة بدونه حينها.
+    try {
+      return await this.fetchChaptersWithFields(mangaId, "id name url realUrl chapterNumber sourceOrder isLocked", timeoutMs);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (/isLocked/i.test(message)) {
+        return this.fetchChaptersWithFields(mangaId, "id name url realUrl chapterNumber sourceOrder", timeoutMs);
+      }
+      throw error;
+    }
+  }
+
+  private async fetchChaptersWithFields(mangaId: number, fields: string, timeoutMs: number): Promise<SuwayomiWatchedChapter[]> {
     const result = await this.request<{ fetchMangaAndChapters: { chapters: SuwayomiWatchedChapter[] } }>(
-      "mutation WatchFetchChapters($input: FetchMangaAndChaptersInput!) { fetchMangaAndChapters(input: $input) { chapters { id name url realUrl chapterNumber sourceOrder } } }",
+      `mutation WatchFetchChapters($input: FetchMangaAndChaptersInput!) { fetchMangaAndChapters(input: $input) { chapters { ${fields} } } }`,
       { input: { id: mangaId, fetchManga: false, fetchChapters: true } },
       timeoutMs,
     );
     return result.fetchMangaAndChapters.chapters;
+  }
+
+  /**
+   * يجلب صورة غلاف العمل عبر REST خادم Suwayomi (بنفس رمز الوصول) —
+   * هذا المزيج يضمن صورة تصل لديسكورد: الغلاف يُجلب من الموقع عبر خادم
+   * المالك (بمخزنه المؤقت) ثم يُرفع مرفقًا مع الرسالة نفسها، فلا يعتمد
+   * الإعلان على قدرة ديسكورد نفسها في فتح روابط موقع قد تحجبها الحماية.
+   * تعيد null عند أي فشل — الغلاف اختياري ولا يفشل الإعلان من أجله.
+   */
+  async fetchMangaThumbnail(mangaId: number, timeoutMs = 20_000): Promise<{ bytes: Buffer; contentType: string } | null> {
+    const origin = new URL(this.endpoint).origin;
+    const url = `${origin}/api/v1/manga/${mangaId}/thumbnail?useCache=true`;
+    const response = await fetch(url, {
+      headers: this.token ? { authorization: `Bearer ${this.token}` } : {},
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) return null;
+    const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
+    if (!contentType.startsWith("image/")) return null;
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (!bytes.length || bytes.length > 8_000_000) return null;
+    return { bytes, contentType };
   }
 
   /**

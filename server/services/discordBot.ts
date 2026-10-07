@@ -71,10 +71,13 @@ import { SuwayomiClient, withTransientRetry } from "./suwayomi";
 import { UrlPolicyError } from "./urlPolicy";
 import { getUsableSuwayomiToken } from "./settings";
 import {
+  ANNOUNCEMENT_COLOR,
   buildChapterAnnouncement,
+  buildLibraryAnnouncementEntry,
+  chapterLabel,
+  isPaidChapter,
   loadChapterWatcherConfig,
   startChapterWatcherLoop,
-  type AnnouncementEntry,
   type ChapterAnnouncement,
 } from "./chapterWatcher";
 import { imageOutputDescription, resolveMergeDimensions, DEFAULT_CHAPTER_MERGE_SETTINGS, DEFAULT_MERGE_HEIGHT_CAP, MERGE_HEIGHT_CAP_MAX, MERGE_HEIGHT_CAP_MIN, MERGE_WIDTH_MAX, MERGE_WIDTH_MIN, type ChapterMergeSettings, type ImageOutputConfig, type MergeDimensions } from "./imageMerging";
@@ -1177,9 +1180,19 @@ export async function listAnnouncementChannels(): Promise<AnnouncementChannel[]>
   return channels;
 }
 
+/** يفصل امتداد مرفق الغلاف من نوع المحتوى — ديسكورد يطلب الامتداد في الاسم. */
+function coverExtension(contentType: string): string {
+  if (contentType.includes("png")) return "png";
+  if (contentType.includes("webp")) return "webp";
+  if (contentType.includes("gif")) return "gif";
+  return "jpg";
+}
+
 /**
  * يرسل إعلان فصل جديد إلى القناة: سطر الفصل (GIF) رسالة مستقلة فوق
- * البطاقة، ثم بطاقة الإعلان — كما طلب المالك.
+ * البطاقة، ثم بطاقة Components V2 بنفس شكل بطاقة تتبع الفصول المعتمدة:
+ * العنوان واسم العمل مع غلاف مرفق، فاصل، الفصل/المصدر/الحالة، فاصل،
+ * زرا «الذهاب للفصل» و«صفحة العمل»، فاصل، سطر الفوتر ثم اسم البوت.
  */
 export async function sendChapterAnnouncement(
   channelId: string,
@@ -1193,39 +1206,109 @@ export async function sendChapterAnnouncement(
   if (announcement.dividerUrl) {
     await found.send({ content: announcement.dividerUrl });
   }
+
+  // غلاف العمل: مرفق مرفوع (الأضمن) وإلا الرابط المباشر إن وُجد.
+  // العنوان واسم العمل بعناوين ماركداون — العنوان أكبر من اسم العمل.
+  const headerText = [
+    announcement.titleLine ? `## ${announcement.titleLine}` : "",
+    announcement.mangaTitle ? `### ${announcement.mangaTitle.slice(0, 200)}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  let accessory: Raw | null = null;
+  let files: Array<{ attachment: Buffer; name: string; contentType: string }> | undefined;
+  if (announcement.cover) {
+    const name = `cover.${coverExtension(announcement.cover.contentType)}`;
+    accessory = { type: 11, media: { url: `attachment://${name}` }, description: announcement.mangaTitle };
+    files = [{ attachment: announcement.cover.bytes, name, contentType: announcement.cover.contentType }];
+  } else if (announcement.thumbnailUrl) {
+    accessory = { type: 11, media: { url: announcement.thumbnailUrl }, description: announcement.mangaTitle };
+  }
+  const headerBlock: Raw = accessory
+    ? { type: 9, components: [text(headerText)], accessory }
+    : { type: 9, components: [text(headerText)] };
+
+  const body: Raw[] = [headerBlock, separator(2), text(announcement.fields)];
+  // الزران: «الذهاب للفصل» يسارًا و«صفحة العمل» يمينًا (القراءة من اليمين).
+  const buttons: Raw[] = [];
+  if (announcement.chapterLink) {
+    buttons.push({ type: 2, style: 5, label: "الذهاب للفصل", url: announcement.chapterLink });
+  }
+  if (announcement.mangaLink) {
+    buttons.push({ type: 2, style: 5, label: "صفحة العمل", url: announcement.mangaLink });
+  }
+  if (buttons.length) {
+    body.push(separator());
+    body.push({ type: 1, components: buttons });
+  }
+  if (announcement.footerLine) {
+    body.push(separator());
+    body.push(text(announcement.footerLine.slice(0, 500)));
+  }
+  if (announcement.footerBrand) {
+    body.push(separator());
+    body.push(text(`-# ${announcement.footerBrand.slice(0, 80)}`));
+  }
+
   await found.send({
-    embeds: [
-      {
-        title: announcement.embed.title,
-        description: announcement.embed.description,
-        url: announcement.embed.url ?? undefined,
-        color: announcement.embed.color,
-        thumbnail: announcement.embed.thumbnailUrl ? { url: announcement.embed.thumbnailUrl } : undefined,
-        footer: announcement.embed.footerText ? { text: announcement.embed.footerText } : undefined,
-        timestamp: announcement.embed.timestampISO,
-      },
-    ],
+    flags: MessageFlags.IsComponentsV2 as MessageFlags.IsComponentsV2,
+    components: [raw({ type: 17, accent_color: ANNOUNCEMENT_COLOR, components: body }) as never],
+    files,
   });
 }
 
-/** يرسل إعلانًا تجريبيًا بأسماء ثابتة — ميزة المعاينة في اللوحة. */
-export async function sendTestChapterAnnouncement(): Promise<{
-  entry: AnnouncementEntry;
-  announcement: ChapterAnnouncement;
+/**
+ * رسالة تجريبية واقعية: تعمل على عمل حقيقي من مكتبة Suwayomi — عشوائيًا
+ * أو بالعمل الذي يختاره المالك — بآخر فصل له كما هو، فترى في القناة
+ * نفس شكل الإعلان الحقيقي تمامًا.
+ */
+export async function sendTestChapterAnnouncement(options: { mangaId?: number | null } = {}): Promise<{
+  mangaTitle: string;
+  sourceName: string;
+  chapterLabel: string;
+  paidLabel: string;
+  chapterLink: string | null;
+  mangaLink: string | null;
+  coverAttached: boolean;
+  dividerUrl: string | null;
 }> {
   const config = await loadChapterWatcherConfig();
-  const entry: AnnouncementEntry = {
-    mangaTitle: "العمل التجريبي (معاينة)",
-    sourceName: "المصدر التجريبي",
-    link: "https://example.com/chapter-test",
-    chapters: [{ name: "الفصل 123 — عينة تجريبية", number: 123, url: "" }],
-  };
-  const announcement = buildChapterAnnouncement(config, entry);
   if (!config.channelId) {
-    throw new Error("اضبط قناة الإعلانات وحفظ الإعدادات أولًا.");
+    throw new Error("اضبط قناة الإعلانات واحفظ الإعدادات أولًا.");
   }
+  const suwayomi = new SuwayomiClient(ENV.suwayomiBaseUrl, getUsableSuwayomiToken());
+  const library = await suwayomi.listLibraryManga();
+  if (!library.length) {
+    throw new Error("مكتبة Suwayomi فارغة — أضف أعمالًا إلى المكتبة في خادم السحب ثم أعد المحاولة.");
+  }
+  const manga = options.mangaId
+    ? library.find(item => item.id === options.mangaId)
+    : library[Math.floor(Math.random() * library.length)]!;
+  if (!manga) {
+    throw new Error("العمل المطلوب غير موجود في مكتبة Suwayomi — حدّث قائمة المكتبة.");
+  }
+  const chapters = await suwayomi.fetchMangaChaptersWithOrder(manga.id);
+  if (!chapters.length) {
+    throw new Error(`لا توجد فصول لـ «${manga.title}» بعد — جرّب عملًا آخر.`);
+  }
+  const sources = await listSources();
+  const source = sources.find(item => item.suwayomiSourceId === manga.sourceId);
+  const newest = chapters.reduce((latest, chapter) => ((chapter.sourceOrder ?? 0) >= (latest.sourceOrder ?? 0) ? chapter : latest));
+  const entry = buildLibraryAnnouncementEntry(manga, [newest], source, source?.name ?? manga.sourceId);
+  const cover = await suwayomi.fetchMangaThumbnail(manga.id).catch(() => null);
+  const announcement = buildChapterAnnouncement(config, entry, { cover });
   await sendChapterAnnouncement(config.channelId, announcement);
-  return { entry, announcement };
+  const newestEntry = entry.chapters[entry.chapters.length - 1]!;
+  return {
+    mangaTitle: entry.mangaTitle,
+    sourceName: entry.sourceName,
+    chapterLabel: chapterLabel(newestEntry),
+    paidLabel: isPaidChapter(newestEntry) ? "مدفوع" : "مجاني",
+    chapterLink: announcement.chapterLink,
+    mangaLink: announcement.mangaLink,
+    coverAttached: Boolean(cover),
+    dividerUrl: announcement.dividerUrl,
+  };
 }
 
 // ============================================================

@@ -1,13 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
   buildChapterAnnouncement,
+  buildLibraryAnnouncementEntry,
+  chapterLabel,
   CHAPTER_WATCHER_INTERVAL_MAX,
   CHAPTER_WATCHER_INTERVAL_MIN,
   DEFAULT_CHAPTER_WATCHER_CONFIG,
   detectNewChapters,
+  isPaidChapter,
   normalizeChapterWatcherConfig,
   renderAnnouncementTemplate,
   resolveChapterLink,
+  resolveMangaLink,
   type AnnouncementEntry,
 } from "./chapterWatcher";
 import type { SuwayomiWatchedChapter } from "./suwayomi";
@@ -20,7 +24,9 @@ const entry: AnnouncementEntry = {
   mangaTitle: "العمل",
   sourceName: "المصدر",
   link: "https://site.example/ch/9",
-  chapters: [{ name: "الفصل 9", number: 9, url: "https://site.example/ch/9" }],
+  mangaLink: "https://site.example/manga/1",
+  thumbnailUrl: "https://site.example/cover.jpg",
+  chapters: [{ name: "الفصل 9", number: 9, url: "https://site.example/ch/9", locked: false }],
 };
 
 describe("normalizeChapterWatcherConfig", () => {
@@ -64,26 +70,74 @@ describe("buildChapterAnnouncement", () => {
     channelId: "123",
   };
 
-  it("renders the divider and embed from templates", () => {
+  it("builds the fixed Components V2 card fields", () => {
     const announcement = buildChapterAnnouncement(config, entry, { now: new Date("2026-01-01T00:00:00Z") });
     expect(announcement.dividerUrl).toBe(DEFAULT_CHAPTER_WATCHER_CONFIG.dividerGifUrl);
-    expect(announcement.embed.title).toBe("🔔 فصل جديد من «العمل»");
-    expect(announcement.embed.description).toContain("**الفصل 9**");
-    expect(announcement.embed.description).toContain("المصدر: المصدر");
-    expect(announcement.embed.url).toBe("https://site.example/ch/9");
-    expect(announcement.embed.color).toBeDefined();
+    expect(announcement.titleLine).toBe("نزول فصل جديد");
+    expect(announcement.mangaTitle).toBe("العمل");
+    expect(announcement.fields).toContain("**الفصل:** 9");
+    expect(announcement.fields).toContain("**المصدر:** المصدر");
+    expect(announcement.fields).toContain("مجاني");
+    expect(announcement.chapterLink).toBe("https://site.example/ch/9");
+    expect(announcement.mangaLink).toBe("https://site.example/manga/1");
+    expect(announcement.footerBrand).toBe("ZEUS");
   });
 
-  it("merges multiple chapters into one announcement list", () => {
+  it("marks locked chapters as paid and falls back to the name without a number", () => {
+    const announcement = buildChapterAnnouncement(config, {
+      ...entry,
+      chapters: [{ name: "فصل خاص [premium]", number: null, url: "", locked: true }],
+    });
+    expect(announcement.fields).toContain("مدفوع");
+    expect(announcement.fields).toContain("**الفصل:** فصل خاص [premium]");
+  });
+
+  it("joins multiple chapter labels in one line", () => {
     const announcement = buildChapterAnnouncement(config, {
       ...entry,
       chapters: [
-        { name: "الفصل 8", number: 8, url: "" },
-        { name: "الفصل 9", number: 9, url: "" },
+        { name: "الفصل 8", number: 8, url: "", locked: false },
+        { name: "الفصل 9", number: 9, url: "", locked: false },
       ],
     });
-    expect(announcement.embed.description).toContain("• الفصل 8");
-    expect(announcement.embed.description).toContain("• الفصل 9");
+    expect(announcement.fields).toContain("**الفصل:** 8، 9");
+  });
+});
+
+describe("isPaidChapter", () => {
+  it("detects the lock flag and lock markers in the name", () => {
+    expect(isPaidChapter({ isLocked: true, name: "الفصل 5" })).toBe(true);
+    expect(isPaidChapter({ isLocked: false, name: "🔒 الفصل 5" })).toBe(true);
+    expect(isPaidChapter({ isLocked: null, name: "الفصل 5 [premium]" })).toBe(true);
+    expect(isPaidChapter({ isLocked: false, name: "الفصل 5" })).toBe(false);
+    expect(isPaidChapter({ name: "الفصل 5" })).toBe(false);
+  });
+});
+
+describe("chapterLabel", () => {
+  it("formats numbers and falls back to the name", () => {
+    expect(chapterLabel({ name: "الفصل 23", number: 23, url: "", locked: false })).toBe("23");
+    expect(chapterLabel({ name: "الفصل 23.5", number: 23.5, url: "", locked: false })).toBe("23.5");
+    expect(chapterLabel({ name: "فصل خاص", number: null, url: "", locked: false })).toBe("فصل خاص");
+  });
+});
+
+describe("buildLibraryAnnouncementEntry", () => {
+  it("resolves manga and chapter links against the source", () => {
+    const manga = { id: 1, title: "العمل", thumbnailUrl: "https://site.example/cover.jpg", url: "", realUrl: "https://site.example/manga/1" };
+    const source = { baseUrl: "https://site.example/" };
+    const result = buildLibraryAnnouncementEntry(manga, [chapter(9, 9, "الفصل 9")], source, "المصدر");
+    expect(result.mangaLink).toBe("https://site.example/manga/1");
+    expect(result.link).toBe("https://site.example/ch/9");
+    expect(result.sourceName).toBe("المصدر");
+    expect(result.thumbnailUrl).toBe("https://site.example/cover.jpg");
+    expect(result.chapters[0]?.locked).toBe(false);
+  });
+
+  it("resolves relative manga urls against the source base", () => {
+    const manga = { id: 1, title: "العمل", thumbnailUrl: null, url: "manga/1", realUrl: null };
+    const result = buildLibraryAnnouncementEntry(manga, [chapter(1, 1)], { baseUrl: "https://site.example" }, "S");
+    expect(result.mangaLink).toBe("https://site.example/manga/1");
   });
 });
 
@@ -134,5 +188,13 @@ describe("resolveChapterLink", () => {
 
   it("returns null without a usable url", () => {
     expect(resolveChapterLink({ ...chapter(1, 1), url: "", realUrl: null }, undefined)).toBeNull();
+  });
+});
+
+describe("resolveMangaLink", () => {
+  it("prefers the absolute real url then falls back to relative url on the source base", () => {
+    expect(resolveMangaLink({ url: "", realUrl: "https://real.example/manga/1" }, undefined)).toBe("https://real.example/manga/1");
+    expect(resolveMangaLink({ url: "manga/1", realUrl: "" }, { baseUrl: "https://site.example" })).toBe("https://site.example/manga/1");
+    expect(resolveMangaLink({ url: "", realUrl: null }, { baseUrl: "https://site.example" })).toBeNull();
   });
 });
