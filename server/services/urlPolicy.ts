@@ -42,6 +42,11 @@ export function normalizeHostname(hostname: string): string {
   // Naver's mobile host serves the same catalog as the desktop host the
   // extension and the registered source hostname use.
   if (normalized === "m.comic.naver.com") return "comic.naver.com";
+  // QQ كوميكس: نطاق سطح المكتب يخدم كتالوج النطاق الجوال المسجّل —
+  // السحب كله يجري من m.ac.qq.com.
+  if (normalized === "ac.qq.com") return "m.ac.qq.com";
+  // كوايكان: نطاق الجوال يخدم نفس كتالوج النطاق المسجّل.
+  if (normalized === "m.kuaikanmanhua.com") return "kuaikanmanhua.com";
   return normalized;
 }
 

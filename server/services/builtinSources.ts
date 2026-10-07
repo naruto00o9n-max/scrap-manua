@@ -36,6 +36,20 @@ export const BUILTIN_SOURCES: BuiltinSourceSpec[] = [
     lang: "en",
     notes: "مدمج داخل البوت: سحب مباشر عبر واجهة كوميكس الموقعة — يحتاج مادة تشفير تُلصق من لوحة التحكم مرة واحدة.",
   },
+  {
+    hostname: "m.ac.qq.com",
+    name: "QQ كوميكس",
+    baseUrl: "https://m.ac.qq.com",
+    lang: "zh",
+    notes: "مدمج داخل البوت: سحب مباشر لروابط الفصول من QQ كوميكس (ac.qq.com) — روابط سطح المكتب تُقبل وتُسحب من النطاق الجوال.",
+  },
+  {
+    hostname: "kuaikanmanhua.com",
+    name: "كوايكان مانها",
+    baseUrl: "https://kuaikanmanhua.com",
+    lang: "zh",
+    notes: "مدمج داخل البوت: سحب مباشر لروابط الفصول من كوايكان — صيغتا الجوال والويب (m.kuaikanmanhua.com تُقبل أيضًا).",
+  },
 ];
 
 export type BuiltinSourcePlanAction =

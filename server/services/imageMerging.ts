@@ -27,6 +27,14 @@ function pageDownloadReferer(parsed: URL): string | null {
   if (host === "webtoon-phinf.pstatic.net" || host.endsWith(".pstatic.net")) {
     return "https://www.webtoons.com/";
   }
+  // صور كوايكان على CDN كومكه ترفض الطلبات المجردة
+  if (host.endsWith(".kkmh.com")) {
+    return "https://kuaikanmanhua.com/";
+  }
+  // صور QQ كوميكس على acimg.cn — المرجع من الموقع نفسه
+  if (host.endsWith(".acimg.cn")) {
+    return "https://m.ac.qq.com/";
+  }
   return null;
 }
 // سقف ارتفاع الصورة المدمجة: الخوارزمية توزّع مجموع ارتفاع الصفحات بالتساوي

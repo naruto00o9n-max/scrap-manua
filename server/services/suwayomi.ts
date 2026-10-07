@@ -70,6 +70,24 @@ export type SuwayomiManga = {
   sourceId: string;
 };
 
+/** عمل في مكتبة Suwayomi — قائمة المراقبة لمراقب الفصول الجديدة. */
+export type LibraryManga = {
+  id: number;
+  title: string;
+  thumbnailUrl: string | null;
+  sourceId: string;
+};
+
+/** فصل بترتيبه الأصلي في الموقع — مرجع كشف الفصول الجديدة. */
+export type SuwayomiWatchedChapter = {
+  id: number;
+  name: string;
+  url: string;
+  realUrl: string | null;
+  chapterNumber?: number;
+  sourceOrder: number;
+};
+
 /** تفاصيل العمل الكاملة كما تعيده صفحة العمل في Suwayomi (وصف/مؤلف/حالة/تصنيفات). */
 export type SuwayomiMangaDetails = {
   id: number;
@@ -442,6 +460,32 @@ export class SuwayomiClient {
     const result = await this.request<{ fetchMangaAndChapters: { chapters: SuwayomiChapter[] } }>(
       "mutation FetchMangaAndChapters($input: FetchMangaAndChaptersInput!) { fetchMangaAndChapters(input: $input) { chapters { id name url realUrl chapterNumber manga { id title sourceId } } } }",
       { input: { id: mangaId, fetchManga: true, fetchChapters: true } },
+      timeoutMs,
+    );
+    return result.fetchMangaAndChapters.chapters;
+  }
+
+  /**
+   * أعمال المكتبة كلها (inLibrary=true) — قائمة المراقبة لمراقب الفصول
+   * الجديدة. صور الغلاف قد تكون مطلقة أو نسبية حسب الإضافة.
+   */
+  async listLibraryManga(timeoutMs = 20_000): Promise<LibraryManga[]> {
+    const result = await this.request<{ mangas: { nodes: Array<{ id: number; title: string; thumbnailUrl: string | null; sourceId: string }> } }>(
+      "query LibraryManga { mangas(condition: { inLibrary: true }) { nodes { id title thumbnailUrl sourceId } } }",
+      undefined,
+      timeoutMs,
+    );
+    return result.mangas.nodes;
+  }
+
+  /**
+   * جلب فصول العمل حيًا من الموقع عبر Suwayomi مع ترتيبها (sourceOrder) —
+   * الترتيب هو مرجع كشف الجديد: أي فصل أعلى من آخر مرصود يُعلن عنه.
+   */
+  async fetchMangaChaptersWithOrder(mangaId: number, timeoutMs = 60_000): Promise<SuwayomiWatchedChapter[]> {
+    const result = await this.request<{ fetchMangaAndChapters: { chapters: SuwayomiWatchedChapter[] } }>(
+      "mutation WatchFetchChapters($input: FetchMangaAndChaptersInput!) { fetchMangaAndChapters(input: $input) { chapters { id name url realUrl chapterNumber sourceOrder } } }",
+      { input: { id: mangaId, fetchManga: false, fetchChapters: true } },
       timeoutMs,
     );
     return result.fetchMangaAndChapters.chapters;

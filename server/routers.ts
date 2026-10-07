@@ -39,6 +39,20 @@ import { getScraperApiStatus, removeScraperApiKey, saveScraperApiKey } from "./s
 import { getComixMaterialStatus, removeComixMaterial, saveComixMaterial } from "./services/comixPage";
 import { syncSourcesFromSuwayomi } from "./services/sourceSync";
 import { SuwayomiClient } from "./services/suwayomi";
+import {
+  CHAPTER_WATCHER_INTERVAL_MAX,
+  CHAPTER_WATCHER_INTERVAL_MIN,
+  loadChapterWatcherConfig,
+  listWatchedLibrary,
+  runChapterWatcherCycle,
+  saveChapterWatcherConfig,
+} from "./services/chapterWatcher";
+import {
+  isDiscordBotReady,
+  listAnnouncementChannels,
+  sendTestChapterAnnouncement,
+} from "./services/discordBot";
+import { setWatchedMangaMuted } from "./db";
 import { ENV } from "./_core/env";
 import { GoogleDriveClient } from "./services/googleDrive";
 import { verifyPassword } from "./_core/auth";
@@ -191,6 +205,54 @@ export const appRouter = router({
       .input(z.object({ discordRoleId: z.string().regex(/^\d{16,22}$/), label: z.string().trim().min(1).max(120) }))
       .mutation(({ input }) => saveDiscordRole(input.discordRoleId, input.label)),
     remove: adminProcedure.input(z.object({ id: z.number().int().positive() })).mutation(({ input }) => removeDiscordRole(input.id)),
+  }),
+  // إعلانات الفصول الجديدة — مراقب مكتبة Suwayomi وقناة ديسكورد
+  chapterWatcher: router({
+    config: adminProcedure.query(async () => ({
+      config: await loadChapterWatcherConfig(),
+      botReady: isDiscordBotReady(),
+    })),
+    save: adminProcedure
+      .input(z.object({
+        enabled: z.boolean(),
+        channelId: z.string().regex(/^\d{0,25}$/),
+        intervalMinutes: z.number().int().min(CHAPTER_WATCHER_INTERVAL_MIN).max(CHAPTER_WATCHER_INTERVAL_MAX),
+        dividerGifUrl: z.string().url().max(500),
+        titleTemplate: z.string().trim().min(1).max(250),
+        descriptionTemplate: z.string().trim().min(1).max(1500),
+      }))
+      .mutation(async ({ input }) => saveChapterWatcherConfig(input)),
+    channels: adminProcedure.query(() => listAnnouncementChannels()),
+    // رسالة تجريبية حقيقية إلى القناة المضبوطة — لرؤية شكل الإعلان قبل تفعيله
+    test: adminProcedure.mutation(async () => {
+      const { announcement } = await sendTestChapterAnnouncement();
+      return {
+        title: announcement.embed.title,
+        description: announcement.embed.description,
+        dividerUrl: announcement.dividerUrl,
+      };
+    }),
+    // أعمال مكتبة Suwayomi مع حالة المتابعة والكتم — لإدارة المتابعة
+    library: adminProcedure.query(() => listWatchedLibrary()),
+    setMangaMuted: adminProcedure
+      .input(z.object({
+        mangaId: z.number().int().positive(),
+        title: z.string().trim().min(1).max(300),
+        sourceId: z.string().trim().min(1).max(128),
+        muted: z.boolean(),
+      }))
+      .mutation(async ({ input }) => {
+        await setWatchedMangaMuted(
+          { suwayomiMangaId: input.mangaId, title: input.title, sourceId: input.sourceId, thumbnailUrl: null },
+          input.muted
+        );
+        return { success: true } as const;
+      }),
+    // تشغيل دورة فحص فورية من اللوحة — ملخص ما جرى
+    runNow: adminProcedure.mutation(async () => {
+      const summary = await runChapterWatcherCycle();
+      return summary;
+    }),
   }),
   jobs: router({
     list: adminProcedure

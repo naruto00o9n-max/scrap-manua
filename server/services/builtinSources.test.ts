@@ -16,9 +16,14 @@ describe("planBuiltinSources", () => {
   });
 
   it("keeps already-registered hostnames untouched (any status)", () => {
-    const plan = planBuiltinSources(["page.kakao.com", "comix.to"]);
+    const plan = planBuiltinSources(["page.kakao.com", "comix.to", "m.ac.qq.com", "kuaikanmanhua.com"]);
     expect(plan.every(action => action.kind === "keep" && action.reason === "registered")).toBe(true);
-    expect(plan.map(action => action.spec.hostname)).toEqual(["page.kakao.com", "comix.to"]);
+    expect(plan.map(action => action.spec.hostname)).toEqual([
+      "page.kakao.com",
+      "comix.to",
+      "m.ac.qq.com",
+      "kuaikanmanhua.com",
+    ]);
   });
 
   it("respects the owner block list — a deleted site is never re-registered", () => {
@@ -34,7 +39,12 @@ describe("planBuiltinSources", () => {
   });
 
   it("normalizes www and letter case before comparing hostnames", () => {
-    const plan = planBuiltinSources(["WWW.Page.Kakao.COM", "WWW.Comix.TO"]);
+    const plan = planBuiltinSources([
+      "WWW.Page.Kakao.COM",
+      "WWW.Comix.TO",
+      "M.AC.QQ.COM",
+      "WWW.KuaikanManhua.COM",
+    ]);
     expect(plan.every(action => action.kind === "keep")).toBe(true);
   });
 });
