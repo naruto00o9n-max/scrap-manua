@@ -36,6 +36,25 @@ type IntegrationAlert = {
 };
 type Counter = { _id: string; seq: number };
 
+/**
+ * حالة متابعة عمل من مكتبة Suwayomi لمراقب الفصول الجديدة — آخر ترتيب
+ * فصل مرصود وميّة الإعلانات عنه، وآخر إعلان نُشر له.
+ */
+export type WatchedMangaState = {
+  suwayomiMangaId: number;
+  title: string;
+  sourceId: string;
+  thumbnailUrl: string | null;
+  /** أعلى sourceOrder مرصود — الجديد فوقه يُعلن. 0 = لم يُرصد بعد (أساس قادم). */
+  lastSourceOrder: number;
+  lastChapterName: string | null;
+  lastChapterId: number | null;
+  /** كتم العمل: لا إعلانات عن فصوله الجديدة. */
+  muted: boolean;
+  updatedAt: Date;
+  announcedAt: Date | null;
+};
+
 type Collections = {
   users: Collection<MongoDocument<User>>;
   contentSources: Collection<MongoDocument<ContentSource>>;
@@ -45,6 +64,7 @@ type Collections = {
   jobAttempts: Collection<MongoDocument<JobAttempt>>;
   integrationHealth: Collection<MongoDocument<IntegrationHealth>>;
   integrationAlerts: Collection<MongoDocument<IntegrationAlert>>;
+  watchedManga: Collection<MongoDocument<WatchedMangaState>>;
   counters: Collection<Counter>;
 };
 
@@ -107,6 +127,7 @@ function collections(db: Db): Collections {
     jobAttempts: db.collection("jobAttempts"),
     integrationHealth: db.collection("integrationHealth"),
     integrationAlerts: db.collection("integrationAlerts"),
+    watchedManga: db.collection("watchedManga"),
     counters: db.collection<Counter>("counters"),
   };
 }
@@ -126,6 +147,7 @@ async function ensureIndexes(db: Db): Promise<void> {
     c.integrationHealth.createIndex({ service: 1 }, { unique: true }),
     c.integrationAlerts.createIndex({ service: 1, createdAt: -1 }),
     c.integrationAlerts.createIndex({ service: 1, fingerprint: 1, createdAt: -1 }),
+    c.watchedManga.createIndex({ suwayomiMangaId: 1 }, { unique: true }),
   ]);
 }
 
@@ -746,4 +768,55 @@ export async function getDashboardSummary() {
     recentJobs: recentJobs.slice(0, 8),
     recentAlerts: recentAlerts.slice(0, 5),
   };
+}
+
+// ============================================================
+// متابعة الفصول الجديدة (مراقب المكتبة) — حالة كل عمل من Suwayomi
+// ============================================================
+
+export async function getWatchedMangaState(suwayomiMangaId: number): Promise<WatchedMangaState | undefined> {
+  const db = await requireDb();
+  const row = await collections(db).watchedManga.findOne({ suwayomiMangaId });
+  return row ? stripMongoId(row) as WatchedMangaState : undefined;
+}
+
+export async function listWatchedMangaStates(): Promise<WatchedMangaState[]> {
+  const db = await requireDb();
+  return (await collections(db).watchedManga.find().toArray()).map(row => stripMongoId(row) as WatchedMangaState);
+}
+
+/** يحفظ حالة متابعة (إنشاء/تحديث) — المفتاح معرّف العمل في Suwayomi. */
+export async function saveWatchedMangaState(state: WatchedMangaState): Promise<void> {
+  const db = await requireDb();
+  await collections(db).watchedManga.updateOne(
+    { suwayomiMangaId: state.suwayomiMangaId },
+    { $set: { ...state, updatedAt: now() } },
+    { upsert: true }
+  );
+}
+
+/** يحذف حالة متابعة لم يعد العمل موجودًا في المكتبة. */
+export async function deleteWatchedMangaState(suwayomiMangaId: number): Promise<void> {
+  const db = await requireDb();
+  await collections(db).watchedManga.deleteOne({ suwayomiMangaId });
+}
+
+/** يبدّل كتم العمل — ينشئ صفًا هيكليًا إن لم يُتابع بعد (الأساس يُبنى في الدورة القادمة). */
+export async function setWatchedMangaMuted(
+  manga: { suwayomiMangaId: number; title: string; sourceId: string; thumbnailUrl: string | null },
+  muted: boolean
+): Promise<void> {
+  const existing = await getWatchedMangaState(manga.suwayomiMangaId);
+  await saveWatchedMangaState({
+    suwayomiMangaId: manga.suwayomiMangaId,
+    title: manga.title,
+    sourceId: manga.sourceId,
+    thumbnailUrl: manga.thumbnailUrl,
+    lastSourceOrder: existing?.lastSourceOrder ?? 0,
+    lastChapterName: existing?.lastChapterName ?? null,
+    lastChapterId: existing?.lastChapterId ?? null,
+    muted,
+    updatedAt: now(),
+    announcedAt: existing?.announcedAt ?? null,
+  });
 }

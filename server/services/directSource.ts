@@ -1,6 +1,8 @@
 import { getSetting, setSetting } from "../db";
 import { fetchKakaoPageChapter } from "./kakaoPage";
 import { COMIX_HOSTS, fetchComixChapter, parseComixUrl } from "./comixPage";
+import { fetchQqAcChapter, isQqAcHost } from "./qqAcPage";
+import { fetchKuaikanChapter, isKuaikanHost } from "./kuaikanPage";
 
 // ============================================================
 // السحب المباشر بجلسة الموقع (كوكي تسجيل الدخول)
@@ -22,6 +24,10 @@ export const SUPPORTED_DIRECT_SOURCES = [
   "page.kakao.com",
   "comix.to",
   "comix.ws",
+  "m.ac.qq.com",
+  "ac.qq.com",
+  "kuaikanmanhua.com",
+  "m.kuaikanmanhua.com",
 ] as const;
 
 export type DirectSourceHostname = (typeof SUPPORTED_DIRECT_SOURCES)[number];
@@ -54,6 +60,10 @@ const DIRECT_SOURCE_MODES: Record<(typeof SUPPORTED_DIRECT_SOURCES)[number], Dir
   "page.kakao.com": "direct-first",
   "comix.to": "direct-first",
   "comix.ws": "direct-first",
+  "m.ac.qq.com": "direct-first",
+  "ac.qq.com": "direct-first",
+  "kuaikanmanhua.com": "direct-first",
+  "m.kuaikanmanhua.com": "direct-first",
 };
 
 export function directSourceMode(hostname: string | null | undefined): DirectSourceMode | null {
@@ -590,6 +600,40 @@ export async function probeDirectChapterPage(chapterUrl: string): Promise<Direct
       if (outcome.locked) return { mode: "locked", chapter: null };
       return { mode: "unknown", chapter: null, reason: outcome.message };
     }
+    // QQ كوميكس: صفحة الفصل تحمل بياناتها مشوشة بمفتاح من الصفحة نفسها،
+    // والفصل المدفوع يُحسم من canRead قبل أي محاولة صور.
+    if (isQqAcHost(host)) {
+      const outcome = await fetchQqAcChapter(chapterUrl);
+      if (outcome.ok) {
+        return {
+          mode: "free",
+          chapter: {
+            mangaTitle: outcome.mangaTitle,
+            chapterName: outcome.chapterName || "الفصل",
+            pages: outcome.pages,
+          },
+        };
+      }
+      if (outcome.locked) return { mode: "locked", chapter: null };
+      return { mode: "unknown", chapter: null, reason: outcome.message };
+    }
+    // كوايكان: حالة القارئ NUXT في الصفحة تحمل كل الصور — والفصل المدفوع
+    // يُحسم من علامات العرض قبل أي محاولة صور.
+    if (isKuaikanHost(host)) {
+      const outcome = await fetchKuaikanChapter(chapterUrl);
+      if (outcome.ok) {
+        return {
+          mode: "free",
+          chapter: {
+            mangaTitle: outcome.mangaTitle,
+            chapterName: outcome.chapterName || "الفصل",
+            pages: outcome.pages,
+          },
+        };
+      }
+      if (outcome.locked) return { mode: "locked", chapter: null };
+      return { mode: "unknown", chapter: null, reason: outcome.message };
+    }
     // بوابة العمر في WEBTOON تُتجاوز بكوكي الموقع نفسه — يُرسل مقدمًا دائمًا.
     const html = await fetchChapterHtml(chapterUrl, isWebtoonsHost(host) ? WEBTOONS_AGE_COOKIE : undefined);
     if (host === "wamanga.ru") {
@@ -700,6 +744,30 @@ export async function fetchDirectChapterWithSession(
   // نجاح يُرفض الفصل برسالة واضحة (بعض الفصول تشترى من التطبيق فقط).
   if (isComixHost(host)) {
     const outcome = await fetchComixChapter(chapterUrl);
+    if (outcome.ok) {
+      return {
+        mangaTitle: outcome.mangaTitle,
+        chapterName: outcome.chapterName || "الفصل",
+        pages: outcome.pages,
+      };
+    }
+    throw new DirectSourceError(outcome.message);
+  }
+  // QQ كوميكس وكوايكان بالجلسة: نفس مسار الفحص مع حقن كوكي الحساب —
+  // قد يفتح الفصول المشتراة في الحساب، وفشلها برسالة موجهة كما هي.
+  if (isQqAcHost(host)) {
+    const outcome = await fetchQqAcChapter(chapterUrl, cookie);
+    if (outcome.ok) {
+      return {
+        mangaTitle: outcome.mangaTitle,
+        chapterName: outcome.chapterName || "الفصل",
+        pages: outcome.pages,
+      };
+    }
+    throw new DirectSourceError(outcome.message);
+  }
+  if (isKuaikanHost(host)) {
+    const outcome = await fetchKuaikanChapter(chapterUrl, cookie);
     if (outcome.ok) {
       return {
         mangaTitle: outcome.mangaTitle,

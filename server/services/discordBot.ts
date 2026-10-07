@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   ActivityType,
+  ChannelType,
   Client,
   Events,
   GatewayIntentBits,
@@ -69,6 +70,13 @@ import { hostnameFromHomeUrl, syncSourcesFromSuwayomi } from "./sourceSync";
 import { SuwayomiClient, withTransientRetry } from "./suwayomi";
 import { UrlPolicyError } from "./urlPolicy";
 import { getUsableSuwayomiToken } from "./settings";
+import {
+  buildChapterAnnouncement,
+  loadChapterWatcherConfig,
+  startChapterWatcherLoop,
+  type AnnouncementEntry,
+  type ChapterAnnouncement,
+} from "./chapterWatcher";
 import { imageOutputDescription, resolveMergeDimensions, DEFAULT_CHAPTER_MERGE_SETTINGS, DEFAULT_MERGE_HEIGHT_CAP, MERGE_HEIGHT_CAP_MAX, MERGE_HEIGHT_CAP_MIN, MERGE_WIDTH_MAX, MERGE_WIDTH_MIN, type ChapterMergeSettings, type ImageOutputConfig, type MergeDimensions } from "./imageMerging";
 
 let client: Client | null = null;
@@ -1138,6 +1146,86 @@ async function deleteMessageContent(channelId: string, messageId: string) {
   const found = await client.channels.fetch(channelId);
   if (!found?.isTextBased() || !("messages" in found)) return;
   await found.messages.delete(messageId);
+}
+
+// ============================================================
+// إعلانات الفصول الجديدة (مراقب المكتبة) — الإرسال من عميل البوت
+// ============================================================
+
+export type AnnouncementChannel = { id: string; name: string; guildId: string; guildName: string };
+
+/** قنوات السيرفرات النصية التي يستطيع البوت الإعلان فيها — لقائمة اللوحة. */
+export async function listAnnouncementChannels(): Promise<AnnouncementChannel[]> {
+  if (!client?.isReady()) return [];
+  const channels: AnnouncementChannel[] = [];
+  try {
+    const guilds = Array.from(await client.guilds.fetch());
+    for (const [guildId] of guilds) {
+      const guild = await client.guilds.fetch(guildId).catch(() => null);
+      if (!guild) continue;
+      const guildChannels = await guild.channels.fetch().catch(() => null);
+      if (!guildChannels) continue;
+      for (const channel of Array.from(guildChannels.values())) {
+        if (!channel) continue;
+        if (channel.type !== ChannelType.GuildText && channel.type !== ChannelType.GuildAnnouncement) continue;
+        channels.push({ id: channel.id, name: channel.name, guildId, guildName: guild.name });
+      }
+    }
+  } catch (error) {
+    console.warn("[Discord] تعذر جمع قنوات الإعلانات:", error);
+  }
+  return channels;
+}
+
+/**
+ * يرسل إعلان فصل جديد إلى القناة: سطر الفصل (GIF) رسالة مستقلة فوق
+ * البطاقة، ثم بطاقة الإعلان — كما طلب المالك.
+ */
+export async function sendChapterAnnouncement(
+  channelId: string,
+  announcement: ChapterAnnouncement
+): Promise<void> {
+  if (!client?.isReady()) throw new Error("البوت غير متصل بعد — انتظر جهوزيته ثم أعد المحاولة.");
+  const found = await client.channels.fetch(channelId).catch(() => null);
+  if (!found?.isTextBased() || !("send" in found)) {
+    throw new Error("القناة غير متاحة للإرسال — تحقق من أن البوت عضو فيها ولديه صلاحية الإرسال.");
+  }
+  if (announcement.dividerUrl) {
+    await found.send({ content: announcement.dividerUrl });
+  }
+  await found.send({
+    embeds: [
+      {
+        title: announcement.embed.title,
+        description: announcement.embed.description,
+        url: announcement.embed.url ?? undefined,
+        color: announcement.embed.color,
+        thumbnail: announcement.embed.thumbnailUrl ? { url: announcement.embed.thumbnailUrl } : undefined,
+        footer: announcement.embed.footerText ? { text: announcement.embed.footerText } : undefined,
+        timestamp: announcement.embed.timestampISO,
+      },
+    ],
+  });
+}
+
+/** يرسل إعلانًا تجريبيًا بأسماء ثابتة — ميزة المعاينة في اللوحة. */
+export async function sendTestChapterAnnouncement(): Promise<{
+  entry: AnnouncementEntry;
+  announcement: ChapterAnnouncement;
+}> {
+  const config = await loadChapterWatcherConfig();
+  const entry: AnnouncementEntry = {
+    mangaTitle: "العمل التجريبي (معاينة)",
+    sourceName: "المصدر التجريبي",
+    link: "https://example.com/chapter-test",
+    chapters: [{ name: "الفصل 123 — عينة تجريبية", number: 123, url: "" }],
+  };
+  const announcement = buildChapterAnnouncement(config, entry);
+  if (!config.channelId) {
+    throw new Error("اضبط قناة الإعلانات وحفظ الإعدادات أولًا.");
+  }
+  await sendChapterAnnouncement(config.channelId, announcement);
+  return { entry, announcement };
 }
 
 // ============================================================
@@ -4300,6 +4388,8 @@ export async function startDiscordBot() {
         await new Promise(resolve => setTimeout(resolve, 30_000));
       }
     }
+    // حلقة مراقبة الفصول الجديدة — تلف على مكتبة Suwayomi وتعلن في القناة
+    startChapterWatcherLoop();
   });
   client.on(Events.InteractionCreate, async interaction => {
     try {
