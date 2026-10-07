@@ -218,20 +218,16 @@ export const appRouter = router({
         channelId: z.string().regex(/^\d{0,25}$/),
         intervalMinutes: z.number().int().min(CHAPTER_WATCHER_INTERVAL_MIN).max(CHAPTER_WATCHER_INTERVAL_MAX),
         dividerGifUrl: z.string().url().max(500),
-        titleTemplate: z.string().trim().min(1).max(250),
-        descriptionTemplate: z.string().trim().min(1).max(1500),
+        footerLineTemplate: z.string().trim().min(1).max(300),
+        footerBrand: z.string().trim().min(1).max(60),
       }))
       .mutation(async ({ input }) => saveChapterWatcherConfig(input)),
     channels: adminProcedure.query(() => listAnnouncementChannels()),
-    // رسالة تجريبية حقيقية إلى القناة المضبوطة — لرؤية شكل الإعلان قبل تفعيله
-    test: adminProcedure.mutation(async () => {
-      const { announcement } = await sendTestChapterAnnouncement();
-      return {
-        title: announcement.embed.title,
-        description: announcement.embed.description,
-        dividerUrl: announcement.dividerUrl,
-      };
-    }),
+    // رسالة تجريبية واقعية إلى القناة المضبوطة: عمل حقيقي من المكتبة
+    // (عشوائي أو باختيار المالك) بآخر فصل له — نفس شكل الإعلان الحقيقي
+    test: adminProcedure
+      .input(z.object({ mangaId: z.number().int().positive().optional().nullable() }).optional())
+      .mutation(async ({ input }) => sendTestChapterAnnouncement({ mangaId: input?.mangaId ?? null })),
     // أعمال مكتبة Suwayomi مع حالة المتابعة والكتم — لإدارة المتابعة
     library: adminProcedure.query(() => listWatchedLibrary()),
     setMangaMuted: adminProcedure

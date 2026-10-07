@@ -46,11 +46,11 @@ export default function Home() {
         <div className="hero-geometry" aria-hidden="true"><span /><span /><span /></div>
       </header>
 
-      <section className="-mt-7 relative z-20 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <section className="-mt-7 relative z-20 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {cards.map(card => <Card className="metric-card" key={card.title}><CardContent className="flex items-start justify-between p-5"><div><p className="text-xs font-semibold text-muted-foreground">{card.title}</p>{summary.isLoading ? <Skeleton className="mt-3 h-9 w-12" /> : <p className="mt-2 font-display text-4xl font-bold text-foreground">{card.value}</p>}<p className="mt-2 text-[11px] text-muted-foreground">{card.hint}</p></div><div className="metric-icon"><card.icon className="h-5 w-5" /></div></CardContent></Card>)}
       </section>
 
-      <section className="mt-8 grid gap-6 xl:grid-cols-[1.65fr_0.85fr]">
+      <section className="mt-8 grid grid-cols-1 gap-6 xl:grid-cols-[1.65fr_0.85fr]">
         <Card className="artdeco-card overflow-hidden"><CardContent className="p-0"><div className="section-title-row"><div><p className="eyebrow">سجل حي</p><h2>آخر الطلبات</h2></div><Link href="/jobs" className="text-xs font-bold text-primary transition-opacity hover:opacity-75">عرض السجل كاملًا</Link></div>
           <div className="overflow-x-auto"><table className="artdeco-table"><thead><tr><th>العضو</th><th>المصدر</th><th>الحالة</th><th>وقت الطلب</th><th /></tr></thead><tbody>{summary.isLoading ? <tr><td colSpan={5}><Skeleton className="h-10 w-full" /></td></tr> : data?.recentJobs.length ? data.recentJobs.map(({ job, sourceName }) => { const meta = statusMeta[job.status]; return <tr key={job.id}><td><p className="font-semibold text-foreground">{job.requestedByName}</p><p className="mt-1 max-w-48 truncate text-[11px] text-muted-foreground">{job.mangaTitle || job.canonicalUrl}</p></td><td className="text-muted-foreground">{sourceName || "غير معروف"}</td><td><Badge className={meta.className}>{meta.label}</Badge></td><td className="whitespace-nowrap text-xs text-muted-foreground">{dateLabel(job.createdAt)}</td><td>{job.googleDriveUrl ? <a href={job.googleDriveUrl} target="_blank" rel="noreferrer" className="inline-flex text-primary hover:opacity-70"><ExternalLink className="h-4 w-4" /></a> : null}</td></tr>}) : <tr><td colSpan={5}><div className="empty-row"><Archive className="h-5 w-5" /><span>لا توجد طلبات حتى الآن. ابدأ بتهيئة التكاملات والمصادر.</span></div></td></tr>}</tbody></table></div>
         </CardContent></Card>
