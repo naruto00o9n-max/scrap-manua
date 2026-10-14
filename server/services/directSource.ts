@@ -3,6 +3,7 @@ import { fetchKakaoPageChapter } from "./kakaoPage";
 import { COMIX_HOSTS, fetchComixChapter, parseComixUrl } from "./comixPage";
 import { fetchQqAcChapter, isQqAcHost } from "./qqAcPage";
 import { fetchKuaikanChapter, isKuaikanHost } from "./kuaikanPage";
+import { fetchMangashiChapter, isMangashiHost } from "./mangashiPage";
 
 // ============================================================
 // السحب المباشر بجلسة الموقع (كوكي تسجيل الدخول)
@@ -28,6 +29,7 @@ export const SUPPORTED_DIRECT_SOURCES = [
   "ac.qq.com",
   "kuaikanmanhua.com",
   "m.kuaikanmanhua.com",
+  "manga-shi.org",
 ] as const;
 
 export type DirectSourceHostname = (typeof SUPPORTED_DIRECT_SOURCES)[number];
@@ -64,6 +66,7 @@ const DIRECT_SOURCE_MODES: Record<(typeof SUPPORTED_DIRECT_SOURCES)[number], Dir
   "ac.qq.com": "direct-first",
   "kuaikanmanhua.com": "direct-first",
   "m.kuaikanmanhua.com": "direct-first",
+  "manga-shi.org": "direct-first",
 };
 
 export function directSourceMode(hostname: string | null | undefined): DirectSourceMode | null {
@@ -634,6 +637,23 @@ export async function probeDirectChapterPage(chapterUrl: string): Promise<Direct
       if (outcome.locked) return { mode: "locked", chapter: null };
       return { mode: "unknown", chapter: null, reason: outcome.message };
     }
+    // مانجا شي: صور القارئ مضمّنة في HTML القارئ نفسه (src لأول صفحة و
+    // data-src للبقية) والموقع بلا قفل معروف — الجالب يحسم كل شيء من الصفحة.
+    if (isMangashiHost(host)) {
+      const outcome = await fetchMangashiChapter(chapterUrl);
+      if (outcome.ok) {
+        return {
+          mode: "free",
+          chapter: {
+            mangaTitle: outcome.mangaTitle,
+            chapterName: outcome.chapterName || "الفصل",
+            pages: outcome.pages,
+          },
+        };
+      }
+      if (outcome.locked) return { mode: "locked", chapter: null };
+      return { mode: "unknown", chapter: null, reason: outcome.message };
+    }
     // بوابة العمر في WEBTOON تُتجاوز بكوكي الموقع نفسه — يُرسل مقدمًا دائمًا.
     const html = await fetchChapterHtml(chapterUrl, isWebtoonsHost(host) ? WEBTOONS_AGE_COOKIE : undefined);
     if (host === "wamanga.ru") {
@@ -768,6 +788,19 @@ export async function fetchDirectChapterWithSession(
   }
   if (isKuaikanHost(host)) {
     const outcome = await fetchKuaikanChapter(chapterUrl, cookie);
+    if (outcome.ok) {
+      return {
+        mangaTitle: outcome.mangaTitle,
+        chapterName: outcome.chapterName || "الفصل",
+        pages: outcome.pages,
+      };
+    }
+    throw new DirectSourceError(outcome.message);
+  }
+  // مانجا شي بالجلسة: الموقع بلا قفل معروف فالكوكي يُمرر كما هو إن وُجد
+  // (توثيق مستقبلي محتمل لباقات الموقع) ونفس الجالب يحسم النتيجة.
+  if (isMangashiHost(host)) {
+    const outcome = await fetchMangashiChapter(chapterUrl, cookie);
     if (outcome.ok) {
       return {
         mangaTitle: outcome.mangaTitle,

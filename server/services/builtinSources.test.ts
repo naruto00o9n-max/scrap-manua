@@ -16,13 +16,20 @@ describe("planBuiltinSources", () => {
   });
 
   it("keeps already-registered hostnames untouched (any status)", () => {
-    const plan = planBuiltinSources(["page.kakao.com", "comix.to", "m.ac.qq.com", "kuaikanmanhua.com"]);
+    const plan = planBuiltinSources([
+      "page.kakao.com",
+      "comix.to",
+      "m.ac.qq.com",
+      "kuaikanmanhua.com",
+      "manga-shi.org",
+    ]);
     expect(plan.every(action => action.kind === "keep" && action.reason === "registered")).toBe(true);
     expect(plan.map(action => action.spec.hostname)).toEqual([
       "page.kakao.com",
       "comix.to",
       "m.ac.qq.com",
       "kuaikanmanhua.com",
+      "manga-shi.org",
     ]);
   });
 
@@ -44,6 +51,7 @@ describe("planBuiltinSources", () => {
       "WWW.Comix.TO",
       "M.AC.QQ.COM",
       "WWW.KuaikanManhua.COM",
+      "WWW.Manga-Shi.ORG",
     ]);
     expect(plan.every(action => action.kind === "keep")).toBe(true);
   });
