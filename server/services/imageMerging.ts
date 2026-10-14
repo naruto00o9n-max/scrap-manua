@@ -35,6 +35,11 @@ function pageDownloadReferer(parsed: URL): string | null {
   if (host.endsWith(".acimg.cn")) {
     return "https://m.ac.qq.com/";
   }
+  // صور مانجا شي على الموقع نفسه — المرجع من أصلها تحوطًا لأي حماية
+  // روابط ساخنة مستقبلية (تعمل حاليًا بلا ترويسات)
+  if (host === "manga-shi.org" || host.endsWith(".manga-shi.org")) {
+    return "https://manga-shi.org/";
+  }
   return null;
 }
 // سقف ارتفاع الصورة المدمجة: الخوارزمية توزّع مجموع ارتفاع الصفحات بالتساوي

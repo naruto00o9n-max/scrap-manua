@@ -50,6 +50,13 @@ export const BUILTIN_SOURCES: BuiltinSourceSpec[] = [
     lang: "zh",
     notes: "مدمج داخل البوت: سحب مباشر لروابط الفصول من كوايكان — صيغتا الجوال والويب (m.kuaikanmanhua.com تُقبل أيضًا).",
   },
+  {
+    hostname: "manga-shi.org",
+    name: "Manga-Shi",
+    baseUrl: "https://manga-shi.org",
+    lang: "ru",
+    notes: "مدمج داخل البوت: سحب مباشر لروابط فصول مانجا شي — يُقبل رابط المجلد (tom-N) والفصول الجزئية (مثل glava-60-5) ورابط العمل وحده يُرفض برسالة تطلب رابط الفصل.",
+  },
 ];
 
 export type BuiltinSourcePlanAction =
